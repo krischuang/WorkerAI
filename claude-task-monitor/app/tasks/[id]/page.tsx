@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { StatusBadge } from "@/app/_components/StatusBadge";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
@@ -13,6 +13,27 @@ import {
   FormField,
   inputCls,
 } from "@/app/_components/ui";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface ServerUsage {
+  id: string;
+  name: string;
+  host: string;
+  claudeSessionPct: number | null;
+  claudeSessionResets: string | null;
+  claudeSessionResetsAt: string | null;
+  claudeWeekPct: number | null;
+  claudeWeekResets: string | null;
+  claudeWeekResetsAt: string | null;
+  claudeUsageFetchedAt: string | null;
+}
+
+interface ServerOption {
+  id: string;
+  name: string;
+  host: string;
+}
 
 interface ExecutionLog {
   id: string;
@@ -38,10 +59,67 @@ interface Task {
   createdAt: string;
   updatedAt: string;
   project: { id: string; name: string; priority: string };
+  server: ServerUsage | null;
   executionLogs: ExecutionLog[];
 }
 
+interface BlockInfo {
+  sessionPct: number;
+  weekPct: number;
+  sessionBlocked: boolean;
+  weekBlocked: boolean;
+  sessionResets: string | null;
+  weekResets: string | null;
+  nearestResetsAt: string | null;
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const THRESHOLD = 90;
+
+function pctColor(pct: number) {
+  if (pct >= THRESHOLD) return "bg-red-500";
+  if (pct >= 70) return "bg-amber-400";
+  return "bg-emerald-500";
+}
+
+function UsageBar({ label, pct, resets }: { label: string; pct: number; resets: string | null }) {
+  const color = pctColor(pct);
+  const blocked = pct >= THRESHOLD;
+  return (
+    <div>
+      <div className="flex justify-between items-baseline mb-1">
+        <span className="text-xs font-medium text-zinc-700">{label}</span>
+        <span className={`text-xs font-semibold ${blocked ? "text-red-600" : "text-zinc-600"}`}>
+          {pct}%
+        </span>
+      </div>
+      <div className="w-full bg-zinc-100 rounded-full h-2 mb-1">
+        <div
+          className={`h-2 rounded-full transition-all ${color}`}
+          style={{ width: `${Math.min(pct, 100)}%` }}
+        />
+      </div>
+      {resets && (
+        <p className="text-xs text-zinc-500">Resets {resets}</p>
+      )}
+    </div>
+  );
+}
+
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return "0:00:00";
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
 const STATUS_BUTTONS = [
+  { label: "Queued", status: "queued", color: "bg-violet-700 hover:bg-violet-800" },
   { label: "Running", status: "running", color: "bg-blue-700 hover:bg-blue-800" },
   { label: "Paused", status: "paused", color: "bg-amber-600 hover:bg-amber-700" },
   { label: "Completed", status: "completed", color: "bg-green-700 hover:bg-green-800" },
@@ -54,6 +132,17 @@ export default function TaskDetailPage() {
   const id = params.id as string;
 
   const [task, setTask] = useState<Task | null>(null);
+  const [servers, setServers] = useState<ServerOption[]>([]);
+  const [selectedServerId, setSelectedServerId] = useState<string>("");
+  const [assigningServer, setAssigningServer] = useState(false);
+
+  // Run state
+  const [runState, setRunState] = useState<"idle" | "sending" | "blocked" | "success" | "error">("idle");
+  const [blockInfo, setBlockInfo] = useState<BlockInfo | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [countdown, setCountdown] = useState<string>("");
+
+  // Modals
   const [showLogForm, setShowLogForm] = useState(false);
   const [showSummaryForm, setShowSummaryForm] = useState(false);
   const [logForm, setLogForm] = useState({
@@ -62,30 +151,116 @@ export default function TaskDetailPage() {
     errorMessage: "",
     outputSummary: "",
   });
-  const [summaryForm, setSummaryForm] = useState({
-    resultSummary: "",
-    nextAction: "",
-  });
+  const [summaryForm, setSummaryForm] = useState({ resultSummary: "", nextAction: "" });
+
+  // Keep track of auto-retry timer
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function loadTask() {
     fetch(`/api/tasks/${id}`)
       .then((r) => {
-        if (!r.ok) { router.push("/projects"); return null; }
+        if (!r.ok) { router.push("/tasks"); return null; }
         return r.json();
       })
-      .then((data) => {
+      .then((data: Task | null) => {
         if (!data) return;
         setTask(data);
         setSummaryForm({
           resultSummary: data.resultSummary ?? "",
           nextAction: data.nextAction ?? "",
         });
+        // Seed server picker with currently assigned server
+        if (data.server) setSelectedServerId(data.server.id);
       });
+  }
+
+  function loadServers() {
+    fetch("/api/servers")
+      .then((r) => r.json())
+      .then((data: ServerOption[]) => setServers(data));
   }
 
   useEffect(() => {
     loadTask();
+    loadServers();
   }, [id]);
+
+  // Countdown ticker when blocked
+  useEffect(() => {
+    if (runState !== "blocked" || !blockInfo?.nearestResetsAt) {
+      setCountdown("");
+      return;
+    }
+
+    const resetMs = new Date(blockInfo.nearestResetsAt).getTime();
+
+    const tick = () => {
+      const remaining = resetMs - Date.now();
+      setCountdown(formatCountdown(remaining));
+
+      if (remaining <= 0) {
+        // Reset time has passed — auto-retry
+        handleRun();
+      }
+    };
+
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [runState, blockInfo]);
+
+  // Cleanup retry timer on unmount
+  useEffect(() => () => {
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+  }, []);
+
+  async function assignServer() {
+    if (!selectedServerId) return;
+    setAssigningServer(true);
+    await fetch(`/api/tasks/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ serverId: selectedServerId }),
+    });
+    setAssigningServer(false);
+    setRunState("idle");
+    setBlockInfo(null);
+    loadTask();
+  }
+
+  async function handleRun() {
+    setRunState("sending");
+    setRunError(null);
+    setBlockInfo(null);
+
+    const res = await fetch(`/api/tasks/${id}/run`, { method: "POST" });
+    const data = await res.json();
+
+    if (!res.ok) {
+      setRunState("error");
+      setRunError(data.error ?? "Failed to run task");
+      return;
+    }
+
+    if (data.blocked) {
+      setRunState("blocked");
+      setBlockInfo({
+        sessionPct: data.sessionPct,
+        weekPct: data.weekPct,
+        sessionBlocked: data.sessionBlocked,
+        weekBlocked: data.weekBlocked,
+        sessionResets: data.sessionResets,
+        weekResets: data.weekResets,
+        nearestResetsAt: data.nearestResetsAt,
+      });
+      return;
+    }
+
+    if (data.success) {
+      setRunState("success");
+      loadTask();
+    }
+  }
 
   async function updateStatus(status: string) {
     await fetch(`/api/tasks/${id}/status`, {
@@ -121,12 +296,22 @@ export default function TaskDetailPage() {
 
   if (!task) return <LoadingState />;
 
+  const assignedServer = task.server;
+  const usageStale = assignedServer?.claudeUsageFetchedAt
+    ? Date.now() - new Date(assignedServer.claudeUsageFetchedAt).getTime() > 10 * 60 * 1000
+    : false;
+
+  const sessionPct = assignedServer?.claudeSessionPct ?? 0;
+  const weekPct = assignedServer?.claudeWeekPct ?? 0;
+  const usageBlocked = sessionPct >= THRESHOLD || weekPct >= THRESHOLD;
+
   return (
     <div className="p-8 max-w-4xl">
-      <BackLink href={`/projects/${task.project.id}`} label={task.project.name} />
+      <BackLink href="/tasks" label="Tasks" />
 
       <div className="flex items-start justify-between mb-6">
         <div>
+          <p className="text-xs text-zinc-500 mb-1">{task.project.name}</p>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">{task.title}</h1>
           {task.description && (
             <p className="text-sm text-zinc-700 mt-1 max-w-2xl">{task.description}</p>
@@ -141,11 +326,11 @@ export default function TaskDetailPage() {
       <div className="grid grid-cols-3 gap-3 mb-6">
         <div className="bg-white rounded-lg border border-zinc-200 p-3">
           <p className="text-xs text-zinc-600 font-medium mb-0.5">Type</p>
-          <p className="text-sm font-semibold text-zinc-900">{task.taskType}</p>
+          <p className="text-sm font-semibold text-zinc-900 capitalize">{task.taskType}</p>
         </div>
         <div className="bg-white rounded-lg border border-zinc-200 p-3">
           <p className="text-xs text-zinc-600 font-medium mb-0.5">Estimated Cost</p>
-          <p className="text-sm font-semibold text-zinc-900">{task.estimatedCostLevel}</p>
+          <p className="text-sm font-semibold text-zinc-900 capitalize">{task.estimatedCostLevel}</p>
         </div>
         <div className="bg-white rounded-lg border border-zinc-200 p-3">
           <p className="text-xs text-zinc-600 font-medium mb-0.5">Project Priority</p>
@@ -153,6 +338,148 @@ export default function TaskDetailPage() {
         </div>
       </div>
 
+      {/* ── Run on Server ───────────────────────────────────────────────────── */}
+      <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
+        <h2 className="font-semibold text-zinc-900 mb-4">Run on Server</h2>
+
+        {/* Server assignment row */}
+        <div className="flex gap-2 items-end mb-4">
+          <div className="flex-1">
+            <label className="block text-xs font-medium text-zinc-700 mb-1">Server</label>
+            <select
+              value={selectedServerId}
+              onChange={(e) => setSelectedServerId(e.target.value)}
+              className={inputCls}
+            >
+              <option value="">— select a server —</option>
+              {servers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.host})
+                </option>
+              ))}
+            </select>
+          </div>
+          <Btn
+            variant="secondary"
+            onClick={assignServer}
+            disabled={!selectedServerId || assigningServer || selectedServerId === assignedServer?.id}
+          >
+            {assigningServer ? "Saving…" : assignedServer ? "Change" : "Assign"}
+          </Btn>
+        </div>
+
+        {/* No server assigned */}
+        {!assignedServer && (
+          <p className="text-sm text-zinc-500">Assign a server to enable execution.</p>
+        )}
+
+        {/* Server assigned — show usage + run controls */}
+        {assignedServer && (
+          <>
+            {/* Usage meters */}
+            {assignedServer.claudeUsageFetchedAt ? (
+              <div className="space-y-3 mb-4">
+                {usageStale && (
+                  <p className="text-xs text-amber-600">
+                    Usage data is over 10 minutes old — refresh from the server page for accurate readings.
+                  </p>
+                )}
+                <UsageBar
+                  label="Current session"
+                  pct={sessionPct}
+                  resets={assignedServer.claudeSessionResets}
+                />
+                <UsageBar
+                  label="Current week (all models)"
+                  pct={weekPct}
+                  resets={assignedServer.claudeWeekResets}
+                />
+              </div>
+            ) : (
+              <p className="text-xs text-zinc-500 mb-4">
+                No usage data yet — visit the server page and refresh Claude usage first.
+              </p>
+            )}
+
+            {/* Run button / states */}
+            {runState === "idle" && (
+              <Btn
+                variant="primary"
+                onClick={handleRun}
+                disabled={usageBlocked}
+              >
+                {usageBlocked ? "Usage limit reached — cannot run" : "Run on Server"}
+              </Btn>
+            )}
+
+            {runState === "sending" && (
+              <Btn variant="primary" disabled>Sending to Claude…</Btn>
+            )}
+
+            {runState === "success" && (
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-emerald-700 font-medium">
+                  Task sent to Claude — status set to Running
+                </span>
+                <Btn variant="ghost" onClick={() => setRunState("idle")}>Run again</Btn>
+              </div>
+            )}
+
+            {runState === "error" && (
+              <div className="space-y-2">
+                <p className="text-sm text-red-700">{runError}</p>
+                <Btn variant="secondary" onClick={() => setRunState("idle")}>Retry</Btn>
+              </div>
+            )}
+
+            {runState === "blocked" && blockInfo && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-amber-600 font-semibold text-sm">Usage limit reached</span>
+                  <span className="text-xs text-zinc-500">— waiting for reset</span>
+                </div>
+
+                <div className="space-y-2">
+                  {blockInfo.sessionBlocked && (
+                    <div className="text-sm">
+                      <span className="text-zinc-700 font-medium">Session: </span>
+                      <span className="text-red-600 font-semibold">{blockInfo.sessionPct}%</span>
+                      {blockInfo.sessionResets && (
+                        <span className="text-zinc-500 ml-2">resets {blockInfo.sessionResets}</span>
+                      )}
+                    </div>
+                  )}
+                  {blockInfo.weekBlocked && (
+                    <div className="text-sm">
+                      <span className="text-zinc-700 font-medium">Week: </span>
+                      <span className="text-red-600 font-semibold">{blockInfo.weekPct}%</span>
+                      {blockInfo.weekResets && (
+                        <span className="text-zinc-500 ml-2">resets {blockInfo.weekResets}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {blockInfo.nearestResetsAt && (
+                  <div className="flex items-center gap-3 pt-1">
+                    <div>
+                      <p className="text-xs text-zinc-500 mb-0.5">Auto-running in</p>
+                      <p className="text-xl font-mono font-semibold text-zinc-900">{countdown}</p>
+                    </div>
+                    <Btn variant="ghost" onClick={handleRun}>Retry now</Btn>
+                  </div>
+                )}
+
+                {!blockInfo.nearestResetsAt && (
+                  <Btn variant="secondary" onClick={handleRun}>Retry</Btn>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* ── Execution Controls ──────────────────────────────────────────────── */}
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
         <h2 className="font-semibold text-zinc-900 mb-3">Execution Controls</h2>
         <div className="flex flex-wrap gap-2">
@@ -166,15 +493,12 @@ export default function TaskDetailPage() {
               Mark {label}
             </button>
           ))}
-          <Btn variant="ghost" onClick={() => setShowLogForm(true)}>
-            + Add Log
-          </Btn>
-          <Btn variant="ghost" onClick={() => setShowSummaryForm(true)}>
-            Save Result
-          </Btn>
+          <Btn variant="ghost" onClick={() => setShowLogForm(true)}>+ Add Log</Btn>
+          <Btn variant="ghost" onClick={() => setShowSummaryForm(true)}>Save Result</Btn>
         </div>
       </section>
 
+      {/* ── Result / Next Action ─────────────────────────────────────────────── */}
       {(task.resultSummary || task.nextAction) && (
         <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6 space-y-4">
           {task.resultSummary && (
@@ -196,6 +520,7 @@ export default function TaskDetailPage() {
         </section>
       )}
 
+      {/* ── Execution Logs ───────────────────────────────────────────────────── */}
       <section>
         <h2 className="font-semibold text-zinc-900 mb-3">
           Execution Logs ({task.executionLogs.length})
@@ -237,6 +562,7 @@ export default function TaskDetailPage() {
         )}
       </section>
 
+      {/* ── Add Log Modal ────────────────────────────────────────────────────── */}
       {showLogForm && (
         <Modal title="Add Execution Log" onClose={() => setShowLogForm(false)} size="lg">
           <form onSubmit={handleAddLog} className="space-y-4">
@@ -277,9 +603,7 @@ export default function TaskDetailPage() {
               />
             </FormField>
             <ModalActions>
-              <Btn type="submit" variant="primary" className="flex-1">
-                Save Log
-              </Btn>
+              <Btn type="submit" variant="primary" className="flex-1">Save Log</Btn>
               <Btn type="button" variant="secondary" className="flex-1" onClick={() => setShowLogForm(false)}>
                 Cancel
               </Btn>
@@ -288,6 +612,7 @@ export default function TaskDetailPage() {
         </Modal>
       )}
 
+      {/* ── Result Summary Modal ─────────────────────────────────────────────── */}
       {showSummaryForm && (
         <Modal title="Result Summary & Next Action" onClose={() => setShowSummaryForm(false)} size="lg">
           <form onSubmit={handleSaveSummary} className="space-y-4">
@@ -310,9 +635,7 @@ export default function TaskDetailPage() {
               />
             </FormField>
             <ModalActions>
-              <Btn type="submit" variant="primary" className="flex-1">
-                Save
-              </Btn>
+              <Btn type="submit" variant="primary" className="flex-1">Save</Btn>
               <Btn type="button" variant="secondary" className="flex-1" onClick={() => setShowSummaryForm(false)}>
                 Cancel
               </Btn>

@@ -22,6 +22,7 @@ enum Priority {
 
 enum TaskStatus {
   pending
+  queued
   running
   paused
   completed
@@ -57,6 +58,8 @@ model Task {
   id                 String         @id @default(cuid())
   projectId          String
   project            Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  serverId           String?
+  server             Server?        @relation(fields: [serverId], references: [id], onDelete: SetNull)
   title              String
   description        String?
   priority           Priority       @default(P3)
@@ -106,6 +109,17 @@ model Server {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
   commandLogs   ServerCommandLog[]
+  tasks         Task[]
+
+  // Claude usage — persisted from last successful tmux capture
+  claudeSessionPct      Float?
+  claudeSessionResets   String?    // Sydney timezone e.g. "Jun 10, 1:10 am (Sydney)"
+  claudeSessionResetsAt DateTime?  // UTC datetime of session reset (for countdown)
+  claudeWeekPct         Float?
+  claudeWeekResets      String?    // Sydney timezone
+  claudeWeekResetsAt    DateTime?  // UTC datetime of week reset (for countdown)
+  claudeUsageRaw        String?    // raw tmux pane text
+  claudeUsageFetchedAt  DateTime?
 }
 
 model ServerCommandLog {
