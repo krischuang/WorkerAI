@@ -1,0 +1,263 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { StatusBadge } from "@/app/_components/StatusBadge";
+import { PriorityBadge } from "@/app/_components/PriorityBadge";
+import {
+  PageHeader,
+  EmptyState,
+  LoadingState,
+  Modal,
+  Btn,
+  ModalActions,
+  FormField,
+  inputCls,
+} from "@/app/_components/ui";
+
+interface Project {
+  id: string;
+  name: string;
+  priority: string;
+}
+
+interface Task {
+  id: string;
+  title: string;
+  description: string | null;
+  priority: string;
+  status: string;
+  taskType: string;
+  estimatedCostLevel: string;
+  createdAt: string;
+  project: { name: string; priority: string };
+  _count: { executionLogs: number };
+}
+
+const PRIORITIES = ["P1", "P2", "P3", "P4"];
+const TASK_TYPES = ["coding", "research", "writing", "review", "maintenance"];
+const COST_LEVELS = ["low", "medium", "high"];
+const STATUS_FILTERS = ["all", "pending", "queued", "running", "paused", "completed", "failed"];
+
+const defaultForm = {
+  projectId: "",
+  title: "",
+  description: "",
+  priority: "P3",
+  taskType: "coding",
+  estimatedCostLevel: "medium",
+};
+
+export default function TasksPage() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(defaultForm);
+  const [submitting, setSubmitting] = useState(false);
+
+  function loadTasks(status?: string) {
+    const params = status && status !== "all" ? `?status=${status}` : "";
+    fetch(`/api/tasks${params}`)
+      .then((r) => r.json())
+      .then((data) => {
+        setTasks(data);
+        setLoading(false);
+      });
+  }
+
+  function loadProjects() {
+    fetch("/api/projects")
+      .then((r) => r.json())
+      .then((data: Project[]) => {
+        setProjects(data);
+        if (data.length > 0) {
+          setForm((f) => ({ ...f, projectId: f.projectId || data[0].id }));
+        }
+      });
+  }
+
+  useEffect(() => {
+    loadTasks(statusFilter);
+    loadProjects();
+  }, []);
+
+  function handleFilterChange(status: string) {
+    setStatusFilter(status);
+    loadTasks(status);
+  }
+
+  function openForm() {
+    setForm({ ...defaultForm, projectId: projects[0]?.id ?? "" });
+    setShowForm(true);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    await fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form),
+    });
+    setSubmitting(false);
+    setShowForm(false);
+    loadTasks(statusFilter);
+  }
+
+  if (loading) return <LoadingState />;
+
+  return (
+    <div className="p-8 max-w-5xl">
+      <PageHeader
+        title="Tasks"
+        subtitle="All tasks across every project"
+        action={
+          <Btn variant="primary" onClick={openForm} disabled={projects.length === 0}>
+            + New Task
+          </Btn>
+        }
+      />
+
+      {/* Status filter tabs */}
+      <div className="flex gap-1 mb-6 flex-wrap">
+        {STATUS_FILTERS.map((s) => (
+          <button
+            key={s}
+            onClick={() => handleFilterChange(s)}
+            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${
+              statusFilter === s
+                ? "bg-zinc-900 text-white"
+                : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+            }`}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+
+      {tasks.length === 0 ? (
+        <EmptyState
+          message={
+            statusFilter !== "all"
+              ? `No ${statusFilter} tasks found.`
+              : "Create your first task to get started."
+          }
+        />
+      ) : (
+        <div className="space-y-2">
+          {tasks.map((task) => (
+            <Link
+              key={task.id}
+              href={`/tasks/${task.id}`}
+              className="block bg-white border border-zinc-200 rounded-lg px-5 py-4 hover:border-zinc-300 hover:shadow-sm transition-all"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium text-zinc-900 truncate">{task.title}</p>
+                  <p className="text-sm text-zinc-600 mt-0.5">
+                    {task.project.name}
+                    <span className="text-zinc-400 mx-1.5">·</span>
+                    <span className="capitalize">{task.taskType}</span>
+                    {task._count.executionLogs > 0 && (
+                      <>
+                        <span className="text-zinc-400 mx-1.5">·</span>
+                        {task._count.executionLogs} log{task._count.executionLogs !== 1 ? "s" : ""}
+                      </>
+                    )}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <PriorityBadge priority={task.priority} />
+                  <StatusBadge status={task.status} />
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {showForm && (
+        <Modal title="New Task" onClose={() => setShowForm(false)} size="lg">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <FormField label="Project" required>
+              <select
+                required
+                value={form.projectId}
+                onChange={(e) => setForm({ ...form, projectId: e.target.value })}
+                className={inputCls}
+              >
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    [{p.priority}] {p.name}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+
+            <FormField label="Title" required>
+              <input
+                required
+                autoFocus
+                value={form.title}
+                onChange={(e) => setForm({ ...form, title: e.target.value })}
+                placeholder="e.g. Build tarot card generator"
+                className={inputCls}
+              />
+            </FormField>
+
+            <FormField label="Description">
+              <textarea
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                rows={3}
+                placeholder="Details about this task…"
+                className={inputCls}
+              />
+            </FormField>
+
+            <div className="grid grid-cols-3 gap-3">
+              <FormField label="Priority">
+                <select
+                  value={form.priority}
+                  onChange={(e) => setForm({ ...form, priority: e.target.value })}
+                  className={inputCls}
+                >
+                  {PRIORITIES.map((p) => <option key={p}>{p}</option>)}
+                </select>
+              </FormField>
+              <FormField label="Type">
+                <select
+                  value={form.taskType}
+                  onChange={(e) => setForm({ ...form, taskType: e.target.value })}
+                  className={inputCls}
+                >
+                  {TASK_TYPES.map((t) => <option key={t}>{t}</option>)}
+                </select>
+              </FormField>
+              <FormField label="Cost">
+                <select
+                  value={form.estimatedCostLevel}
+                  onChange={(e) => setForm({ ...form, estimatedCostLevel: e.target.value })}
+                  className={inputCls}
+                >
+                  {COST_LEVELS.map((c) => <option key={c}>{c}</option>)}
+                </select>
+              </FormField>
+            </div>
+
+            <ModalActions>
+              <Btn type="button" variant="secondary" onClick={() => setShowForm(false)}>
+                Cancel
+              </Btn>
+              <Btn type="submit" variant="primary" disabled={submitting}>
+                {submitting ? "Creating…" : "Create Task"}
+              </Btn>
+            </ModalActions>
+          </form>
+        </Modal>
+      )}
+    </div>
+  );
+}
