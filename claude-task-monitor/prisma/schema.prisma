@@ -1,0 +1,135 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ProjectStatus {
+  active
+  paused
+  archived
+}
+
+enum Priority {
+  P1
+  P2
+  P3
+  P4
+}
+
+enum TaskStatus {
+  pending
+  running
+  paused
+  completed
+  failed
+}
+
+enum CostLevel {
+  low
+  medium
+  high
+}
+
+enum TaskType {
+  coding
+  research
+  writing
+  review
+  maintenance
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  priority    Priority      @default(P3)
+  status      ProjectStatus @default(active)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  tasks       Task[]
+}
+
+model Task {
+  id                 String         @id @default(cuid())
+  projectId          String
+  project            Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title              String
+  description        String?
+  priority           Priority       @default(P3)
+  status             TaskStatus     @default(pending)
+  estimatedCostLevel CostLevel      @default(medium)
+  taskType           TaskType       @default(coding)
+  resultSummary      String?
+  nextAction         String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  executionLogs      ExecutionLog[]
+}
+
+model ExecutionLog {
+  id            String     @id @default(cuid())
+  taskId        String
+  task          Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  startedAt     DateTime   @default(now())
+  finishedAt    DateTime?
+  status        TaskStatus
+  logText       String?
+  errorMessage  String?
+  outputSummary String?
+  createdAt     DateTime   @default(now())
+}
+
+enum ServerStatus {
+  unknown
+  connected
+  failed
+}
+
+enum CommandStatus {
+  success
+  failed
+}
+
+model Server {
+  id            String        @id @default(cuid())
+  name          String
+  host          String
+  username      String
+  port          Int           @default(22)
+  sshKeyPath    String
+  status        ServerStatus  @default(unknown)
+  lastCheckedAt DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  commandLogs   ServerCommandLog[]
+}
+
+model ServerCommandLog {
+  id           String        @id @default(cuid())
+  serverId     String
+  server       Server        @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  command      String
+  status       CommandStatus
+  output       String?
+  errorMessage String?
+  startedAt    DateTime      @default(now())
+  finishedAt   DateTime?
+  createdAt    DateTime      @default(now())
+}
+
+model DailyReport {
+  id             String   @id @default(cuid())
+  date           DateTime @default(now())
+  completedCount Int      @default(0)
+  failedCount    Int      @default(0)
+  runningCount   Int      @default(0)
+  pendingCount   Int      @default(0)
+  reportText     String?
+  topProjectId   String?
+  topProjectName String?
+  createdAt      DateTime @default(now())
+}
