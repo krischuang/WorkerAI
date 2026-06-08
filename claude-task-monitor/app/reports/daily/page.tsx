@@ -1,0 +1,134 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { PageHeader, Btn } from "@/app/_components/ui";
+
+interface DailyReport {
+  id: string;
+  date: string;
+  completedCount: number;
+  failedCount: number;
+  runningCount: number;
+  pendingCount: number;
+  reportText: string | null;
+  topProjectName: string | null;
+  createdAt: string;
+}
+
+export default function DailyReportPage() {
+  const [reports, setReports] = useState<DailyReport[]>([]);
+  const [selected, setSelected] = useState<DailyReport | null>(null);
+  const [generating, setGenerating] = useState(false);
+
+  function loadReports() {
+    fetch("/api/reports/daily")
+      .then((r) => r.json())
+      .then((data) => {
+        setReports(data);
+        if (data.length > 0 && !selected) setSelected(data[0]);
+      });
+  }
+
+  useEffect(() => {
+    loadReports();
+  }, []);
+
+  async function generateReport() {
+    setGenerating(true);
+    const res = await fetch("/api/reports/daily", { method: "POST" });
+    const report = await res.json();
+    setGenerating(false);
+    setReports((prev) => [report, ...prev]);
+    setSelected(report);
+  }
+
+  return (
+    <div className="p-8 max-w-5xl">
+      <PageHeader
+        title="Daily Report"
+        action={
+          <Btn variant="primary" disabled={generating} onClick={generateReport}>
+            {generating ? "Generating…" : "Generate Today's Report"}
+          </Btn>
+        }
+      />
+
+      {selected && (
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
+            <p className="text-2xl font-bold tracking-tight text-green-700">{selected.completedCount}</p>
+            <p className="text-xs text-green-700 mt-0.5 font-medium">Completed</p>
+          </div>
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center">
+            <p className="text-2xl font-bold tracking-tight text-blue-700">{selected.runningCount}</p>
+            <p className="text-xs text-blue-700 mt-0.5 font-medium">Running</p>
+          </div>
+          <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center">
+            <p className="text-2xl font-bold tracking-tight text-red-700">{selected.failedCount}</p>
+            <p className="text-xs text-red-700 mt-0.5 font-medium">Failed</p>
+          </div>
+          <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 text-center">
+            <p className="text-2xl font-bold tracking-tight text-zinc-700">{selected.pendingCount}</p>
+            <p className="text-xs text-zinc-700 mt-0.5 font-medium">Queued</p>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-4 gap-6">
+        <div className="col-span-1">
+          <p className="text-xs font-semibold text-zinc-600 uppercase tracking-wide mb-3">
+            History
+          </p>
+          <ul className="space-y-1">
+            {reports.map((r) => (
+              <li key={r.id}>
+                <button
+                  onClick={() => setSelected(r)}
+                  className={`w-full text-left text-sm px-3 py-2 rounded-lg transition-colors ${
+                    selected?.id === r.id
+                      ? "bg-zinc-900 text-white font-medium"
+                      : "text-zinc-700 hover:bg-zinc-100"
+                  }`}
+                >
+                  {new Date(r.date).toLocaleDateString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </button>
+              </li>
+            ))}
+            {reports.length === 0 && (
+              <p className="text-xs text-zinc-600">No reports yet.</p>
+            )}
+          </ul>
+        </div>
+
+        <div className="col-span-3">
+          {selected?.reportText ? (
+            <div className="bg-white rounded-xl border border-zinc-200 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="font-semibold text-zinc-900">
+                  {new Date(selected.date).toDateString()}
+                </h2>
+                {selected.topProjectName && (
+                  <span className="text-xs bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-1 rounded-full font-medium">
+                    Top: {selected.topProjectName}
+                  </span>
+                )}
+              </div>
+              <pre className="text-sm text-zinc-800 whitespace-pre-wrap font-sans leading-relaxed">
+                {selected.reportText}
+              </pre>
+            </div>
+          ) : (
+            <div className="bg-white rounded-xl border border-zinc-200 p-10 text-center">
+              <p className="text-sm text-zinc-600">
+                Click &ldquo;Generate Today&apos;s Report&rdquo; to create a report from current task data.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
