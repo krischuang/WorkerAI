@@ -2,7 +2,25 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import { BackLink, LoadingState, Modal, Btn, ModalActions, FormField, inputCls } from "@/app/_components/ui";
+
+interface ClaudeUsageParsed {
+  sessionPct?: number;
+  sessionResets?: string;
+  weekPct?: number;
+  weekResets?: string;
+}
+
+type ClaudeUsageStatus = "ok" | "auth_required" | "rate_limited" | "offline" | "error";
+
+interface UsageData {
+  success: boolean;
+  status: ClaudeUsageStatus;
+  rawOutput: string;
+  parsed: ClaudeUsageParsed;
+  error?: string;
+}
 
 interface CommandLog {
   id: string;
@@ -25,6 +43,13 @@ interface Server {
   status: "unknown" | "connected" | "failed";
   lastCheckedAt: string | null;
   commandLogs: CommandLog[];
+  // Persisted Claude usage
+  claudeSessionPct: number | null;
+  claudeSessionResets: string | null;
+  claudeWeekPct: number | null;
+  claudeWeekResets: string | null;
+  claudeUsageRaw: string | null;
+  claudeUsageFetchedAt: string | null;
 }
 
 interface CommandOutput {
@@ -83,6 +108,12 @@ export default function ServerDetailPage() {
     message: string;
   } | null>(null);
 
+  // Claude Usage state
+  const [usageData, setUsageData] = useState<UsageData | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageFetchedAt, setUsageFetchedAt] = useState<Date | null>(null);
+  const usageAutoFetchedRef = useRef(false);
+
   // Terminal state
   const [termInput, setTermInput] = useState("");
   const [termRunning, setTermRunning] = useState(false);
@@ -111,12 +142,56 @@ export default function ServerDetailPage() {
           port: String(data.port),
           sshKeyPath: data.sshKeyPath,
         });
+        // Seed usage display from persisted DB fields (no wait needed on page load)
+        if (data.claudeUsageFetchedAt && !usageAutoFetchedRef.current) {
+          setUsageData({
+            success: true,
+            status: "ok",
+            rawOutput: data.claudeUsageRaw ?? "",
+            parsed: {
+              sessionPct:    data.claudeSessionPct ?? undefined,
+              sessionResets: data.claudeSessionResets ?? undefined,
+              weekPct:       data.claudeWeekPct ?? undefined,
+              weekResets:    data.claudeWeekResets ?? undefined,
+            },
+          });
+          setUsageFetchedAt(new Date(data.claudeUsageFetchedAt));
+        }
       });
   }, [id, router]);
 
   useEffect(() => {
     loadServer();
   }, [loadServer]);
+
+  // Auto-fetch Claude usage once if there is no persisted data yet
+  useEffect(() => {
+    if (server?.status === "connected" && !usageAutoFetchedRef.current && !server.claudeUsageFetchedAt) {
+      usageAutoFetchedRef.current = true;
+      fetchClaudeUsage();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server?.status]);
+
+  async function fetchClaudeUsage() {
+    setUsageLoading(true);
+    try {
+      const res = await fetch(`/api/servers/${id}/claude-usage`, { method: "POST" });
+      const result: UsageData = await res.json();
+      setUsageData(result);
+      setUsageFetchedAt(new Date());
+    } catch {
+      setUsageData({
+        success: false,
+        status: "error",
+        rawOutput: "",
+        parsed: {},
+        error: "Request failed — check the server connection.",
+      });
+    } finally {
+      setUsageLoading(false);
+    }
+  }
 
   useEffect(() => {
     termBottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -243,6 +318,7 @@ export default function ServerDetailPage() {
 
   const promptLabel = `${server.username}@${server.host}`;
 
+
   return (
     <div className="p-8 max-w-4xl">
       <BackLink href="/servers" label="Servers" />
@@ -263,8 +339,15 @@ export default function ServerDetailPage() {
           <Btn variant="secondary" size="sm" onClick={() => setShowEditForm(true)}>
             Edit
           </Btn>
+          <Link
+            href={`/servers/${id}/terminal`}
+            className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-100 hover:bg-zinc-700 transition-colors border border-zinc-700"
+          >
+            <span className="text-green-400 text-xs">▶</span>
+            Terminal
+          </Link>
           <Btn variant="primary" disabled={connecting} onClick={testConnection}>
-            {connecting ? "Connecting…" : "Test SSH Connection"}
+            {connecting ? "Connecting…" : "Test SSH"}
           </Btn>
         </div>
       </div>
@@ -281,6 +364,116 @@ export default function ServerDetailPage() {
           {connectionResult.message}
         </div>
       )}
+
+      {/* ── Claude Usage ── */}
+      <section className="mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold text-zinc-900">Claude Usage</h2>
+          <div className="flex items-center gap-3">
+            {usageFetchedAt && (
+              <span className="text-xs text-zinc-500">
+                fetched {usageFetchedAt.toLocaleTimeString()}
+              </span>
+            )}
+            <Btn
+              variant="secondary"
+              size="sm"
+              disabled={usageLoading}
+              onClick={fetchClaudeUsage}
+            >
+              {usageLoading ? "Fetching…" : "Refresh"}
+            </Btn>
+          </div>
+        </div>
+
+        {/* Status banners */}
+        {usageData && !usageData.success && usageData.status === "auth_required" && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3 text-sm text-amber-800">
+            <span className="font-semibold">Claude CLI is not authenticated.</span>{" "}
+            SSH in and run <code className="font-mono bg-amber-100 px-1 rounded">claude login</code>.
+          </div>
+        )}
+        {usageData && !usageData.success && usageData.status === "offline" && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3 text-sm text-amber-800">
+            <p className="font-semibold mb-1.5">tmux session not found.</p>
+            <p className="mb-1">Run once on the server to set it up:</p>
+            <pre className="bg-amber-100 rounded p-2 text-xs font-mono whitespace-pre-wrap">
+              {`tmux new-session -d -s claude\ntmux send-keys -t claude 'claude' Enter`}
+            </pre>
+          </div>
+        )}
+        {usageData && !usageData.success && usageData.status === "rate_limited" && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3 text-sm text-amber-800">
+            <span className="font-semibold">Rate limited.</span> Wait a moment and try again.
+          </div>
+        )}
+
+        <div className="bg-zinc-950 rounded-xl border border-zinc-800 overflow-hidden">
+          {/* ── Usage meters ── */}
+          {usageData?.success && (() => {
+            const { sessionPct, sessionResets, weekPct, weekResets } = usageData.parsed;
+            const meters = [
+              { label: "Current session", pct: sessionPct, resets: sessionResets },
+              { label: "Current week", pct: weekPct, resets: weekResets },
+            ].filter((m) => m.pct !== undefined);
+
+            if (meters.length === 0) return null;
+
+            return (
+              <div className="grid grid-cols-2 gap-px bg-zinc-800 border-b border-zinc-800">
+                {meters.map(({ label, pct, resets }) => {
+                  const p = pct ?? 0;
+                  const barColor =
+                    p >= 90 ? "bg-red-500" :
+                    p >= 70 ? "bg-amber-500" :
+                    "bg-green-500";
+                  return (
+                    <div key={label} className="bg-zinc-900 px-4 py-3">
+                      <p className="text-xs text-zinc-500 font-mono mb-2">{label}</p>
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <div className="flex-1 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${barColor}`}
+                            style={{ width: `${Math.min(p, 100)}%` }}
+                          />
+                        </div>
+                        <span className={`text-xs font-mono tabular-nums ${
+                          p >= 90 ? "text-red-400" : p >= 70 ? "text-amber-400" : "text-zinc-300"
+                        }`}>{p}%</span>
+                      </div>
+                      {resets && (
+                        <p className="text-xs text-zinc-500 font-mono">Resets {resets}</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
+          {/* Empty / loading state when no meters to show */}
+          {(!usageData || (usageData.success && !usageData.parsed.sessionPct && !usageData.parsed.weekPct)) && (
+            <div className="px-4 py-4 text-xs font-mono text-zinc-600 min-h-[56px]">
+              {usageLoading
+                ? "Sending /usage to the Claude tmux session…"
+                : !usageData
+                  ? server.status === "connected" ? "Loading…" : "Test the SSH connection above to fetch Claude usage."
+                  : null}
+            </div>
+          )}
+
+          {/* Error footer */}
+          {usageData && !usageData.success &&
+            usageData.status !== "auth_required" &&
+            usageData.status !== "offline" &&
+            usageData.status !== "rate_limited" &&
+            usageData.error && (
+            <div className="px-4 py-3 text-xs text-red-400 font-mono min-h-[56px]">
+              {usageData.error}
+            </div>
+          )}
+        </div>
+      </section>
 
       {/* ── Terminal ── */}
       <section className="mb-8">
