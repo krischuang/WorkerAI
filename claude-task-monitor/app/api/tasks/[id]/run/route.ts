@@ -13,7 +13,7 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
 
   const task = await prisma.task.findUnique({
     where: { id },
-    include: { server: true, project: true },
+    include: { server: true },
   });
 
   if (!task) {
@@ -56,7 +56,7 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
   // Usage OK — send task to Claude in tmux
   const sendResult = await sendTaskToTmux(
     { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
-    { title: task.title, description: task.description, projectName: task.project.name }
+    { title: task.title, description: task.description }
   );
 
   if (!sendResult.success) {
