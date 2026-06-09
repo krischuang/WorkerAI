@@ -48,7 +48,7 @@ function timeAgo(dateStr: string): string {
 const PRIORITIES = ["P1", "P2", "P3", "P4"];
 const TASK_TYPES = ["coding", "research", "writing", "review", "maintenance"];
 const COST_LEVELS = ["low", "medium", "high"];
-const STATUS_FILTERS = ["all", "pending", "queued", "running", "paused", "completed", "failed"];
+const STATUS_FILTERS = ["all", "pending", "queued", "running", "completed", "failed"] as const;
 
 const defaultForm = {
   projectId: "",
@@ -68,9 +68,8 @@ export default function TasksPage() {
   const [form, setForm] = useState(defaultForm);
   const [submitting, setSubmitting] = useState(false);
 
-  function loadTasks(status?: string) {
-    const params = status && status !== "all" ? `?status=${status}` : "";
-    fetch(`/api/tasks${params}`)
+  function loadTasks() {
+    fetch("/api/tasks")
       .then((r) => r.json())
       .then((data) => {
         setTasks(data);
@@ -90,13 +89,12 @@ export default function TasksPage() {
   }
 
   useEffect(() => {
-    loadTasks(statusFilter);
+    loadTasks();
     loadProjects();
   }, []);
 
   function handleFilterChange(status: string) {
     setStatusFilter(status);
-    loadTasks(status);
   }
 
   function openForm() {
@@ -114,8 +112,11 @@ export default function TasksPage() {
     });
     setSubmitting(false);
     setShowForm(false);
-    loadTasks(statusFilter);
+    loadTasks();
   }
+
+  const filteredTasks =
+    statusFilter === "all" ? tasks : tasks.filter((t) => t.status === statusFilter);
 
   if (loading) return <LoadingState />;
 
@@ -148,17 +149,17 @@ export default function TasksPage() {
         ))}
       </div>
 
-      {tasks.length === 0 ? (
+      {filteredTasks.length === 0 ? (
         <EmptyState
           message={
             statusFilter !== "all"
-              ? `No ${statusFilter} tasks found.`
+              ? `No ${statusFilter} tasks.`
               : "Create your first task to get started."
           }
         />
       ) : (
         <div className="space-y-2">
-          {tasks.map((task) => (
+          {filteredTasks.map((task) => (
             <Link
               key={task.id}
               href={`/tasks/${task.id}`}
