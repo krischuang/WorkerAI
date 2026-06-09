@@ -324,7 +324,11 @@ function startPoller() {
         });
 
         if (!idleResult.isIdle) {
-          console.log(`${TAG} ${srv.name}: has queued tasks but Claude is not idle yet`);
+          console.log(
+            `${TAG} ${srv.name}: has queued tasks but Claude is not idle yet` +
+            (idleResult.error ? ` — error: ${idleResult.error}` : "") +
+            (idleResult.paneText ? `\n  pane tail: ${JSON.stringify(idleResult.paneText.split("\n").filter(l => l.trim()).slice(-4))}` : "")
+          );
           continue;
         }
 
