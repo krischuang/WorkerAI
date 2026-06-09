@@ -7,7 +7,10 @@ import "@xterm/xterm/css/xterm.css";
 
 import { useEffect, useRef, useState } from "react";
 
-const WS_URL = "ws://localhost:3099";
+const WS_URL =
+  typeof window !== "undefined"
+    ? `ws://${window.location.hostname}:3099`
+    : "ws://localhost:3099";
 
 type ConnState = "connecting" | "connected" | "disconnected" | "error";
 

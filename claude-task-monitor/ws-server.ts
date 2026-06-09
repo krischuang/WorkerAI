@@ -33,11 +33,15 @@ type InMsg =
   | { type: "resize"; cols: number; rows: number };
 
 wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
-  // Localhost-only guard — reject connections from non-local origins
+  // Allow same-host origins only (localhost or the server's own hostname/IP)
   const origin = req.headers.origin ?? "";
   if (origin && !/^https?:\/\/localhost(:\d+)?$/.test(origin)) {
-    ws.close(1008, "Forbidden");
-    return;
+    const reqHost = req.headers.host?.replace(/:\d+$/, "") ?? "";
+    const originHost = (() => { try { return new URL(origin).hostname; } catch { return ""; } })();
+    if (originHost !== reqHost) {
+      ws.close(1008, "Forbidden");
+      return;
+    }
   }
 
   const url = new URL(req.url ?? "/", `http://localhost:${WS_PORT}`);
