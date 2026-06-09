@@ -278,7 +278,7 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
 
   // ── 3. Send /usage and wait for the panel to render ───────────────────────
   try {
-    await execSSH(ssh, `tmux send-keys -t ${TMUX_SESSION} "/usage" Enter && sleep 2`, 10_000);
+    await execSSH(ssh, `tmux send-keys -t ${TMUX_SESSION} "/usage" Enter && sleep 3`, 12_000);
   } catch (err) {
     return {
       success: false, status: "error", rawOutput: "", parsed: {},
@@ -286,11 +286,19 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
     };
   }
 
-  // ── 4. Capture the rendered pane ─────────────────────────────────────────
+  // ── 4. Capture the rendered pane (retry up to 3× if overlay not visible) ─
+  // The /usage panel can take a moment to render, especially when Claude is
+  // actively processing. Retry with extra sleeps before giving up.
   let captured = "";
   try {
-    const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${TMUX_SESSION} -p`, 5_000);
-    captured = cleanPane(stdout);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${TMUX_SESSION} -p`, 5_000);
+      captured = cleanPane(stdout);
+      if (looksLikeUsage(captured)) break;
+      if (attempt < 2) {
+        await execSSH(ssh, `sleep 2`, 5_000).catch(() => {});
+      }
+    }
   } catch (err) {
     return {
       success: false, status: "error", rawOutput: "", parsed: {},
