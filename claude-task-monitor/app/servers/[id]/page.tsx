@@ -63,7 +63,6 @@ interface Server {
   status: "unknown" | "connected" | "failed";
   lastCheckedAt: string | null;
   claudePermissionMode: ClaudePermissionMode;
-  commandLogs: CommandLog[];
   // Persisted Claude usage
   claudeSessionPct: number | null;
   claudeSessionResets: string | null;
@@ -132,6 +131,13 @@ export default function ServerDetailPage() {
     message: string;
   } | null>(null);
 
+  // Command logs — loaded lazily when the section scrolls into view
+  const [logs, setLogs] = useState<CommandLog[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsInitialized, setLogsInitialized] = useState(false);
+  const logsSectionRef = useRef<HTMLElement>(null);
+
   // Claude Usage state
   const [usageData, setUsageData] = useState<UsageData | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
@@ -189,6 +195,34 @@ export default function ServerDetailPage() {
     loadServer();
   }, [loadServer]);
 
+  const loadLogs = useCallback(async (cursor?: string) => {
+    setLogsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      const res = await fetch(`/api/servers/${id}/logs?${params}`);
+      if (!res.ok) return;
+      const data: { logs: CommandLog[]; nextCursor: string | null } = await res.json();
+      setLogs((prev) => (cursor ? [...prev, ...data.logs] : data.logs));
+      setNextCursor(data.nextCursor);
+      setLogsInitialized(true);
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [id]);
+
+  // Lazy-load logs when the section scrolls near the viewport.
+  useEffect(() => {
+    const el = logsSectionRef.current;
+    if (!el || logsInitialized) return;
+    const obs = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { obs.disconnect(); loadLogs(); } },
+      { rootMargin: "300px" }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [logsInitialized, loadLogs]);
+
   // Auto-fetch Claude usage once if there is no persisted data yet
   useEffect(() => {
     if (server?.status === "connected" && !usageAutoFetchedRef.current && !server.claudeUsageFetchedAt) {
@@ -229,7 +263,7 @@ export default function ServerDetailPage() {
       const res = await fetch(`/api/servers/${id}/launch-claude`, { method: "POST" });
       const data = await res.json();
       if (res.ok) {
-        const cmd = PERMISSION_MODE_COMMAND[server.claudePermissionMode];
+        const cmd = server ? PERMISSION_MODE_COMMAND[server.claudePermissionMode] : "";
         setLaunchResult({ success: true, message: `Claude launched: ${cmd}` });
       } else {
         setLaunchResult({ success: false, message: data.error ?? "Launch failed" });
@@ -249,6 +283,7 @@ export default function ServerDetailPage() {
     setConnectionResult(result);
     setConnecting(false);
     loadServer();
+    if (logsInitialized) loadLogs();
   }
 
   async function runCommand(command: string) {
@@ -262,6 +297,7 @@ export default function ServerDetailPage() {
     setOutputs((prev) => ({ ...prev, [command]: result }));
     setRunning(null);
     loadServer();
+    if (logsInitialized) loadLogs();
   }
 
   async function runGroup(commands: readonly string[]) {
@@ -338,6 +374,7 @@ export default function ServerDetailPage() {
     } finally {
       stopTimer();
       loadServer();
+      if (logsInitialized) loadLogs();
       termInputRef.current?.focus();
     }
   }
@@ -737,46 +774,66 @@ export default function ServerDetailPage() {
         ))}
       </div>
 
-      {/* ── Command Logs ── */}
-      <section>
+      {/* ── Command Logs ── lazy-loaded when section enters the viewport ── */}
+      <section ref={logsSectionRef}>
         <h2 className="font-semibold text-zinc-900 mb-3">
-          Command Logs ({server.commandLogs.length})
+          Command Logs{logsInitialized ? ` (${logs.length}${nextCursor ? "+" : ""})` : ""}
         </h2>
-        {server.commandLogs.length === 0 ? (
+
+        {!logsInitialized ? (
+          <div className="bg-white rounded-xl border border-zinc-200 p-6 text-center">
+            <p className="text-sm text-zinc-500">{logsLoading ? "Loading…" : "Scroll down to load logs"}</p>
+          </div>
+        ) : logs.length === 0 ? (
           <div className="bg-white rounded-xl border border-zinc-200 p-6 text-center">
             <p className="text-sm text-zinc-600">No commands run yet.</p>
           </div>
         ) : (
-          <div className="space-y-2">
-            {server.commandLogs.map((log) => (
-              <div key={log.id} className="bg-white rounded-xl border border-zinc-200 p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`text-xs font-semibold ${
-                        log.status === "success" ? "text-green-700" : "text-red-700"
+          <>
+            <div className="space-y-2">
+              {logs.map((log) => (
+                <div key={log.id} className="bg-white rounded-xl border border-zinc-200 p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`text-xs font-semibold ${
+                          log.status === "success" ? "text-green-700" : "text-red-700"
+                        }`}
+                      >
+                        {log.status === "success" ? "✓" : "✗"}
+                      </span>
+                      <code className="text-sm font-mono text-zinc-800">{log.command}</code>
+                    </div>
+                    <span className="text-xs text-zinc-600">
+                      {new Date(log.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+                  {(log.output || log.errorMessage) && (
+                    <pre
+                      className={`text-xs rounded-lg p-2 font-mono overflow-x-auto whitespace-pre-wrap ${
+                        log.status === "success" ? "bg-zinc-50 text-zinc-800" : "bg-red-50 text-red-700"
                       }`}
                     >
-                      {log.status === "success" ? "✓" : "✗"}
-                    </span>
-                    <code className="text-sm font-mono text-zinc-800">{log.command}</code>
-                  </div>
-                  <span className="text-xs text-zinc-600">
-                    {new Date(log.createdAt).toLocaleString()}
-                  </span>
+                      {log.output || log.errorMessage}
+                    </pre>
+                  )}
                 </div>
-                {(log.output || log.errorMessage) && (
-                  <pre
-                    className={`text-xs rounded-lg p-2 font-mono overflow-x-auto whitespace-pre-wrap ${
-                      log.status === "success" ? "bg-zinc-50 text-zinc-800" : "bg-red-50 text-red-700"
-                    }`}
-                  >
-                    {log.output || log.errorMessage}
-                  </pre>
-                )}
+              ))}
+            </div>
+
+            {nextCursor && (
+              <div className="mt-4 text-center">
+                <Btn
+                  variant="secondary"
+                  size="sm"
+                  disabled={logsLoading}
+                  onClick={() => loadLogs(nextCursor)}
+                >
+                  {logsLoading ? "Loading…" : "Load older logs"}
+                </Btn>
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </section>
 

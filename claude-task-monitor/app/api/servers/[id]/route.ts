@@ -6,15 +6,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: NextRequest, ctx: Ctx) {
   const { id } = await ctx.params;
-  const server = await prisma.server.findUnique({
-    where: { id },
-    include: {
-      commandLogs: {
-        orderBy: { createdAt: "desc" },
-        take: 50,
-      },
-    },
-  });
+  const server = await prisma.server.findUnique({ where: { id } });
   if (!server) return Response.json({ error: "Not found" }, { status: 404 });
   return Response.json(server);
 }
