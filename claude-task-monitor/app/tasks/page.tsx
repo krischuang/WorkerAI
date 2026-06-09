@@ -23,6 +23,7 @@ interface Project {
 
 interface Task {
   id: string;
+  projectId: string;
   title: string;
   description: string | null;
   priority: string;
@@ -32,7 +33,7 @@ interface Task {
   createdAt: string;
   project: { name: string; priority: string };
   _count: { executionLogs: number };
-  executionLogs: { startedAt: string }[];
+  executionLogs: { startedAt: string; finishedAt: string | null }[];
 }
 
 function timeAgo(dateStr: string): string {
@@ -64,6 +65,7 @@ export default function TasksPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [projectFilter, setProjectFilter] = useState("all");
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(defaultForm);
   const [submitting, setSubmitting] = useState(false);
@@ -126,8 +128,20 @@ export default function TasksPage() {
     loadTasks();
   }
 
-  const filteredTasks =
-    statusFilter === "all" ? tasks : tasks.filter((t) => t.status === statusFilter);
+  const sortedTasks = [...tasks].sort((a, b) => {
+    const aFinished = a.executionLogs[0]?.finishedAt;
+    const bFinished = b.executionLogs[0]?.finishedAt;
+    if (!aFinished && !bFinished) return 0;
+    if (!aFinished) return 1;
+    if (!bFinished) return -1;
+    return new Date(aFinished).getTime() - new Date(bFinished).getTime();
+  });
+
+  const filteredTasks = sortedTasks.filter((t) => {
+    if (statusFilter !== "all" && t.status !== statusFilter) return false;
+    if (projectFilter !== "all" && t.projectId !== projectFilter) return false;
+    return true;
+  });
 
   if (loading) return <LoadingState />;
 
@@ -150,28 +164,44 @@ export default function TasksPage() {
         }
       />
 
-      {/* Status filter tabs */}
-      <div className="flex gap-1 mb-6 flex-wrap">
-        {STATUS_FILTERS.map((s) => (
-          <button
-            key={s}
-            onClick={() => handleFilterChange(s)}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${
-              statusFilter === s
-                ? "bg-zinc-900 text-white"
-                : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
-            }`}
+      {/* Filters */}
+      <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
+        <div className="flex gap-1 flex-wrap">
+          {STATUS_FILTERS.map((s) => (
+            <button
+              key={s}
+              onClick={() => handleFilterChange(s)}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${
+                statusFilter === s
+                  ? "bg-zinc-900 text-white"
+                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+        {projects.length > 0 && (
+          <select
+            value={projectFilter}
+            onChange={(e) => setProjectFilter(e.target.value)}
+            className="text-sm border border-zinc-300 rounded-lg px-3 py-1.5 text-zinc-700 bg-white focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-1"
           >
-            {s}
-          </button>
-        ))}
+            <option value="all">All Projects</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {filteredTasks.length === 0 ? (
         <EmptyState
           message={
-            statusFilter !== "all"
-              ? `No ${statusFilter} tasks.`
+            statusFilter !== "all" || projectFilter !== "all"
+              ? "No tasks match the selected filters."
               : "Create your first task to get started."
           }
         />
