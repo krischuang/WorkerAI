@@ -54,6 +54,12 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+  if (typeof title === "string" && title.length > 500) {
+    return Response.json({ error: "title must be 500 characters or fewer" }, { status: 400 });
+  }
+  if (description != null && typeof description === "string" && description.length > 10_000) {
+    return Response.json({ error: "description must be 10 000 characters or fewer" }, { status: 400 });
+  }
 
   const task = await prisma.task.create({
     data: {

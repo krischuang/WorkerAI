@@ -40,6 +40,13 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     taskType, resultSummary, nextAction, serverId,
   } = body;
 
+  if (title != null && typeof title === "string" && title.length > 500) {
+    return Response.json({ error: "title must be 500 characters or fewer" }, { status: 400 });
+  }
+  if (description != null && typeof description === "string" && description.length > 10_000) {
+    return Response.json({ error: "description must be 10 000 characters or fewer" }, { status: 400 });
+  }
+
   // When assigning a server, auto-advance pending → queued (but don't override
   // running / completed / failed — those are meaningful states).
   const isAssigningServer = serverId !== undefined && serverId;

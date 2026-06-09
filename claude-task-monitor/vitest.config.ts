@@ -11,7 +11,7 @@ export default defineConfig({
       // Cover only the pure-function modules that are unit-testable.
       // SSH-dependent modules (ssh.ts, ssh-claude-tmux.ts) require real
       // infrastructure and are covered by the E2E suite instead.
-      include: ["lib/usage-parser.ts", "lib/exec-guards.ts", "lib/ssh-key-path.ts"],
+      include: ["lib/usage-parser.ts", "lib/exec-guards.ts", "lib/ssh-key-path.ts", "lib/prompt-sanitiser.ts"],
       reporter: ["text", "lcov"],
       // Minimum thresholds — enforced on every `npm test` run.
       thresholds: {
