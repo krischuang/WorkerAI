@@ -33,6 +33,26 @@ interface CommandLog {
   createdAt: string;
 }
 
+type ClaudePermissionMode = "read_only" | "workspace_write" | "full_autonomous";
+
+const PERMISSION_MODE_LABEL: Record<ClaudePermissionMode, string> = {
+  read_only:        "Read Only",
+  workspace_write:  "Workspace Write",
+  full_autonomous:  "Full Autonomous",
+};
+
+const PERMISSION_MODE_BADGE: Record<ClaudePermissionMode, string> = {
+  read_only:        "bg-zinc-100 text-zinc-700 border-zinc-200",
+  workspace_write:  "bg-blue-50 text-blue-700 border-blue-200",
+  full_autonomous:  "bg-amber-50 text-amber-700 border-amber-200",
+};
+
+const PERMISSION_MODE_COMMAND: Record<ClaudePermissionMode, string> = {
+  read_only:        `claude --allowedTools "Read,Grep,Glob,LS,WebSearch,WebFetch"`,
+  workspace_write:  "claude",
+  full_autonomous:  "claude --dangerously-skip-permissions",
+};
+
 interface Server {
   id: string;
   name: string;
@@ -42,6 +62,7 @@ interface Server {
   sshKeyPath: string;
   status: "unknown" | "connected" | "failed";
   lastCheckedAt: string | null;
+  claudePermissionMode: ClaudePermissionMode;
   commandLogs: CommandLog[];
   // Persisted Claude usage
   claudeSessionPct: number | null;
@@ -102,7 +123,10 @@ export default function ServerDetailPage() {
     username: "",
     port: "22",
     sshKeyPath: "",
+    claudePermissionMode: "workspace_write" as ClaudePermissionMode,
   });
+  const [launching, setLaunching] = useState(false);
+  const [launchResult, setLaunchResult] = useState<{ success: boolean; message: string } | null>(null);
   const [connectionResult, setConnectionResult] = useState<{
     success: boolean;
     message: string;
@@ -141,6 +165,7 @@ export default function ServerDetailPage() {
           username: data.username,
           port: String(data.port),
           sshKeyPath: data.sshKeyPath,
+          claudePermissionMode: data.claudePermissionMode ?? "workspace_write",
         });
         // Seed usage display from persisted DB fields (no wait needed on page load)
         if (data.claudeUsageFetchedAt && !usageAutoFetchedRef.current) {
@@ -197,6 +222,25 @@ export default function ServerDetailPage() {
     termBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [termHistory]);
 
+  async function launchClaudeSession() {
+    setLaunching(true);
+    setLaunchResult(null);
+    try {
+      const res = await fetch(`/api/servers/${id}/launch-claude`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        const cmd = PERMISSION_MODE_COMMAND[server.claudePermissionMode];
+        setLaunchResult({ success: true, message: `Claude launched: ${cmd}` });
+      } else {
+        setLaunchResult({ success: false, message: data.error ?? "Launch failed" });
+      }
+    } catch {
+      setLaunchResult({ success: false, message: "Request failed — check the server connection." });
+    } finally {
+      setLaunching(false);
+    }
+  }
+
   async function testConnection() {
     setConnecting(true);
     setConnectionResult(null);
@@ -231,7 +275,10 @@ export default function ServerDetailPage() {
     await fetch(`/api/servers/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...editForm, port: Number(editForm.port) }),
+      body: JSON.stringify({
+        ...editForm,
+        port: Number(editForm.port),
+      }),
     });
     setShowEditForm(false);
     loadServer();
@@ -364,6 +411,74 @@ export default function ServerDetailPage() {
           {connectionResult.message}
         </div>
       )}
+
+      {/* ── Claude Settings ── */}
+      <section className="mb-6">
+        <h2 className="font-semibold text-zinc-900 mb-3">Claude Execution Mode</h2>
+        <div className="bg-white rounded-xl border border-zinc-200 p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-1.5">
+                <span
+                  className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+                    PERMISSION_MODE_BADGE[server.claudePermissionMode]
+                  }`}
+                >
+                  {PERMISSION_MODE_LABEL[server.claudePermissionMode]}
+                </span>
+              </div>
+              <p className="text-sm text-zinc-700 mb-3">
+                {server.claudePermissionMode === "read_only" &&
+                  "Claude can read and analyze files only — no writes or shell execution."}
+                {server.claudePermissionMode === "workspace_write" &&
+                  "Claude can edit files and run commands; prompts before risky operations."}
+                {server.claudePermissionMode === "full_autonomous" &&
+                  "Claude skips all permission prompts and runs fully unattended."}
+              </p>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-600">Launch command:</span>
+                <code className="text-xs font-mono bg-zinc-100 px-2 py-0.5 rounded text-zinc-800">
+                  {PERMISSION_MODE_COMMAND[server.claudePermissionMode]}
+                </code>
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-2 shrink-0">
+              <Btn
+                variant="primary"
+                size="sm"
+                disabled={launching}
+                onClick={launchClaudeSession}
+              >
+                {launching ? "Launching…" : "Launch Claude Session"}
+              </Btn>
+              <p className="text-xs text-zinc-600 text-right">
+                Restarts Claude in the tmux session with the configured mode flags.
+              </p>
+            </div>
+          </div>
+
+          {launchResult && (
+            <div
+              className={`mt-4 rounded-lg border p-3 text-sm font-medium ${
+                launchResult.success
+                  ? "bg-green-50 border-green-200 text-green-800"
+                  : "bg-red-50 border-red-200 text-red-800"
+              }`}
+            >
+              {launchResult.success ? "✓ " : "✗ "}
+              {launchResult.message}
+            </div>
+          )}
+
+          {server.claudePermissionMode === "full_autonomous" && (
+            <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+              <strong>Warning:</strong> Full Autonomous mode passes{" "}
+              <code className="font-mono bg-amber-100 px-1 rounded">--dangerously-skip-permissions</code> to Claude CLI.
+              Claude will execute shell commands, modify files, and install packages without confirmation prompts.
+            </div>
+          )}
+        </div>
+      </section>
 
       {/* ── Claude Usage ── */}
       <section className="mb-6">
@@ -714,6 +829,25 @@ export default function ServerDetailPage() {
                 className={`${inputCls} font-mono`}
               />
             </FormField>
+            <FormField label="Claude Execution Mode">
+              <select
+                value={editForm.claudePermissionMode}
+                onChange={(e) =>
+                  setEditForm({ ...editForm, claudePermissionMode: e.target.value as ClaudePermissionMode })
+                }
+                className={inputCls}
+              >
+                <option value="read_only">Read Only</option>
+                <option value="workspace_write">Workspace Write</option>
+                <option value="full_autonomous">Full Autonomous</option>
+              </select>
+            </FormField>
+            {editForm.claudePermissionMode === "full_autonomous" && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+                <strong>Warning:</strong> Full Autonomous passes{" "}
+                <code className="font-mono bg-amber-100 px-1 rounded">--dangerously-skip-permissions</code> to Claude CLI.
+              </div>
+            )}
             <ModalActions>
               <Btn type="submit" variant="primary" className="flex-1">
                 Save Changes
