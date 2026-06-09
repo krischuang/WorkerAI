@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
+  try {
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -49,14 +50,18 @@ export async function GET() {
   ]);
 
   return Response.json({
-    activeProjects,
-    pendingTasks,
-    queuedTasks,
-    runningTasks,
-    completedToday,
-    failedTasks,
-    highPriorityPending,
-    recentlyCompleted,
-    servers: { totalServers, connectedServers, failedServers, lastCheckedServer },
-  });
+      activeProjects,
+      pendingTasks,
+      queuedTasks,
+      runningTasks,
+      completedToday,
+      failedTasks,
+      highPriorityPending,
+      recentlyCompleted,
+      servers: { totalServers, connectedServers, failedServers, lastCheckedServer },
+    });
+  } catch (err) {
+    console.error("[dashboard] query failed:", err);
+    return Response.json({ error: "Failed to load dashboard" }, { status: 500 });
+  }
 }
