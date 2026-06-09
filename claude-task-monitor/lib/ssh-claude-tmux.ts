@@ -429,6 +429,14 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
 
     const isIdle = hasPrompt && !isBusy;
 
+    if (!isIdle) {
+      console.log(
+        `[idle-detect] NOT idle — hasPrompt=${hasPrompt} isBusy=${isBusy}\n` +
+        `  tail lines:\n` +
+        tail.map((l, i) => `    [${i}] ${JSON.stringify(l)}`).join("\n")
+      );
+    }
+
     return { isIdle, paneText: pane.slice(-2000) };
   } catch (err) {
     return {
