@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
   }
 
   const res = NextResponse.json({ ok: true });
-  res.cookies.set(AUTH_COOKIE, cookieToken(secret), {
+  res.cookies.set(AUTH_COOKIE, await cookieToken(secret), {
     httpOnly: true,
     secure: false,   // app runs over plain HTTP on localhost
     sameSite: "strict",
