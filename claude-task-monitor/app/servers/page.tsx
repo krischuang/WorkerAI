@@ -29,6 +29,8 @@ interface Server {
   claudePermissionMode: ClaudePermissionMode;
   lastCheckedAt: string | null;
   _count: { commandLogs: number };
+  queuedCount: number;
+  runningCount: number;
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -129,6 +131,16 @@ export default function ServersPage() {
                   >
                     {PERMISSION_MODE_LABEL[s.claudePermissionMode ?? "workspace_write"]}
                   </span>
+                  {s.queuedCount > 0 && (
+                    <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-violet-50 text-violet-700 border-violet-200">
+                      {s.queuedCount} queued
+                    </span>
+                  )}
+                  {s.runningCount > 0 && (
+                    <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-blue-50 text-blue-700 border-blue-200">
+                      {s.runningCount} running
+                    </span>
+                  )}
                 </div>
                 <p className="text-sm text-zinc-700 mt-0.5 font-mono">
                   {s.username}@{s.host}:{s.port}
