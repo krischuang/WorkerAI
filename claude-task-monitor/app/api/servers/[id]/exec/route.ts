@@ -1,53 +1,17 @@
 import { prisma } from "@/lib/prisma";
 import { execSSH } from "@/lib/ssh";
+import { isLocalOrigin, isDestructiveCommand, MAX_COMMAND_LENGTH } from "@/lib/exec-guards";
 import type { NextRequest } from "next/server";
 
 // Allow up to 10 minutes for long-running commands like dnf update, apt upgrade, etc.
 export const maxDuration = 600;
 
 const EXEC_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const MAX_COMMAND_LENGTH = 4_096;
 
 type Ctx = { params: Promise<{ id: string }> };
 
-// Prevents cross-origin requests from malicious pages that try to use the
-// user's browser to POST commands to the localhost API.
-// Direct requests (curl, server-side fetch) have no Origin header → allowed.
-function isLocalOrigin(request: NextRequest): boolean {
-  const origin = request.headers.get("origin");
-  if (!origin) return true;
-  try {
-    const { hostname } = new URL(origin);
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  } catch {
-    return false;
-  }
-}
-
-// Narrow blocklist for commands that are irreversible and destructive at the
-// OS level. Arbitrary commands remain allowed — this is an intentional
-// product decision for a local-only tool (see CLAUDE.md). The blocklist only
-// covers operations that can silently destroy the remote host's filesystem or
-// cause unbounded resource exhaustion with no recovery path.
-const DESTRUCTIVE_PATTERNS: RegExp[] = [
-  // rm -rf / or rm -fr / (any flag combination with r+f targeting root)
-  /\brm\s+(-\w*r\w*f\w*|-\w*f\w*r\w*)\s+(\/\s*$|\/\s+)/i,
-  // Filesystem format
-  /\bmkfs\b/i,
-  // dd writing directly to a raw disk device
-  /\bdd\b.*\bof=\/dev\/(s|h|vd|xvd|nvme)/i,
-  // Classic fork bomb
-  /:\s*\(\s*\)\s*\{.*\|.*:.*\}.*;\s*:/,
-  // Wipe disk with shred/wipefs
-  /\b(shred|wipefs)\b.*\/dev\//i,
-];
-
-function isDestructiveCommand(cmd: string): boolean {
-  return DESTRUCTIVE_PATTERNS.some((re) => re.test(cmd));
-}
-
 export async function POST(request: NextRequest, ctx: Ctx) {
-  if (!isLocalOrigin(request)) {
+  if (!isLocalOrigin(request.headers.get("origin"))) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
 
