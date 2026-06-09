@@ -35,6 +35,31 @@ interface ServerOption {
   host: string;
 }
 
+interface AgentUsage {
+  id: string;
+  name: string;
+  slug: string;
+  tmuxSession: string;
+  workDir: string;
+  status: string;
+  claudePermissionMode: string;
+  claudeSessionPct: number | null;
+  claudeSessionResets: string | null;
+  claudeSessionResetsAt: string | null;
+  claudeWeekPct: number | null;
+  claudeWeekResets: string | null;
+  claudeWeekResetsAt: string | null;
+  claudeUsageFetchedAt: string | null;
+  server: { id: string; name: string; host: string };
+}
+
+interface AgentOption {
+  id: string;
+  name: string;
+  slug: string;
+  server: { id: string; name: string; host: string };
+}
+
 interface ExecutionLog {
   id: string;
   status: string;
@@ -60,6 +85,7 @@ interface Task {
   updatedAt: string;
   project: { id: string; name: string; priority: string };
   server: ServerUsage | null;
+  agent: AgentUsage | null;
   executionLogs: ExecutionLog[];
 }
 
@@ -135,6 +161,9 @@ export default function TaskDetailPage() {
   const [servers, setServers] = useState<ServerOption[]>([]);
   const [selectedServerId, setSelectedServerId] = useState<string>("");
   const [assigningServer, setAssigningServer] = useState(false);
+  const [agents, setAgents] = useState<AgentOption[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("");
+  const [assigningAgent, setAssigningAgent] = useState(false);
 
   // Run state
   const [runState, setRunState] = useState<"idle" | "sending" | "blocked" | "success" | "error">("idle");
@@ -174,8 +203,9 @@ export default function TaskDetailPage() {
           resultSummary: data.resultSummary ?? "",
           nextAction: data.nextAction ?? "",
         });
-        // Seed server picker with currently assigned server
+        // Seed pickers with current assignments
         if (data.server) setSelectedServerId(data.server.id);
+        if (data.agent) setSelectedAgentId(data.agent.id);
       });
   }
 
@@ -185,9 +215,17 @@ export default function TaskDetailPage() {
       .then((data: ServerOption[]) => setServers(data));
   }
 
+  function loadAgents() {
+    fetch("/api/agents")
+      .then((r) => r.json())
+      .then((data: AgentOption[]) => setAgents(data))
+      .catch(() => {});
+  }
+
   useEffect(() => {
     loadTask();
     loadServers();
+    loadAgents();
   }, [id]);
 
   // Countdown ticker when blocked
@@ -213,6 +251,21 @@ export default function TaskDetailPage() {
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
   }, [runState, blockInfo]);
+
+  async function assignAgent() {
+    if (!selectedAgentId) return;
+    setAssigningAgent(true);
+    await fetch(`/api/tasks/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: selectedAgentId, serverId: null }),
+    });
+    setAssigningAgent(false);
+    setSelectedServerId("");
+    setRunState("idle");
+    setBlockInfo(null);
+    loadTask();
+  }
 
   // Cleanup retry timer on unmount
   useEffect(() => () => {
@@ -241,9 +294,10 @@ export default function TaskDetailPage() {
     await fetch(`/api/tasks/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ serverId: selectedServerId }),
+      body: JSON.stringify({ serverId: selectedServerId, agentId: null }),
     });
     setAssigningServer(false);
+    setSelectedAgentId("");
     setRunState("idle");
     setBlockInfo(null);
     loadTask();
@@ -349,12 +403,16 @@ export default function TaskDetailPage() {
   if (!task) return <LoadingState />;
 
   const assignedServer = task.server;
-  const usageStale = assignedServer?.claudeUsageFetchedAt
-    ? Date.now() - new Date(assignedServer.claudeUsageFetchedAt).getTime() > 10 * 60 * 1000
+  const assignedAgent = task.agent;
+
+  // If agent is assigned, use agent usage; otherwise fall back to server usage
+  const usageSource = assignedAgent ?? assignedServer;
+  const usageStale = usageSource?.claudeUsageFetchedAt
+    ? Date.now() - new Date(usageSource.claudeUsageFetchedAt).getTime() > 10 * 60 * 1000
     : false;
 
-  const sessionPct = assignedServer?.claudeSessionPct ?? 0;
-  const weekPct = assignedServer?.claudeWeekPct ?? 0;
+  const sessionPct = usageSource?.claudeSessionPct ?? 0;
+  const weekPct = usageSource?.claudeWeekPct ?? 0;
   const usageBlocked = sessionPct >= THRESHOLD || weekPct >= THRESHOLD;
 
   return (
@@ -417,66 +475,124 @@ export default function TaskDetailPage() {
         </div>
       </div>
 
-      {/* ── Run on Server ───────────────────────────────────────────────────── */}
+      {/* ── Run ─────────────────────────────────────────────────────────────── */}
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
-        <h2 className="font-semibold text-zinc-900 mb-4">Run on Server</h2>
+        <h2 className="font-semibold text-zinc-900 mb-4">Run</h2>
 
-        {/* Server assignment row */}
-        <div className="flex gap-2 items-end mb-4">
-          <div className="flex-1">
-            <label className="block text-xs font-medium text-zinc-700 mb-1">Server</label>
-            <select
-              value={selectedServerId}
-              onChange={(e) => setSelectedServerId(e.target.value)}
-              className={inputCls}
+        {/* Assignment options — agent (preferred) or legacy server */}
+        <div className="space-y-3 mb-4">
+          {/* Agent assignment row */}
+          <div className="flex gap-2 items-end">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-zinc-700 mb-1">
+                Agent
+                {assignedAgent && (
+                  <span className="ml-2 text-zinc-400 font-normal">
+                    currently: {assignedAgent.name} ({assignedAgent.server.host})
+                  </span>
+                )}
+              </label>
+              <select
+                value={selectedAgentId}
+                onChange={(e) => setSelectedAgentId(e.target.value)}
+                className={inputCls}
+              >
+                <option value="">— select an agent —</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} · {a.server.name} ({a.server.host})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Btn
+              variant="secondary"
+              onClick={assignAgent}
+              disabled={!selectedAgentId || assigningAgent || selectedAgentId === assignedAgent?.id}
             >
-              <option value="">— select a server —</option>
-              {servers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} ({s.host})
-                </option>
-              ))}
-            </select>
+              {assigningAgent ? "Saving…" : assignedAgent ? "Change" : "Assign"}
+            </Btn>
           </div>
-          <Btn
-            variant="secondary"
-            onClick={assignServer}
-            disabled={!selectedServerId || assigningServer || selectedServerId === assignedServer?.id}
-          >
-            {assigningServer ? "Saving…" : assignedServer ? "Change" : "Assign"}
-          </Btn>
+
+          {/* Divider */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-px bg-zinc-100" />
+            <span className="text-xs text-zinc-400">or use legacy server</span>
+            <div className="flex-1 h-px bg-zinc-100" />
+          </div>
+
+          {/* Server assignment row */}
+          <div className="flex gap-2 items-end">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-zinc-700 mb-1">
+                Server (legacy)
+                {assignedServer && !assignedAgent && (
+                  <span className="ml-2 text-zinc-400 font-normal">
+                    currently: {assignedServer.name}
+                  </span>
+                )}
+              </label>
+              <select
+                value={selectedServerId}
+                onChange={(e) => setSelectedServerId(e.target.value)}
+                className={inputCls}
+              >
+                <option value="">— select a server —</option>
+                {servers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.host})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Btn
+              variant="secondary"
+              onClick={assignServer}
+              disabled={!selectedServerId || assigningServer || selectedServerId === assignedServer?.id}
+            >
+              {assigningServer ? "Saving…" : assignedServer ? "Change" : "Assign"}
+            </Btn>
+          </div>
         </div>
 
-        {/* No server assigned */}
-        {!assignedServer && (
-          <p className="text-sm text-zinc-500">Assign a server to enable execution.</p>
+        {/* Nothing assigned */}
+        {!assignedAgent && !assignedServer && (
+          <p className="text-sm text-zinc-500">Assign an agent or server to enable execution.</p>
         )}
 
-        {/* Server assigned — show usage + run controls */}
-        {assignedServer && (
+        {/* Usage + run controls */}
+        {(assignedAgent || assignedServer) && (
           <>
+            {/* Usage source label */}
+            {assignedAgent && (
+              <p className="text-xs text-zinc-500 mb-3">
+                Usage from agent <strong>{assignedAgent.name}</strong>
+                {" "}(<a href={`/agents/${assignedAgent.id}`} className="text-blue-600 hover:underline">view agent</a>)
+              </p>
+            )}
+
             {/* Usage meters */}
-            {assignedServer.claudeUsageFetchedAt ? (
+            {usageSource?.claudeUsageFetchedAt ? (
               <div className="space-y-3 mb-4">
                 {usageStale && (
                   <p className="text-xs text-amber-600">
-                    Usage data is over 10 minutes old — refresh from the server page for accurate readings.
+                    Usage data is over 10 minutes old — refresh from the {assignedAgent ? "agent" : "server"} page for accurate readings.
                   </p>
                 )}
                 <UsageBar
                   label="Current session"
                   pct={sessionPct}
-                  resets={assignedServer.claudeSessionResets}
+                  resets={usageSource.claudeSessionResets}
                 />
                 <UsageBar
                   label="Current week (all models)"
                   pct={weekPct}
-                  resets={assignedServer.claudeWeekResets}
+                  resets={usageSource.claudeWeekResets}
                 />
               </div>
             ) : (
               <p className="text-xs text-zinc-500 mb-4">
-                No usage data yet — visit the server page and refresh Claude usage first.
+                No usage data yet — visit the {assignedAgent ? "agent" : "server"} page and refresh Claude usage first.
               </p>
             )}
 
@@ -487,7 +603,11 @@ export default function TaskDetailPage() {
                 onClick={handleRun}
                 disabled={usageBlocked}
               >
-                {usageBlocked ? "Usage limit reached — cannot run" : "Run on Server"}
+                {usageBlocked
+                  ? "Usage limit reached — cannot run"
+                  : assignedAgent
+                  ? `Run on ${assignedAgent.name}`
+                  : "Run on Server"}
               </Btn>
             )}
 
