@@ -71,7 +71,7 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
         taskId: id,
         status: "running",
         startedAt: new Date(),
-        logText: `Sent to Claude on server "${s.name}" (${s.host})`,
+        logText: `Sent to Claude on server "${s.name}" (${s.host}) — mode: ${s.claudePermissionMode}`,
       },
     }),
   ]);

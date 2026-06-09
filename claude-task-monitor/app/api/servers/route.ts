@@ -10,7 +10,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   const body = await request.json();
-  const { name, host, username, port, sshKeyPath } = body;
+  const { name, host, username, port, sshKeyPath, claudePermissionMode } = body;
 
   if (!name || !host || !username || !sshKeyPath) {
     return Response.json(
@@ -26,6 +26,7 @@ export async function POST(request: Request) {
       username,
       port: port ? Number(port) : 22,
       sshKeyPath,
+      ...(claudePermissionMode !== undefined && { claudePermissionMode }),
     },
   });
   return Response.json(server, { status: 201 });
