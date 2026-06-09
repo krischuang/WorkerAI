@@ -25,7 +25,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "concurrently": "^10.0.3",
-    "next": "16.2.7",
+    "next": "15.5.6",
     "pg": "^8.21.0",
     "prisma": "^7.8.0",
     "react": "19.2.4",
@@ -42,7 +42,7 @@
     "@types/ws": "^8.18.1",
     "dotenv": "^17.4.2",
     "eslint": "^9",
-    "eslint-config-next": "16.2.7",
+    "eslint-config-next": "15.5.6",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
     "typescript": "^5"
