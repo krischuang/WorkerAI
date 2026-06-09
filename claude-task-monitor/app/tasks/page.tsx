@@ -129,12 +129,12 @@ export default function TasksPage() {
   }
 
   const sortedTasks = [...tasks].sort((a, b) => {
-    const aFinished = a.executionLogs[0]?.finishedAt;
-    const bFinished = b.executionLogs[0]?.finishedAt;
-    if (!aFinished && !bFinished) return 0;
-    if (!aFinished) return 1;
-    if (!bFinished) return -1;
-    return new Date(aFinished).getTime() - new Date(bFinished).getTime();
+    const aRun = a.executionLogs[0]?.startedAt;
+    const bRun = b.executionLogs[0]?.startedAt;
+    if (!aRun && !bRun) return 0;
+    if (!aRun) return 1;
+    if (!bRun) return -1;
+    return new Date(bRun).getTime() - new Date(aRun).getTime();
   });
 
   const filteredTasks = sortedTasks.filter((t) => {
