@@ -393,9 +393,13 @@ export interface ClaudeIdleResult {
 
 /**
  * Checks whether the Claude tmux session is idle (waiting for user input).
- * When Claude finishes a task and returns to the prompt, the last non-empty
- * line of the pane is just ">" — the input prompt. We use this to detect
- * that the task has completed.
+ *
+ * Claude Code renders a status bar below the input prompt, so the very last
+ * non-empty line of the captured pane is the status bar, not ">". We scan
+ * the last several non-empty lines so the check is robust to that footer.
+ *
+ * We also confirm Claude is not actively working by checking that none of
+ * the recent lines contain a spinner or "Thinking" indicator.
  */
 export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleResult> {
   const ssh = {
@@ -413,10 +417,17 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
     );
     const pane = cleanPane(stdout);
     const lines = pane.split("\n").filter((l) => l.trim().length > 0);
-    const lastLine = lines[lines.length - 1] ?? "";
 
-    // Claude Code shows ">" as the sole content of the last line when idle
-    const isIdle = /^>\s*$/.test(lastLine);
+    // Look for the "> " prompt in the last 6 lines — covers status bars / model
+    // info footers that Claude Code renders below the input area.
+    const tail = lines.slice(-6);
+    const hasPrompt = tail.some((l) => /^[>❯]\s*$/.test(l));
+
+    // Reject if Claude is visibly working (spinner chars, "Thinking", tool calls)
+    const busyPattern = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Thinking\b|esc to interrupt/i;
+    const isBusy = tail.some((l) => busyPattern.test(l));
+
+    const isIdle = hasPrompt && !isBusy;
 
     return { isIdle, paneText: pane.slice(-2000) };
   } catch (err) {
