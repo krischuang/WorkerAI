@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { sendTaskToTmux } from "@/lib/ssh-claude-tmux";
+import { tryDispatchTaskToServer } from "@/lib/task-dispatch";
 
 export const maxDuration = 30;
 
@@ -30,7 +30,6 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
   const weekBlocked = weekPct >= USAGE_THRESHOLD;
 
   if (sessionBlocked || weekBlocked) {
-    // Return the nearest reset among whichever metrics are blocked
     const blockedResets: Date[] = [];
     if (sessionBlocked && s.claudeSessionResetsAt) blockedResets.push(s.claudeSessionResetsAt);
     if (weekBlocked && s.claudeWeekResetsAt) blockedResets.push(s.claudeWeekResetsAt);
@@ -53,28 +52,23 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
     });
   }
 
-  // Usage OK — send task to Claude in tmux
-  const sendResult = await sendTaskToTmux(
-    { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
-    { title: task.title, description: task.description, projectName: task.project.name }
-  );
+  const outcome = await tryDispatchTaskToServer({
+    taskId: id,
+    serverId: s.id,
+    sshConfig: { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
+    task: { title: task.title, description: task.description, projectName: task.project.name },
+    logText: `Sent to Claude on server "${s.name}" (${s.host}) — mode: ${s.claudePermissionMode}`,
+  });
 
-  if (!sendResult.success) {
-    return NextResponse.json({ error: sendResult.error }, { status: 502 });
+  if (!outcome.ok) {
+    if (outcome.reason === "already_running") {
+      return NextResponse.json({ error: "Server already has a running task" }, { status: 409 });
+    }
+    if (outcome.reason === "task_not_dispatchable") {
+      return NextResponse.json({ error: "Task is not in a runnable state" }, { status: 409 });
+    }
+    return NextResponse.json({ error: outcome.detail ?? "SSH dispatch failed" }, { status: 502 });
   }
-
-  // Mark task running + create execution log
-  await prisma.$transaction([
-    prisma.task.update({ where: { id }, data: { status: "running" } }),
-    prisma.executionLog.create({
-      data: {
-        taskId: id,
-        status: "running",
-        startedAt: new Date(),
-        logText: `Sent to Claude on server "${s.name}" (${s.host}) — mode: ${s.claudePermissionMode}`,
-      },
-    }),
-  ]);
 
   return NextResponse.json({ success: true });
 }

@@ -13,8 +13,8 @@ import { prisma } from "./lib/prisma";
 import {
   fetchClaudeUsageViaTmux,
   detectClaudeIdle,
-  sendTaskToTmux,
 } from "./lib/ssh-claude-tmux";
+import { tryDispatchTaskToServer } from "./lib/task-dispatch";
 
 const TAG = "[usage-poller]";
 
@@ -221,40 +221,20 @@ function startPoller() {
 
         if (!nextTask) return;
 
-        const sendResult = await sendTaskToTmux(
-          {
-            host: srv.host,
-            port: srv.port,
-            username: srv.username,
-            sshKeyPath: srv.sshKeyPath,
-          },
-          { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name }
-        );
+        const outcome = await tryDispatchTaskToServer({
+          taskId: nextTask.id,
+          serverId,
+          sshConfig: { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
+          task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
+          logText:
+            `Auto-started from queue on server "${srv.name}" (${srv.host})` +
+            (srv.claudePermissionMode ? ` — mode: ${srv.claudePermissionMode}` : ""),
+        });
 
-        if (sendResult.success) {
-          await prisma.$transaction([
-            prisma.task.update({
-              where: { id: nextTask.id },
-              data: { status: "running" },
-            }),
-            prisma.executionLog.create({
-              data: {
-                taskId: nextTask.id,
-                status: "running",
-                startedAt: new Date(),
-                logText:
-                  `Auto-started from queue on server "${srv.name}" (${srv.host})` +
-                  (srv.claudePermissionMode ? ` — mode: ${srv.claudePermissionMode}` : ""),
-              },
-            }),
-          ]);
-          console.log(
-            `${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`
-          );
-        } else {
-          console.warn(
-            `${TAG} Queue advance failed for task ${nextTask.id}: ${sendResult.error}`
-          );
+        if (outcome.ok) {
+          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`);
+        } else if (outcome.reason === "ssh_failed") {
+          console.warn(`${TAG} Queue advance failed for task ${nextTask.id}: ${outcome.detail}`);
         }
       })
     ).then((results) => {
@@ -340,26 +320,18 @@ function startPoller() {
 
         if (!nextTask) return;
 
-        const sendResult = await sendTaskToTmux(
-          { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
-          { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name }
-        );
+        const outcome = await tryDispatchTaskToServer({
+          taskId: nextTask.id,
+          serverId: srv.id,
+          sshConfig: { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
+          task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
+          logText: `Auto-started from queue on server "${srv.name}" (${srv.host}) — mode: ${srv.claudePermissionMode}`,
+        });
 
-        if (sendResult.success) {
-          await prisma.$transaction([
-            prisma.task.update({ where: { id: nextTask.id }, data: { status: "running" } }),
-            prisma.executionLog.create({
-              data: {
-                taskId: nextTask.id,
-                status: "running",
-                startedAt: new Date(),
-                logText: `Auto-started from queue on server "${srv.name}" (${srv.host}) — mode: ${srv.claudePermissionMode}`,
-              },
-            }),
-          ]);
+        if (outcome.ok) {
           console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): dispatched from idle-server queue`);
-        } else {
-          console.warn(`${TAG} ${srv.name}: failed to start queued task ${nextTask.id}: ${sendResult.error}`);
+        } else if (outcome.reason === "ssh_failed") {
+          console.warn(`${TAG} ${srv.name}: failed to start queued task ${nextTask.id}: ${outcome.detail}`);
         }
       })
     ).then((results) => {

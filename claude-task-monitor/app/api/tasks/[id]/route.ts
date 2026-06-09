@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { sendTaskToTmux } from "@/lib/ssh-claude-tmux";
+import { tryDispatchTaskToServer } from "@/lib/task-dispatch";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -67,7 +67,8 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
   });
 
   // Auto-run: if task just became queued, immediately try to send it to Claude
-  // if the server has no running tasks and usage is below threshold.
+  // if usage is below threshold. The dispatch helper acquires a per-server lock
+  // and re-checks running count inside it, preventing races with the poller.
   if (autoStatus === "queued" && serverId) {
     try {
       const server = await prisma.server.findUnique({
@@ -80,30 +81,19 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       });
 
       if (server) {
-        const runningCount = await prisma.task.count({
-          where: { serverId: server.id, status: "running" },
-        });
         const sessionPct = server.claudeSessionPct ?? 0;
         const weekPct = server.claudeWeekPct ?? 0;
 
-        if (runningCount === 0 && sessionPct < USAGE_THRESHOLD && weekPct < USAGE_THRESHOLD) {
-          const sendResult = await sendTaskToTmux(
-            { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
-            { title: task.title, description: task.description }
-          );
+        if (sessionPct < USAGE_THRESHOLD && weekPct < USAGE_THRESHOLD) {
+          const outcome = await tryDispatchTaskToServer({
+            taskId: id,
+            serverId: server.id,
+            sshConfig: { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
+            task: { title: task.title, description: task.description, projectName: task.project?.name },
+            logText: `Auto-sent to Claude on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
+          });
 
-          if (sendResult.success) {
-            await prisma.$transaction([
-              prisma.task.update({ where: { id }, data: { status: "running" } }),
-              prisma.executionLog.create({
-                data: {
-                  taskId: id,
-                  status: "running",
-                  startedAt: new Date(),
-                  logText: `Auto-sent to Claude on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
-                },
-              }),
-            ]);
+          if (outcome.ok) {
             // Re-fetch with updated status
             task = await prisma.task.findUnique({
               where: { id },
