@@ -6,16 +6,73 @@ import type { NextRequest } from "next/server";
 export const maxDuration = 600;
 
 const EXEC_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_COMMAND_LENGTH = 4_096;
 
 type Ctx = { params: Promise<{ id: string }> };
 
+// Prevents cross-origin requests from malicious pages that try to use the
+// user's browser to POST commands to the localhost API.
+// Direct requests (curl, server-side fetch) have no Origin header → allowed.
+function isLocalOrigin(request: NextRequest): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+// Narrow blocklist for commands that are irreversible and destructive at the
+// OS level. Arbitrary commands remain allowed — this is an intentional
+// product decision for a local-only tool (see CLAUDE.md). The blocklist only
+// covers operations that can silently destroy the remote host's filesystem or
+// cause unbounded resource exhaustion with no recovery path.
+const DESTRUCTIVE_PATTERNS: RegExp[] = [
+  // rm -rf / or rm -fr / (any flag combination with r+f targeting root)
+  /\brm\s+(-\w*r\w*f\w*|-\w*f\w*r\w*)\s+(\/\s*$|\/\s+)/i,
+  // Filesystem format
+  /\bmkfs\b/i,
+  // dd writing directly to a raw disk device
+  /\bdd\b.*\bof=\/dev\/(s|h|vd|xvd|nvme)/i,
+  // Classic fork bomb
+  /:\s*\(\s*\)\s*\{.*\|.*:.*\}.*;\s*:/,
+  // Wipe disk with shred/wipefs
+  /\b(shred|wipefs)\b.*\/dev\//i,
+];
+
+function isDestructiveCommand(cmd: string): boolean {
+  return DESTRUCTIVE_PATTERNS.some((re) => re.test(cmd));
+}
+
 export async function POST(request: NextRequest, ctx: Ctx) {
+  if (!isLocalOrigin(request)) {
+    return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const { id } = await ctx.params;
   const body = await request.json();
   const { command } = body as { command: string };
 
   if (!command || typeof command !== "string" || command.trim() === "") {
     return Response.json({ error: "command is required" }, { status: 400 });
+  }
+
+  if (command.length > MAX_COMMAND_LENGTH) {
+    return Response.json(
+      { error: `Command exceeds maximum length of ${MAX_COMMAND_LENGTH} characters` },
+      { status: 400 }
+    );
+  }
+
+  const trimmed = command.trim();
+
+  if (isDestructiveCommand(trimmed)) {
+    return Response.json(
+      { error: "Command matches a destructive pattern and has been blocked" },
+      { status: 422 }
+    );
   }
 
   const server = await prisma.server.findUnique({ where: { id } });
@@ -34,7 +91,7 @@ export async function POST(request: NextRequest, ctx: Ctx) {
         port: server.port,
         sshKeyPath: server.sshKeyPath,
       },
-      command.trim(),
+      trimmed,
       EXEC_TIMEOUT_MS,
       request.signal  // closes SSH when client aborts the fetch
     );
@@ -52,7 +109,7 @@ export async function POST(request: NextRequest, ctx: Ctx) {
   await prisma.serverCommandLog.create({
     data: {
       serverId: id,
-      command: command.trim(),
+      command: trimmed,
       status: logStatus,
       output,
       errorMessage,
