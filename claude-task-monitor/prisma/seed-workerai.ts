@@ -70,6 +70,34 @@ async function main() {
       taskType: "coding" as const,
       estimatedCostLevel: "low" as const,
     },
+    {
+      title: "Add archive flow: Review button on completed tasks",
+      description: INSTRUCTIONS(
+        `Implement the archive review flow for completed tasks:
+
+1. Schema: Add 'archived' to the TaskStatus enum in prisma/schema.prisma. Run db:migrate.
+
+2. API — new POST /api/tasks/[id]/review route:
+   - Reads the task's title, description, resultSummary, and latest ExecutionLog.
+   - Sends a structured prompt to Claude (via sendTaskToTmux) asking it to verify whether the task was truly completed.
+   - The prompt must instruct Claude to reply with exactly one line: 'VERDICT: done' or 'VERDICT: incomplete'.
+   - Poll tmux capture-pane (up to 30 s, 2 s intervals) for the verdict line.
+   - If 'done'  → update task status to 'archived'.
+   - If 'incomplete' → update task status to 'pending', clear resultSummary.
+   - Return { verdict: 'done' | 'incomplete', status: newStatus }.
+
+3. UI — task detail page (app/tasks/[id]/page.tsx):
+   - When task.status === 'completed': show a 'Review' button (secondary style) next to the existing status.
+   - Clicking 'Review' calls POST /api/tasks/[id]/review and shows a loading state ('Reviewing…').
+   - On success, update the displayed status to 'archived' or 'pending' based on the response.
+   - Show a brief result banner: green 'Archived — Claude confirmed complete' or amber 'Back to pending — Claude found it incomplete'.
+
+4. Anywhere task status badges are shown, add 'archived' as a grey/slate badge.`
+      ),
+      priority: "P2" as const,
+      taskType: "coding" as const,
+      estimatedCostLevel: "medium" as const,
+    },
   ];
 
   let created = 0;
