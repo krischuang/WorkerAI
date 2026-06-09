@@ -30,6 +30,7 @@ import {
   looksLikeUsage,
   cleanPane,
 } from "@/lib/usage-parser";
+import { buildDispatchPrompt, type DispatchTask } from "@/lib/prompt-sanitiser";
 
 export type { ClaudeUsageParsed };
 
@@ -334,9 +335,14 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
  * Sends a task prompt to the Claude REPL running in the "claude" tmux session.
  * Uses base64 + tmux load-buffer to safely handle any text content.
  */
-export async function sendTaskToTmux(
+/**
+ * Send a pre-built prompt string to the Claude tmux session.
+ * Handles the base64 encoding, temp-file, and paste mechanics.
+ * Does NOT build or sanitise the prompt — callers are responsible for that.
+ */
+export async function sendRawPromptToTmux(
   config: SSHConfig,
-  task: { title: string; description?: string | null; projectName?: string | null }
+  promptText: string,
 ): Promise<{ success: boolean; error?: string }> {
   const ssh = {
     host: config.host,
@@ -345,7 +351,6 @@ export async function sendTaskToTmux(
     sshKeyPath: config.sshKeyPath,
   };
 
-  // Verify session exists
   try {
     const { stdout } = await execSSH(
       ssh,
@@ -362,25 +367,9 @@ export async function sendTaskToTmux(
     };
   }
 
-  // Format the prompt — optional project nav instruction + task title + optional description
-  const lines: string[] = [];
-  if (task.projectName?.trim()) {
-    lines.push(
-      `Project: ${task.projectName.trim()}`,
-      `Find the directory for project "${task.projectName.trim()}", cd into it, then complete the task below.`,
-      ""
-    );
-  }
-  lines.push(`Task: ${task.title}`);
-  if (task.description?.trim()) {
-    lines.push("", task.description.trim());
-  }
-  const prompt = lines.join("\n");
+  // Base64-encode so any characters in the prompt survive shell quoting.
+  const b64 = Buffer.from(promptText).toString("base64");
 
-  // Base64 encode so any special characters in the task text are safe to pass through shell
-  const b64 = Buffer.from(prompt).toString("base64");
-
-  // Write to temp file → load into tmux buffer → paste → Enter
   const cmd = [
     `printf '%s' '${b64}' | base64 -d > /tmp/.claude_task`,
     `tmux load-buffer /tmp/.claude_task`,
@@ -399,4 +388,16 @@ export async function sendTaskToTmux(
       error: `Failed to send task to tmux: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
+
+/**
+ * Build a structurally hardened prompt from the task fields and paste it into
+ * the Claude tmux session.  User-supplied fields are XML-fenced to prevent
+ * prompt-injection attacks.
+ */
+export async function sendTaskToTmux(
+  config: SSHConfig,
+  task: DispatchTask,
+): Promise<{ success: boolean; error?: string }> {
+  return sendRawPromptToTmux(config, buildDispatchPrompt(task));
 }

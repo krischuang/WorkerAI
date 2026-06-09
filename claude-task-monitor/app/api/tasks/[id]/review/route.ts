@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { execSSH, type ServerConfig } from "@/lib/ssh";
-import { sendTaskToTmux } from "@/lib/ssh-claude-tmux";
+import { sendRawPromptToTmux } from "@/lib/ssh-claude-tmux";
 import { withServerDispatchLock } from "@/lib/dispatch-lock";
+import { buildReviewPrompt } from "@/lib/prompt-sanitiser";
 
 export const maxDuration = 120;
 
@@ -76,30 +77,15 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
   const s = task.server;
   const latestLog = task.executionLogs[0] ?? null;
 
-  const promptLines = [
-    "You are reviewing whether a task was truly completed.",
-    "",
-    `Task: ${task.title}`,
-  ];
-  if (task.description?.trim()) {
-    promptLines.push(`Description: ${task.description.trim()}`);
-  }
-  if (task.resultSummary?.trim()) {
-    promptLines.push(`Result Summary: ${task.resultSummary.trim()}`);
-  }
-  if (latestLog) {
-    if (latestLog.outputSummary?.trim()) {
-      promptLines.push(`Last Execution Output: ${latestLog.outputSummary.trim()}`);
-    }
-    if (latestLog.logText?.trim()) {
-      promptLines.push("", "Last Execution Log:", latestLog.logText.trim());
-    }
-  }
-  promptLines.push(
-    "",
-    "Based on the above information, determine whether this task was truly completed.",
-    "Reply with exactly one line: 'VERDICT: done' or 'VERDICT: incomplete'"
-  );
+  // Build a structurally hardened prompt that XML-fences all user-supplied and
+  // DB-derived fields so injected directives cannot escape their data context.
+  const reviewPrompt = buildReviewPrompt({
+    title: task.title,
+    description: task.description,
+    resultSummary: task.resultSummary,
+    outputSummary: latestLog?.outputSummary,
+    logText: latestLog?.logText,
+  });
 
   const ssh: ServerConfig = {
     host: s.host,
@@ -125,9 +111,9 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
       };
     }
 
-    const sendResult = await sendTaskToTmux(
+    const sendResult = await sendRawPromptToTmux(
       { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
-      { title: "Review Task Completion", description: promptLines.join("\n") }
+      reviewPrompt,
     );
     if (!sendResult.success) {
       return { ok: false, error: sendResult.error ?? "SSH dispatch failed", httpStatus: 502 };
