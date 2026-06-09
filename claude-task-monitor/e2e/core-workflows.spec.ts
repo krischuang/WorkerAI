@@ -20,6 +20,16 @@ let serverId: string;
 test.describe("Core user workflows", () => {
   test.beforeAll(async ({ playwright }) => {
     api = await playwright.request.newContext({ baseURL: "http://localhost:3000" });
+    // Authenticate — cookie is stored in the request context's cookie jar and
+    // sent automatically on all subsequent requests.
+    const secret = process.env.AUTH_SECRET;
+    if (secret) {
+      const res = await api.post("/api/auth", { data: { password: secret } });
+      // 404 means this build predates auth — the server is still open, continue.
+      if (!res.ok() && res.status() !== 404) {
+        throw new Error(`E2E auth failed: ${res.status()} ${await res.text()}`);
+      }
+    }
   });
 
   test.afterAll(async () => {
