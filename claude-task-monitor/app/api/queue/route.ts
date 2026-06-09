@@ -4,10 +4,13 @@ const PRIORITY_ORDER: Record<string, number> = { P1: 1, P2: 2, P3: 3, P4: 4 };
 
 export async function GET() {
   const tasks = await prisma.task.findMany({
-    where: { status: "pending" },
+    where: { status: { in: ["pending", "queued"] } },
     include: {
       project: {
         select: { id: true, name: true, priority: true, status: true },
+      },
+      server: {
+        select: { id: true, name: true, host: true },
       },
     },
     orderBy: { createdAt: "asc" },
