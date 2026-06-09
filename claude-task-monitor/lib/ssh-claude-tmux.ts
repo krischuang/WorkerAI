@@ -370,13 +370,17 @@ export async function sendRawPromptToTmux(
   // Base64-encode so any characters in the prompt survive shell quoting.
   const b64 = Buffer.from(promptText).toString("base64");
 
+  // Use a unique temp file per invocation to avoid collisions when multiple
+  // dispatches run concurrently (e.g. poller + manual run at the same time).
+  const tmpFile = `/tmp/.claude_task_${crypto.randomUUID()}`;
+
   const cmd = [
-    `printf '%s' '${b64}' | base64 -d > /tmp/.claude_task`,
-    `tmux load-buffer /tmp/.claude_task`,
+    `printf '%s' '${b64}' | base64 -d > ${tmpFile}`,
+    `tmux load-buffer ${tmpFile}`,
     `tmux paste-buffer -t ${TMUX_SESSION}`,
     `sleep 0.3`,
     `tmux send-keys -t ${TMUX_SESSION} Enter`,
-    `rm -f /tmp/.claude_task`,
+    `rm -f ${tmpFile}`,
   ].join(" && ");
 
   try {
