@@ -14,7 +14,7 @@ export async function GET(request: Request) {
       project: { select: { name: true, priority: true } },
       _count: { select: { executionLogs: true } },
       executionLogs: {
-        select: { startedAt: true },
+        select: { startedAt: true, finishedAt: true },
         orderBy: { startedAt: "desc" },
         take: 1,
       },
