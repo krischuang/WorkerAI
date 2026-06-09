@@ -306,15 +306,21 @@ export default function TaskDetailPage() {
   async function handleReview() {
     setReviewState("reviewing");
     setReviewError(null);
-    const res = await fetch(`/api/tasks/${id}/review`, { method: "POST" });
-    const data = await res.json();
-    if (!res.ok) {
+    try {
+      const res = await fetch(`/api/tasks/${id}/review`, { method: "POST" });
+      let data: { verdict?: string; error?: string } = {};
+      try { data = await res.json(); } catch { /* non-JSON error body */ }
+      if (!res.ok) {
+        setReviewState("error");
+        setReviewError(data.error ?? `Server error (${res.status})`);
+        return;
+      }
+      setReviewState(data.verdict === "done" ? "done" : "incomplete");
+      loadTask();
+    } catch {
       setReviewState("error");
-      setReviewError(data.error ?? "Review failed");
-      return;
+      setReviewError("Network error — please try again");
     }
-    setReviewState(data.verdict === "done" ? "done" : "incomplete");
-    loadTask();
   }
 
   async function handleAddLog(e: React.FormEvent) {

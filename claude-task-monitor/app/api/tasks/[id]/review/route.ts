@@ -3,13 +3,13 @@ import { prisma } from "@/lib/prisma";
 import { execSSH, type ServerConfig } from "@/lib/ssh";
 import { sendTaskToTmux } from "@/lib/ssh-claude-tmux";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 type Ctx = { params: Promise<{ id: string }> };
 
 const TMUX_SESSION = "claude";
 const POLL_INTERVAL_MS = 2_000;
-const POLL_TIMEOUT_MS = 30_000;
+const POLL_TIMEOUT_MS = 50_000;
 
 function cleanPane(raw: string): string {
   return raw
