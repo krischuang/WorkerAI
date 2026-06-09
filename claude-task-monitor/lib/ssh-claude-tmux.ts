@@ -468,7 +468,7 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
  */
 export async function sendTaskToTmux(
   config: SSHConfig,
-  task: { title: string; description?: string | null; projectName?: string | null }
+  task: { title: string; description?: string | null }
 ): Promise<{ success: boolean; error?: string }> {
   const ssh = {
     host: config.host,
@@ -494,12 +494,8 @@ export async function sendTaskToTmux(
     };
   }
 
-  // Format the prompt — project name (nav hint), task title, optional description
-  const lines: string[] = [];
-  if (task.projectName?.trim()) {
-    lines.push(`Project: ${task.projectName.trim()}`);
-  }
-  lines.push(`Task: ${task.title}`);
+  // Format the prompt — task title + optional description
+  const lines = [`Task: ${task.title}`];
   if (task.description?.trim()) {
     lines.push("", task.description.trim());
   }
