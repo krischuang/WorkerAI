@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createHash } from "crypto";
+import { isLocalOrigin } from "@/lib/exec-guards";
 
 export const AUTH_COOKIE = "__auth";
 
@@ -11,6 +12,8 @@ export function cookieToken(secret: string): string {
 function isPublicPath(pathname: string): boolean {
   return pathname === "/login" || pathname.startsWith("/api/auth");
 }
+
+const MUTATING_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -26,6 +29,20 @@ export function middleware(request: NextRequest) {
 
   // Login page and auth endpoint — no cookie required.
   if (isPublicPath(pathname)) return NextResponse.next();
+
+  // CSRF: reject mutating requests whose Origin header points to a non-localhost
+  // source. Requests with no Origin header (curl, server-side fetches, direct
+  // API calls) are allowed. This runs before the auth check so cross-origin
+  // probes cannot distinguish authenticated from unauthenticated state.
+  if (MUTATING_METHODS.has(request.method)) {
+    const origin = request.headers.get("origin");
+    if (!isLocalOrigin(origin)) {
+      return new NextResponse(JSON.stringify({ error: "Forbidden" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    }
+  }
 
   const secret = process.env.AUTH_SECRET;
 
