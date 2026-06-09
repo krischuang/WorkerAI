@@ -14,7 +14,7 @@ export async function GET(request: Request) {
       project: { select: { name: true, priority: true } },
       _count: { select: { executionLogs: true } },
       executionLogs: {
-        select: { startedAt: true },
+        select: { startedAt: true, finishedAt: true },
         orderBy: { startedAt: "desc" },
         take: 1,
       },
@@ -22,6 +22,18 @@ export async function GET(request: Request) {
     orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
   });
   return Response.json(tasks);
+}
+
+export async function DELETE(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const status = searchParams.get("status");
+
+  if (!status) {
+    return Response.json({ error: "status query param is required" }, { status: 400 });
+  }
+
+  const { count } = await prisma.task.deleteMany({ where: { status: status as never } });
+  return Response.json({ deleted: count });
 }
 
 export async function POST(request: Request) {
