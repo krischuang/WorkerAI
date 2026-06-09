@@ -61,6 +61,8 @@ model Task {
   project            Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
   serverId           String?
   server             Server?        @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  agentId            String?
+  agent              Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
   title              String
   description        String?
   priority           Priority       @default(P3)
@@ -72,6 +74,11 @@ model Task {
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   executionLogs      ExecutionLog[]
+
+  @@index([status])
+  @@index([priority])
+  @@index([projectId])
+  @@index([serverId])
 }
 
 model ExecutionLog {
@@ -104,6 +111,41 @@ enum ClaudePermissionMode {
   full_autonomous
 }
 
+enum AgentStatus {
+  idle
+  running
+  offline
+  error
+}
+
+model Agent {
+  id          String      @id @default(cuid())
+  serverId    String
+  server      Server      @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String
+  workDir     String
+  tmuxSession String
+
+  status               AgentStatus          @default(offline)
+  claudePermissionMode ClaudePermissionMode @default(workspace_write)
+
+  claudeSessionPct      Float?
+  claudeSessionResets   String?
+  claudeSessionResetsAt DateTime?
+  claudeWeekPct         Float?
+  claudeWeekResets      String?
+  claudeWeekResetsAt    DateTime?
+  claudeUsageRaw        String?
+  claudeUsageFetchedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tasks     Task[]
+
+  @@unique([serverId, slug])
+}
+
 model Server {
   id            String        @id @default(cuid())
   name          String
@@ -117,6 +159,7 @@ model Server {
   updatedAt     DateTime      @updatedAt
   commandLogs   ServerCommandLog[]
   tasks         Task[]
+  agents        Agent[]
 
   // Claude execution mode — controls which flags are passed when launching Claude CLI
   claudePermissionMode  ClaudePermissionMode @default(workspace_write)
