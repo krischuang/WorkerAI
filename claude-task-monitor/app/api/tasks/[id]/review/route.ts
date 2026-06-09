@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { execSSH, type ServerConfig } from "@/lib/ssh";
 import { sendTaskToTmux } from "@/lib/ssh-claude-tmux";
+import { withServerDispatchLock } from "@/lib/dispatch-lock";
 
 export const maxDuration = 120;
 
@@ -100,15 +101,6 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
     "Reply with exactly one line: 'VERDICT: done' or 'VERDICT: incomplete'"
   );
 
-  const sendResult = await sendTaskToTmux(
-    { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
-    { title: "Review Task Completion", description: promptLines.join("\n") }
-  );
-
-  if (!sendResult.success) {
-    return NextResponse.json({ error: sendResult.error }, { status: 502 });
-  }
-
   const ssh: ServerConfig = {
     host: s.host,
     port: s.port,
@@ -116,7 +108,42 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
     sshKeyPath: s.sshKeyPath,
   };
 
-  const verdict = await pollForVerdict(ssh, POLL_TIMEOUT_MS);
+  type ReviewOutcome =
+    | { ok: true; verdict: "done" | "incomplete" | null }
+    | { ok: false; error: string; httpStatus: number };
+
+  const result = await withServerDispatchLock<ReviewOutcome>(s.id, async () => {
+    // Guard: refuse to inject into a session that's executing another task.
+    const runningCount = await prisma.task.count({
+      where: { serverId: s.id, status: "running" },
+    });
+    if (runningCount > 0) {
+      return {
+        ok: false,
+        error: "Server has a running task — retry once it completes",
+        httpStatus: 409,
+      };
+    }
+
+    const sendResult = await sendTaskToTmux(
+      { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
+      { title: "Review Task Completion", description: promptLines.join("\n") }
+    );
+    if (!sendResult.success) {
+      return { ok: false, error: sendResult.error ?? "SSH dispatch failed", httpStatus: 502 };
+    }
+
+    // Hold the lock through polling so no task dispatch can corrupt the session
+    // while we wait for Claude's VERDICT response (up to 50 s).
+    const verdict = await pollForVerdict(ssh, POLL_TIMEOUT_MS);
+    return { ok: true, verdict };
+  });
+
+  if (!result.ok) {
+    return NextResponse.json({ error: result.error }, { status: result.httpStatus });
+  }
+
+  const { verdict } = result;
 
   if (!verdict) {
     return NextResponse.json(
