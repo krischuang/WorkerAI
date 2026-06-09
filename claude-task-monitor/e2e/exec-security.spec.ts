@@ -21,6 +21,12 @@ let guardsActive = false;
 test.describe("POST /api/servers/:id/exec — security guards", () => {
   test.beforeAll(async ({ playwright }) => {
     api = await playwright.request.newContext({ baseURL: "http://localhost:3000" });
+    // Authenticate so middleware lets the security-probe requests through.
+    const secret = process.env.AUTH_SECRET;
+    if (secret) {
+      // 404 means this build predates auth — the server is still open, continue.
+      await api.post("/api/auth", { data: { password: secret } }).catch(() => {});
+    }
 
     // Probe: if the origin guard is live, a foreign-origin request returns 403.
     // Against a pre-guard production build it returns 404 (DB miss). We skip

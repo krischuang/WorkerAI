@@ -1,4 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
+import { config as loadEnv } from "dotenv";
+
+// Load .env so AUTH_SECRET is available to tests when running via CLI.
+loadEnv();
 
 export default defineConfig({
   testDir: "./e2e",

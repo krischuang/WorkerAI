@@ -42,7 +42,18 @@ export function Nav() {
           );
         })}
       </ul>
-      <div className="text-xs text-zinc-400 mt-4">v1.0 — local</div>
+      <div className="mt-4 space-y-2">
+        <button
+          onClick={async () => {
+            await fetch("/api/auth", { method: "DELETE" });
+            window.location.href = "/login";
+          }}
+          className="block w-full rounded-md px-3 py-2 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors text-left"
+        >
+          Sign out
+        </button>
+        <div className="text-xs text-zinc-500">v1.0 — local</div>
+      </div>
     </nav>
   );
 }
