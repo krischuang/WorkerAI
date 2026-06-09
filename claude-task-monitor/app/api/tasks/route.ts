@@ -24,6 +24,18 @@ export async function GET(request: Request) {
   return Response.json(tasks);
 }
 
+export async function DELETE(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const status = searchParams.get("status");
+
+  if (!status) {
+    return Response.json({ error: "status query param is required" }, { status: 400 });
+  }
+
+  const { count } = await prisma.task.deleteMany({ where: { status: status as never } });
+  return Response.json({ deleted: count });
+}
+
 export async function POST(request: Request) {
   const body = await request.json();
   const {
