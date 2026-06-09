@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail -n next,ws -c cyan,green \"next dev\" \"tsx ws-server.ts\"",
+    "dev": "concurrently --kill-others-on-fail -n next,ws -c cyan,green \"next dev --turbopack\" \"tsx ws-server.ts\"",
     "ws": "tsx ws-server.ts",
     "build": "next build",
     "start": "next start",
