@@ -65,7 +65,7 @@ export default function TerminalPage() {
       <div className="flex-1 min-h-0 bg-zinc-950">
         <InteractiveTerminal
           serverId={id}
-          serverLabel={server?.name ?? serverLabel}
+          label={server?.name ?? serverLabel}
         />
       </div>
     </div>

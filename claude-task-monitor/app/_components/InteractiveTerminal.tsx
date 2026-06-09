@@ -15,11 +15,12 @@ const WS_URL =
 type ConnState = "connecting" | "connected" | "disconnected" | "error";
 
 interface Props {
-  serverId: string;
-  serverLabel: string;
+  serverId?: string;
+  agentId?: string;
+  label: string;
 }
 
-export default function InteractiveTerminal({ serverId, serverLabel }: Props) {
+export default function InteractiveTerminal({ serverId, agentId, label }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [connState, setConnState] = useState<ConnState>("connecting");
   const [errorMsg, setErrorMsg] = useState("");
@@ -83,7 +84,10 @@ export default function InteractiveTerminal({ serverId, serverLabel }: Props) {
       // Track current size so we can send on WS open
       let { cols, rows } = term;
 
-      const ws = new WebSocket(`${WS_URL}?serverId=${encodeURIComponent(serverId)}`);
+      const wsQuery = agentId
+        ? `agentId=${encodeURIComponent(agentId)}`
+        : `serverId=${encodeURIComponent(serverId ?? "")}`;
+      const ws = new WebSocket(`${WS_URL}?${wsQuery}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -168,14 +172,14 @@ export default function InteractiveTerminal({ serverId, serverLabel }: Props) {
       cancelled = true;
       disposeRef.current?.();
     };
-  }, [serverId]);
+  }, [serverId, agentId]);
 
   return (
     <div className="relative h-full w-full bg-zinc-950 rounded-xl overflow-hidden">
       {/* Overlay shown until SSH shell is ready */}
       {connState === "connecting" && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
-          <p className="text-zinc-500 text-sm font-mono">Connecting to {serverLabel}…</p>
+          <p className="text-zinc-500 text-sm font-mono">Connecting to {label}…</p>
         </div>
       )}
       {connState === "error" && (
