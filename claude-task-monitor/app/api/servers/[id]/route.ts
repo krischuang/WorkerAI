@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { validateSshKeyPath } from "@/lib/ssh-key-path";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -23,6 +24,15 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
   const body = await request.json();
   const { name, host, username, port, sshKeyPath, claudePermissionMode } = body;
 
+  let resolvedKeyPath: string | undefined;
+  if (sshKeyPath !== undefined) {
+    const keyValidation = validateSshKeyPath(sshKeyPath);
+    if (!keyValidation.ok) {
+      return Response.json({ error: keyValidation.error }, { status: 400 });
+    }
+    resolvedKeyPath = keyValidation.resolved;
+  }
+
   const server = await prisma.server.update({
     where: { id },
     data: {
@@ -30,7 +40,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       ...(host !== undefined && { host }),
       ...(username !== undefined && { username }),
       ...(port !== undefined && { port: Number(port) }),
-      ...(sshKeyPath !== undefined && { sshKeyPath }),
+      ...(resolvedKeyPath !== undefined && { sshKeyPath: resolvedKeyPath }),
       ...(claudePermissionMode !== undefined && { claudePermissionMode }),
     },
   });

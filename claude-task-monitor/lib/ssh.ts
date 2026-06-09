@@ -1,7 +1,6 @@
 import { Client } from "ssh2";
 import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
+import { validateSshKeyPath } from "./ssh-key-path";
 
 const TIMEOUT_MS = 15_000;
 
@@ -35,10 +34,9 @@ export interface CommandResult {
 }
 
 function resolveKeyPath(keyPath: string): string {
-  if (keyPath.startsWith("~/")) {
-    return path.join(os.homedir(), keyPath.slice(2));
-  }
-  return keyPath;
+  const result = validateSshKeyPath(keyPath);
+  if (!result.ok) throw new Error(`Refusing SSH connection: ${result.error}`);
+  return result.resolved;
 }
 
 // Core SSH execution — no allowlist enforcement, callers decide policy.

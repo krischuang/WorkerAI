@@ -8,6 +8,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import type { IncomingMessage } from "http";
+import { validateSshKeyPath } from "./lib/ssh-key-path";
 
 const WS_PORT = Number(process.env.WS_PORT ?? 3099);
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -23,9 +24,9 @@ const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 const wss = new WebSocketServer({ port: WS_PORT });
 
 function resolveKeyPath(keyPath: string): string {
-  return keyPath.startsWith("~/")
-    ? path.join(os.homedir(), keyPath.slice(2))
-    : keyPath;
+  const result = validateSshKeyPath(keyPath);
+  if (!result.ok) throw new Error(`Refusing SSH connection: ${result.error}`);
+  return result.resolved;
 }
 
 type InMsg =

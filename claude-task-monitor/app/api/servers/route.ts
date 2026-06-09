@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { validateSshKeyPath } from "@/lib/ssh-key-path";
 
 export async function GET() {
   const servers = await prisma.server.findMany({
@@ -32,13 +33,18 @@ export async function POST(request: Request) {
     );
   }
 
+  const keyValidation = validateSshKeyPath(sshKeyPath);
+  if (!keyValidation.ok) {
+    return Response.json({ error: keyValidation.error }, { status: 400 });
+  }
+
   const server = await prisma.server.create({
     data: {
       name,
       host,
       username,
       port: port ? Number(port) : 22,
-      sshKeyPath,
+      sshKeyPath: keyValidation.resolved,
       ...(claudePermissionMode !== undefined && { claudePermissionMode }),
     },
   });

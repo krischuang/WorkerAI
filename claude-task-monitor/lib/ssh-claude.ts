@@ -18,6 +18,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { execSSH } from "@/lib/ssh";
+import { validateSshKeyPath } from "@/lib/ssh-key-path";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -60,9 +61,9 @@ function stripAnsi(s: string): string {
 }
 
 function resolveKeyPath(keyPath: string): string {
-  return keyPath.startsWith("~/")
-    ? path.join(os.homedir(), keyPath.slice(2))
-    : keyPath;
+  const result = validateSshKeyPath(keyPath);
+  if (!result.ok) throw new Error(`Refusing SSH connection: ${result.error}`);
+  return result.resolved;
 }
 
 /**
