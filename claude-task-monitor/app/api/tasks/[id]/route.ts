@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { sendTaskToTmux } from "@/lib/ssh-claude-tmux";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -29,6 +30,8 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
   return Response.json(task);
 }
 
+const USAGE_THRESHOLD = 90;
+
 export async function PUT(request: NextRequest, ctx: Ctx) {
   const { id } = await ctx.params;
   const body = await request.json();
@@ -46,7 +49,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     if (current?.status === "pending") autoStatus = "queued";
   }
 
-  const task = await prisma.task.update({
+  let task = await prisma.task.update({
     where: { id },
     data: {
       ...(title !== undefined && { title }),
@@ -62,6 +65,59 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     },
     include: { project: { select: { name: true } }, server: { select: SERVER_USAGE_SELECT } },
   });
+
+  // Auto-run: if task just became queued, immediately try to send it to Claude
+  // if the server has no running tasks and usage is below threshold.
+  if (autoStatus === "queued" && serverId) {
+    try {
+      const server = await prisma.server.findUnique({
+        where: { id: serverId as string },
+        select: {
+          id: true, name: true, host: true, port: true,
+          username: true, sshKeyPath: true, claudePermissionMode: true,
+          claudeSessionPct: true, claudeWeekPct: true,
+        },
+      });
+
+      if (server) {
+        const runningCount = await prisma.task.count({
+          where: { serverId: server.id, status: "running" },
+        });
+        const sessionPct = server.claudeSessionPct ?? 0;
+        const weekPct = server.claudeWeekPct ?? 0;
+
+        if (runningCount === 0 && sessionPct < USAGE_THRESHOLD && weekPct < USAGE_THRESHOLD) {
+          const sendResult = await sendTaskToTmux(
+            { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
+            { title: task.title, description: task.description }
+          );
+
+          if (sendResult.success) {
+            await prisma.$transaction([
+              prisma.task.update({ where: { id }, data: { status: "running" } }),
+              prisma.executionLog.create({
+                data: {
+                  taskId: id,
+                  status: "running",
+                  startedAt: new Date(),
+                  logText: `Auto-sent to Claude on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
+                },
+              }),
+            ]);
+            // Re-fetch with updated status
+            task = await prisma.task.findUnique({
+              where: { id },
+              include: { project: { select: { name: true } }, server: { select: SERVER_USAGE_SELECT } },
+            }) ?? task;
+          }
+        }
+      }
+    } catch (err) {
+      // Auto-run failure is non-fatal — task stays queued and poller will retry
+      console.error(`[auto-run] Task ${id}: failed to auto-run:`, err);
+    }
+  }
+
   return Response.json(task);
 }
 
