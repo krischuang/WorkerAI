@@ -21,6 +21,7 @@ interface ServerSummary {
 interface DashboardData {
   activeProjects: number;
   pendingTasks: number;
+  queuedTasks: number;
   runningTasks: number;
   completedToday: number;
   failedTasks: number;
@@ -71,12 +72,14 @@ export default function DashboardPage() {
     <div className="p-8 max-w-5xl">
       <PageHeader title="Dashboard" />
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
         <StatCard label="Active Projects" value={data.activeProjects} color="text-zinc-900" />
         <StatCard label="Pending" value={data.pendingTasks} color="text-zinc-700" />
+        <StatCard label="Queued" value={data.queuedTasks} color="text-violet-700" />
         <StatCard label="Running" value={data.runningTasks} color="text-blue-700" />
         <StatCard label="Completed Today" value={data.completedToday} color="text-green-700" />
         <StatCard label="Failed" value={data.failedTasks} color="text-red-700" />
+        <StatCard label="Connected Servers" value={data.servers.connectedServers} color="text-green-700" />
       </div>
 
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">

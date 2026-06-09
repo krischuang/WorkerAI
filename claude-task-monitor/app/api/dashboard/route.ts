@@ -7,6 +7,7 @@ export async function GET() {
   const [
     activeProjects,
     pendingTasks,
+    queuedTasks,
     runningTasks,
     completedToday,
     failedTasks,
@@ -19,6 +20,7 @@ export async function GET() {
   ] = await Promise.all([
     prisma.project.count({ where: { status: "active" } }),
     prisma.task.count({ where: { status: "pending" } }),
+    prisma.task.count({ where: { status: "queued" } }),
     prisma.task.count({ where: { status: "running" } }),
     prisma.task.count({
       where: { status: "completed", updatedAt: { gte: startOfDay } },
@@ -49,6 +51,7 @@ export async function GET() {
   return Response.json({
     activeProjects,
     pendingTasks,
+    queuedTasks,
     runningTasks,
     completedToday,
     failedTasks,

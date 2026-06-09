@@ -1,37 +1,38 @@
 /**
- * Node.js-only instrumentation — loaded by instrumentation.ts only in the Node runtime.
+ * Node.js-only instrumentation — imported by instrumentation.ts when
+ * NEXT_RUNTIME === "nodejs". Module-level code runs on import, which is
+ * how Next.js triggers it (no register() call needed).
  *
- * Starts a background poller that fires every 60 seconds:
- *   1. Fetches Claude CLI usage for every server via tmux and persists it to the DB.
- *   2. Checks every running task's assigned server for Claude idle state; if idle,
- *      marks the task completed and closes its open ExecutionLog.
- *
- * Deduplication: a `globalThis` flag prevents a second interval from being
- * registered when Turbopack reloads modules during development.
+ * Background poller fires every 60 seconds:
+ *   1. Fetches Claude CLI usage for every server via tmux and persists to DB.
+ *   2. Checks running tasks for Claude idle state; marks completed + closes log.
+ *   3. Auto-advances the queue: sends the next queued task on any now-idle server.
  */
 
-export async function register() {
-  // Prevent duplicate intervals on hot-reload (Turbopack dev mode).
-  const g = globalThis as unknown as { _usagePollerStarted?: boolean };
-  if (g._usagePollerStarted) return;
+import { prisma } from "./lib/prisma";
+import {
+  fetchClaudeUsageViaTmux,
+  detectClaudeIdle,
+  sendTaskToTmux,
+} from "./lib/ssh-claude-tmux";
+
+const TAG = "[usage-poller]";
+
+// Prevent a second interval when Turbopack reloads the module (dev hot-reload).
+const g = globalThis as unknown as { _usagePollerStarted?: boolean };
+if (!g._usagePollerStarted) {
   g._usagePollerStarted = true;
+  startPoller();
+}
 
-  // Lazy imports — keeps instrumentation.ts safe to parse during Next.js build
-  // analysis even before the generated Prisma client exists.
-  const { prisma } = await import("./lib/prisma");
-  const { fetchClaudeUsageViaTmux, detectClaudeIdle } = await import(
-    "./lib/ssh-claude-tmux"
-  );
-
-  const TAG = "[usage-poller]";
-
+function startPoller() {
   // ── Core polling logic ──────────────────────────────────────────────────────
 
   async function runCheck() {
     const ts = new Date().toISOString();
     console.log(`${TAG} ${ts} — starting usage + completion check`);
 
-    // ── 1. Refresh Claude usage for every server ──────────────────────────────
+    // ── 1. Refresh Claude usage for every server ────────────────────────────
     let servers: {
       id: string;
       name: string;
@@ -69,24 +70,24 @@ export async function register() {
           await prisma.server.update({
             where: { id: srv.id },
             data: {
-              claudeSessionPct:      result.parsed.sessionPct    ?? null,
-              claudeSessionResets:   result.parsed.sessionResets  ?? null,
-              claudeSessionResetsAt: result.parsed.sessionResetsAt ?? null,
-              claudeWeekPct:         result.parsed.weekPct         ?? null,
-              claudeWeekResets:      result.parsed.weekResets      ?? null,
-              claudeWeekResetsAt:    result.parsed.weekResetsAt    ?? null,
+              claudeSessionPct:      result.parsed.sessionPct      ?? null,
+              claudeSessionResets:   result.parsed.sessionResets    ?? null,
+              claudeSessionResetsAt: result.parsed.sessionResetsAt  ?? null,
+              claudeWeekPct:         result.parsed.weekPct           ?? null,
+              claudeWeekResets:      result.parsed.weekResets        ?? null,
+              claudeWeekResetsAt:    result.parsed.weekResetsAt      ?? null,
               claudeUsageRaw:        result.rawOutput,
               claudeUsageFetchedAt:  new Date(),
             },
           });
           console.log(
             `${TAG} ${srv.name}: session=${result.parsed.sessionPct ?? "?"}% ` +
-            `week=${result.parsed.weekPct ?? "?"}%`
+              `week=${result.parsed.weekPct ?? "?"}%`
           );
         } else {
           console.warn(
             `${TAG} ${srv.name}: usage unavailable — ${result.status}` +
-            (result.error ? `: ${result.error}` : "")
+              (result.error ? `: ${result.error}` : "")
           );
         }
       } catch (err) {
@@ -94,15 +95,20 @@ export async function register() {
       }
     }
 
-    // ── 2. Detect completion for running tasks ────────────────────────────────
+    // ── 2. Detect completion + auto-advance queue ───────────────────────────
     let runningTasks: {
       id: string;
       serverId: string | null;
       server: {
+        id: string;
+        name: string;
         host: string;
         port: number;
         username: string;
         sshKeyPath: string;
+        claudePermissionMode: string | null;
+        claudeSessionPct: number | null;
+        claudeWeekPct: number | null;
       } | null;
     }[] = [];
 
@@ -114,10 +120,15 @@ export async function register() {
           serverId: true,
           server: {
             select: {
+              id: true,
+              name: true,
               host: true,
               port: true,
               username: true,
               sshKeyPath: true,
+              claudePermissionMode: true,
+              claudeSessionPct: true,
+              claudeWeekPct: true,
             },
           },
         },
@@ -126,9 +137,12 @@ export async function register() {
       console.error(`${TAG} Failed to load running tasks:`, err);
     }
 
-    // Group tasks by server to avoid redundant SSH connections.
-    type ServerConfig = { host: string; port: number; username: string; sshKeyPath: string };
-    const byServer = new Map<string, { config: ServerConfig; taskIds: string[] }>();
+    // Group by server — one SSH connection per server.
+    type ServerInfo = (typeof runningTasks)[number]["server"] & {};
+    const byServer = new Map<
+      string,
+      { server: NonNullable<ServerInfo>; taskIds: string[] }
+    >();
 
     for (const task of runningTasks) {
       if (!task.serverId || !task.server) continue;
@@ -136,17 +150,25 @@ export async function register() {
       if (entry) {
         entry.taskIds.push(task.id);
       } else {
-        byServer.set(task.serverId, { config: task.server, taskIds: [task.id] });
+        byServer.set(task.serverId, {
+          server: task.server,
+          taskIds: [task.id],
+        });
       }
     }
 
-    for (const [serverId, { config, taskIds }] of byServer) {
+    for (const [serverId, { server: srv, taskIds }] of byServer) {
       try {
-        const idleResult = await detectClaudeIdle(config);
+        const idleResult = await detectClaudeIdle({
+          host: srv.host,
+          port: srv.port,
+          username: srv.username,
+          sshKeyPath: srv.sshKeyPath,
+        });
 
         if (!idleResult.isIdle) continue;
 
-        // Claude is idle — all tasks running on this server are done.
+        // Claude is idle — mark every running task on this server completed.
         for (const taskId of taskIds) {
           try {
             const latestLog = await prisma.executionLog.findFirst({
@@ -169,29 +191,23 @@ export async function register() {
                 : []),
             ]);
 
-            console.log(`${TAG} Task ${taskId}: detected completion → marked completed`);
+            console.log(
+              `${TAG} Task ${taskId}: detected completion → marked completed`
+            );
           } catch (err) {
             console.error(`${TAG} Task ${taskId}: failed to mark completed:`, err);
           }
         }
 
-        // Auto-advance queue: start the highest-priority queued task on this server.
+        // Auto-advance queue: run the next queued task on this server if usage allows.
         try {
-          const server = await prisma.server.findUnique({
-            where: { id: serverId },
-            select: {
-              name: true, host: true, port: true, username: true,
-              sshKeyPath: true, claudePermissionMode: true,
-              claudeSessionPct: true, claudeWeekPct: true,
-            },
-          });
+          const sessionPct = srv.claudeSessionPct ?? 0;
+          const weekPct = srv.claudeWeekPct ?? 0;
 
-          if (!server) continue;
-
-          const sessionPct = server.claudeSessionPct ?? 0;
-          const weekPct = server.claudeWeekPct ?? 0;
           if (sessionPct >= 90 || weekPct >= 90) {
-            console.log(`${TAG} ${server.name}: usage at limit, skipping queue advance`);
+            console.log(
+              `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping queue advance`
+            );
             continue;
           }
 
@@ -203,32 +219,46 @@ export async function register() {
           if (!nextTask) continue;
 
           const sendResult = await sendTaskToTmux(
-            { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
+            {
+              host: srv.host,
+              port: srv.port,
+              username: srv.username,
+              sshKeyPath: srv.sshKeyPath,
+            },
             { title: nextTask.title, description: nextTask.description }
           );
 
           if (sendResult.success) {
             await prisma.$transaction([
-              prisma.task.update({ where: { id: nextTask.id }, data: { status: "running" } }),
+              prisma.task.update({
+                where: { id: nextTask.id },
+                data: { status: "running" },
+              }),
               prisma.executionLog.create({
                 data: {
                   taskId: nextTask.id,
                   status: "running",
                   startedAt: new Date(),
-                  logText: `Auto-started from queue on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
+                  logText:
+                    `Auto-started from queue on server "${srv.name}" (${srv.host})` +
+                    (srv.claudePermissionMode ? ` — mode: ${srv.claudePermissionMode}` : ""),
                 },
               }),
             ]);
-            console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`);
+            console.log(
+              `${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`
+            );
           } else {
-            console.warn(`${TAG} Queue advance failed for task ${nextTask.id}: ${sendResult.error}`);
+            console.warn(
+              `${TAG} Queue advance failed for task ${nextTask.id}: ${sendResult.error}`
+            );
           }
         } catch (err) {
-          console.error(`${TAG} Queue advance for server ${config.host} threw:`, err);
+          console.error(`${TAG} Queue advance for server ${srv.host} threw:`, err);
         }
       } catch (err) {
         console.error(
-          `${TAG} Completion check for server ${config.host} threw:`,
+          `${TAG} Completion check for server ${srv.host} threw:`,
           err
         );
       }
@@ -238,8 +268,7 @@ export async function register() {
   }
 
   // ── Scheduling ──────────────────────────────────────────────────────────────
-  // Guard against concurrent runs: if the previous check is still in progress,
-  // skip the current tick rather than stacking calls.
+  // Skip the current tick if the previous check is still running.
   let running = false;
 
   async function tick() {
@@ -257,11 +286,11 @@ export async function register() {
     }
   }
 
-  // First check: 15 s after server start (let the DB pool warm up).
+  // First check 15 s after server start (DB pool warm-up), then every 60 s.
   setTimeout(() => tick(), 15_000);
-
-  // Recurring: every 60 s.
   setInterval(() => tick(), 60_000);
 
-  console.log(`${TAG} Background poller registered (first check in 15 s, then every 60 s)`);
+  console.log(
+    `${TAG} Background poller registered (first check in 15 s, then every 60 s)`
+  );
 }
