@@ -264,6 +264,103 @@ function startPoller() {
       }
     }
 
+    // ── 3. Start queued tasks on idle servers that have nothing running ────────
+    // The loop above only covers servers that had running tasks. This step
+    // catches servers that are idle but have queued tasks and no running tasks
+    // (e.g. tasks queued before auto-run existed, or after a server restart).
+    let idleServersWithQueue: {
+      id: string;
+      name: string;
+      host: string;
+      port: number;
+      username: string;
+      sshKeyPath: string;
+      claudePermissionMode: string;
+      claudeSessionPct: number | null;
+      claudeWeekPct: number | null;
+    }[] = [];
+
+    try {
+      idleServersWithQueue = await prisma.server.findMany({
+        where: {
+          tasks: { some: { status: "queued" } },
+          AND: { tasks: { none: { status: "running" } } },
+          // Skip servers already handled by the completion loop above.
+          NOT: { id: { in: [...byServer.keys()] } },
+        },
+        select: {
+          id: true,
+          name: true,
+          host: true,
+          port: true,
+          username: true,
+          sshKeyPath: true,
+          claudePermissionMode: true,
+          claudeSessionPct: true,
+          claudeWeekPct: true,
+        },
+      });
+    } catch (err) {
+      console.error(`${TAG} Failed to load queued-only servers:`, err);
+    }
+
+    for (const srv of idleServersWithQueue) {
+      try {
+        const sessionPct = srv.claudeSessionPct ?? 0;
+        const weekPct = srv.claudeWeekPct ?? 0;
+
+        if (sessionPct >= 90 || weekPct >= 90) {
+          console.log(
+            `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping`
+          );
+          continue;
+        }
+
+        const idleResult = await detectClaudeIdle({
+          host: srv.host,
+          port: srv.port,
+          username: srv.username,
+          sshKeyPath: srv.sshKeyPath,
+        });
+
+        if (!idleResult.isIdle) {
+          console.log(`${TAG} ${srv.name}: has queued tasks but Claude is not idle yet`);
+          continue;
+        }
+
+        const nextTask = await prisma.task.findFirst({
+          where: { serverId: srv.id, status: "queued" },
+          orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+        });
+
+        if (!nextTask) continue;
+
+        const sendResult = await sendTaskToTmux(
+          { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
+          { title: nextTask.title, description: nextTask.description }
+        );
+
+        if (sendResult.success) {
+          await prisma.$transaction([
+            prisma.task.update({ where: { id: nextTask.id }, data: { status: "running" } }),
+            prisma.executionLog.create({
+              data: {
+                taskId: nextTask.id,
+                status: "running",
+                startedAt: new Date(),
+                logText: `Auto-started from queue on server "${srv.name}" (${srv.host}) — mode: ${srv.claudePermissionMode}`,
+              },
+            }),
+          ]);
+          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): dispatched from idle-server queue`);
+        } else {
+          console.warn(`${TAG} ${srv.name}: failed to start queued task ${nextTask.id}: ${sendResult.error}`);
+        }
+      } catch (err) {
+        console.error(`${TAG} Idle-server queue check for ${srv.host} threw:`, err);
+      }
+    }
+
     console.log(`${TAG} Check complete`);
   }
 
