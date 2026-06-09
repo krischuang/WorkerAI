@@ -47,6 +47,7 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
 
   const url = new URL(req.url ?? "/", `http://localhost:${WS_PORT}`);
   const serverId = url.searchParams.get("serverId");
+  const agentId = url.searchParams.get("agentId");
 
   function send(payload: object) {
     if (ws.readyState === WebSocket.OPEN) {
@@ -54,28 +55,54 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
     }
   }
 
-  if (!serverId) {
-    send({ type: "error", message: "serverId is required" });
+  if (!serverId && !agentId) {
+    send({ type: "error", message: "serverId or agentId is required" });
     ws.close();
     return;
   }
 
-  let server;
+  // Resolve SSH credentials and optional tmux session from DB
+  let sshHost: string;
+  let sshPort: number;
+  let sshUsername: string;
+  let sshKeyPath: string;
+  let attachTmuxSession: string | null = null;
+
   try {
-    server = await prisma.server.findUnique({ where: { id: serverId } });
+    if (agentId) {
+      const agent = await prisma.agent.findUnique({
+        where: { id: agentId },
+        include: { server: true },
+      });
+      if (!agent) {
+        send({ type: "error", message: "Agent not found" });
+        ws.close();
+        return;
+      }
+      sshHost = agent.server.host;
+      sshPort = agent.server.port;
+      sshUsername = agent.server.username;
+      sshKeyPath = agent.server.sshKeyPath;
+      attachTmuxSession = agent.tmuxSession;
+    } else {
+      const server = await prisma.server.findUnique({ where: { id: serverId! } });
+      if (!server) {
+        send({ type: "error", message: "Server not found" });
+        ws.close();
+        return;
+      }
+      sshHost = server.host;
+      sshPort = server.port;
+      sshUsername = server.username;
+      sshKeyPath = server.sshKeyPath;
+    }
   } catch {
     send({ type: "error", message: "Database error" });
     ws.close();
     return;
   }
 
-  if (!server) {
-    send({ type: "error", message: "Server not found" });
-    ws.close();
-    return;
-  }
-
-  const keyPath = resolveKeyPath(server.sshKeyPath);
+  const keyPath = resolveKeyPath(sshKeyPath);
   let privateKey: Buffer;
   try {
     privateKey = fs.readFileSync(keyPath);
@@ -130,6 +157,11 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
 
       stream = sh;
       send({ type: "connected" });
+
+      // When connecting to an agent, auto-attach to its tmux session
+      if (attachTmuxSession) {
+        sh.write(`tmux attach-session -t ${attachTmuxSession} 2>/dev/null || tmux new-session -s ${attachTmuxSession}\n`);
+      }
       resetIdle();
 
       // Base64-encode binary output so ANSI/UTF-8 sequences survive JSON
@@ -156,9 +188,9 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
   });
 
   conn.connect({
-    host: server.host,
-    port: server.port,
-    username: server.username,
+    host: sshHost,
+    port: sshPort,
+    username: sshUsername,
     privateKey,
     readyTimeout: 30_000,
   });
