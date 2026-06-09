@@ -32,6 +32,17 @@ interface Task {
   createdAt: string;
   project: { name: string; priority: string };
   _count: { executionLogs: number };
+  executionLogs: { startedAt: string }[];
+}
+
+function timeAgo(dateStr: string): string {
+  const mins = Math.floor((Date.now() - new Date(dateStr).getTime()) / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min${mins !== 1 ? "s" : ""} ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} hr${hrs !== 1 ? "s" : ""} ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days} day${days !== 1 ? "s" : ""} ago`;
 }
 
 const PRIORITIES = ["P1", "P2", "P3", "P4"];
@@ -164,6 +175,12 @@ export default function TasksPage() {
                       <>
                         <span className="text-zinc-400 mx-1.5">·</span>
                         {task._count.executionLogs} log{task._count.executionLogs !== 1 ? "s" : ""}
+                      </>
+                    )}
+                    {task.executionLogs[0] && (
+                      <>
+                        <span className="text-zinc-400 mx-1.5">·</span>
+                        Last run {timeAgo(task.executionLogs[0].startedAt)}
                       </>
                     )}
                   </p>
