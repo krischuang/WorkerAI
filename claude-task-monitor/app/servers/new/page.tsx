@@ -15,6 +15,7 @@ export default function NewServerPage() {
     username: "ec2-user",
     port: "22",
     sshKeyPath: "~/.ssh/",
+    claudePermissionMode: "workspace_write",
   });
 
   async function handleSubmit(e: React.FormEvent) {
@@ -116,6 +117,28 @@ export default function NewServerPage() {
             className={`${inputCls} font-mono`}
           />
         </FormField>
+
+        <FormField
+          label="Claude Execution Mode"
+          hint="Controls which flags are passed when launching Claude CLI on this server."
+        >
+          <select
+            value={form.claudePermissionMode}
+            onChange={(e) => setForm({ ...form, claudePermissionMode: e.target.value })}
+            className={inputCls}
+          >
+            <option value="read_only">Read Only — analyze files, no writes or shell</option>
+            <option value="workspace_write">Workspace Write — edit files, prompts before risky ops</option>
+            <option value="full_autonomous">Full Autonomous — skip all permission prompts</option>
+          </select>
+        </FormField>
+
+        {form.claudePermissionMode === "full_autonomous" && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+            <strong>Warning:</strong> Full Autonomous mode passes <code className="font-mono bg-amber-100 px-1 rounded">--dangerously-skip-permissions</code> to Claude CLI.
+            Claude will execute shell commands, modify files, and run installs without asking for confirmation.
+          </div>
+        )}
 
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">

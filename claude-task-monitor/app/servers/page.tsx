@@ -4,6 +4,20 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { PageHeader, Btn, EmptyState } from "@/app/_components/ui";
 
+type ClaudePermissionMode = "read_only" | "workspace_write" | "full_autonomous";
+
+const PERMISSION_MODE_LABEL: Record<ClaudePermissionMode, string> = {
+  read_only:        "Read Only",
+  workspace_write:  "Workspace Write",
+  full_autonomous:  "Full Autonomous",
+};
+
+const PERMISSION_MODE_BADGE: Record<ClaudePermissionMode, string> = {
+  read_only:        "bg-zinc-100 text-zinc-700 border-zinc-200",
+  workspace_write:  "bg-blue-50 text-blue-700 border-blue-200",
+  full_autonomous:  "bg-amber-50 text-amber-700 border-amber-200",
+};
+
 interface Server {
   id: string;
   name: string;
@@ -12,6 +26,7 @@ interface Server {
   port: number;
   sshKeyPath: string;
   status: "unknown" | "connected" | "failed";
+  claudePermissionMode: ClaudePermissionMode;
   lastCheckedAt: string | null;
   _count: { commandLogs: number };
 }
@@ -106,6 +121,13 @@ export default function ServersPage() {
                     className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${STATUS_BADGE[s.status]}`}
                   >
                     {s.status}
+                  </span>
+                  <span
+                    className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${
+                      PERMISSION_MODE_BADGE[s.claudePermissionMode ?? "workspace_write"]
+                    }`}
+                  >
+                    {PERMISSION_MODE_LABEL[s.claudePermissionMode ?? "workspace_write"]}
                   </span>
                 </div>
                 <p className="text-sm text-zinc-700 mt-0.5 font-mono">
