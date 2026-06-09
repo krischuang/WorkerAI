@@ -1,14 +1,24 @@
 import { prisma } from "@/lib/prisma";
+import { Priority, TaskStatus, CostLevel, TaskType } from "@/app/generated/prisma/client";
+
+const VALID_PRIORITIES = new Set<string>(Object.values(Priority));
+const VALID_STATUSES = new Set<string>(Object.values(TaskStatus));
+const VALID_COST_LEVELS = new Set<string>(Object.values(CostLevel));
+const VALID_TASK_TYPES = new Set<string>(Object.values(TaskType));
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const projectId = searchParams.get("projectId");
   const status = searchParams.get("status");
+  const agentId = searchParams.get("agentId");
+  const serverId = searchParams.get("serverId");
 
   const tasks = await prisma.task.findMany({
     where: {
       ...(projectId && { projectId }),
       ...(status && { status: status as never }),
+      ...(agentId && { agentId }),
+      ...(serverId && { serverId }),
     },
     include: {
       project: { select: { name: true, priority: true } },
@@ -60,6 +70,14 @@ export async function POST(request: Request) {
   if (description != null && typeof description === "string" && description.length > 10_000) {
     return Response.json({ error: "description must be 10 000 characters or fewer" }, { status: 400 });
   }
+  if (priority != null && !VALID_PRIORITIES.has(priority))
+    return Response.json({ error: `Invalid priority. Must be one of: ${[...VALID_PRIORITIES].join(", ")}` }, { status: 400 });
+  if (status != null && !VALID_STATUSES.has(status))
+    return Response.json({ error: `Invalid status. Must be one of: ${[...VALID_STATUSES].join(", ")}` }, { status: 400 });
+  if (estimatedCostLevel != null && !VALID_COST_LEVELS.has(estimatedCostLevel))
+    return Response.json({ error: `Invalid estimatedCostLevel. Must be one of: ${[...VALID_COST_LEVELS].join(", ")}` }, { status: 400 });
+  if (taskType != null && !VALID_TASK_TYPES.has(taskType))
+    return Response.json({ error: `Invalid taskType. Must be one of: ${[...VALID_TASK_TYPES].join(", ")}` }, { status: 400 });
 
   const task = await prisma.task.create({
     data: {
