@@ -23,6 +23,31 @@ import { execSSH } from "@/lib/ssh";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export type ClaudePermissionMode = "read_only" | "workspace_write" | "full_autonomous";
+
+export const PERMISSION_MODE_LABEL: Record<ClaudePermissionMode, string> = {
+  read_only:        "Read Only",
+  workspace_write:  "Workspace Write",
+  full_autonomous:  "Full Autonomous",
+};
+
+export const PERMISSION_MODE_DESCRIPTION: Record<ClaudePermissionMode, string> = {
+  read_only:        "Claude can read and analyze files only — no writes or shell execution.",
+  workspace_write:  "Claude can edit files and run commands; prompts before risky operations.",
+  full_autonomous:  "Claude skips all permission prompts — runs fully unattended (--dangerously-skip-permissions).",
+};
+
+export function getClaudeLaunchCommand(mode: ClaudePermissionMode): string {
+  switch (mode) {
+    case "read_only":
+      return `claude --allowedTools "Read,Grep,Glob,LS,WebSearch,WebFetch"`;
+    case "workspace_write":
+      return "claude";
+    case "full_autonomous":
+      return "claude --dangerously-skip-permissions";
+  }
+}
+
 export type ClaudeUsageStatus =
   | "ok"
   | "auth_required"
@@ -290,6 +315,72 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
       ? undefined
       : "Could not extract usage data. Is Claude CLI running in the 'claude' tmux session?",
   };
+}
+
+// ─── Launch / restart Claude in tmux ─────────────────────────────────────────
+
+export interface LaunchClaudeResult {
+  success: boolean;
+  command: string;
+  error?: string;
+}
+
+/**
+ * Kills any running process in the tmux session and relaunches Claude CLI with
+ * the flags that correspond to the configured permission mode.
+ */
+export async function launchClaudeInTmux(
+  config: SSHConfig,
+  mode: ClaudePermissionMode
+): Promise<LaunchClaudeResult> {
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+  const claudeCommand = getClaudeLaunchCommand(mode);
+
+  // Verify the tmux session exists
+  try {
+    const { stdout } = await execSSH(
+      ssh,
+      `tmux has-session -t ${TMUX_SESSION} 2>/dev/null && echo yes || echo no`,
+      5_000
+    );
+    if (stdout.trim() !== "yes") {
+      // Session doesn't exist — create it and launch Claude
+      const createCmd = [
+        `tmux new-session -d -s ${TMUX_SESSION}`,
+        `tmux send-keys -t ${TMUX_SESSION} '${claudeCommand}' Enter`,
+      ].join(" && ");
+      await execSSH(ssh, createCmd, 10_000);
+      return { success: true, command: claudeCommand };
+    }
+  } catch (err) {
+    return {
+      success: false,
+      command: claudeCommand,
+      error: `SSH error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // Session exists — interrupt any running process, then relaunch
+  try {
+    const relaunchCmd = [
+      `tmux send-keys -t ${TMUX_SESSION} C-c`,
+      `sleep 0.6`,
+      `tmux send-keys -t ${TMUX_SESSION} '${claudeCommand}' Enter`,
+    ].join(" && ");
+    await execSSH(ssh, relaunchCmd, 15_000);
+    return { success: true, command: claudeCommand };
+  } catch (err) {
+    return {
+      success: false,
+      command: claudeCommand,
+      error: `Failed to relaunch Claude: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 // ─── Detect if Claude is idle (waiting for input) ────────────────────────────
