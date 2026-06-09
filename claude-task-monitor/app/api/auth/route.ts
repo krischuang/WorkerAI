@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   res.cookies.set(AUTH_COOKIE, cookieToken(secret), {
     httpOnly: true,
     secure: false,   // app runs over plain HTTP on localhost
-    sameSite: "lax",
+    sameSite: "strict",
     maxAge: COOKIE_MAX_AGE,
     path: "/",
   });
