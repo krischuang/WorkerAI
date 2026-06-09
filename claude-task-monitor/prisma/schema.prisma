@@ -97,6 +97,12 @@ enum CommandStatus {
   failed
 }
 
+enum ClaudePermissionMode {
+  read_only
+  workspace_write
+  full_autonomous
+}
+
 model Server {
   id            String        @id @default(cuid())
   name          String
@@ -110,6 +116,9 @@ model Server {
   updatedAt     DateTime      @updatedAt
   commandLogs   ServerCommandLog[]
   tasks         Task[]
+
+  // Claude execution mode — controls which flags are passed when launching Claude CLI
+  claudePermissionMode  ClaudePermissionMode @default(workspace_write)
 
   // Claude usage — persisted from last successful tmux capture
   claudeSessionPct      Float?
