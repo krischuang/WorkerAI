@@ -9,6 +9,7 @@ const links = [
   { href: "/tasks", label: "Tasks" },
   { href: "/queue", label: "Priority Queue" },
   { href: "/servers", label: "Servers" },
+  { href: "/agents", label: "Agents" },
   { href: "/reports/daily", label: "Daily Report" },
 ];
 
