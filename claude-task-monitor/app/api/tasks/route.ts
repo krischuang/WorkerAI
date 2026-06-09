@@ -13,6 +13,11 @@ export async function GET(request: Request) {
     include: {
       project: { select: { name: true, priority: true } },
       _count: { select: { executionLogs: true } },
+      executionLogs: {
+        select: { startedAt: true },
+        orderBy: { startedAt: "desc" },
+        take: 1,
+      },
     },
     orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
   });
