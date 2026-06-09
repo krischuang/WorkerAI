@@ -21,7 +21,7 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
 export async function PUT(request: NextRequest, ctx: Ctx) {
   const { id } = await ctx.params;
   const body = await request.json();
-  const { name, host, username, port, sshKeyPath } = body;
+  const { name, host, username, port, sshKeyPath, claudePermissionMode } = body;
 
   const server = await prisma.server.update({
     where: { id },
@@ -31,6 +31,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       ...(username !== undefined && { username }),
       ...(port !== undefined && { port: Number(port) }),
       ...(sshKeyPath !== undefined && { sshKeyPath }),
+      ...(claudePermissionMode !== undefined && { claudePermissionMode }),
     },
   });
   return Response.json(server);
