@@ -415,13 +415,6 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
   };
 
   try {
-    // Dismiss any open overlay (e.g. /usage panel) before reading the pane state.
-    await execSSH(
-      ssh,
-      `tmux send-keys -t ${TMUX_SESSION} Escape 2>/dev/null; sleep 0.5`,
-      5_000
-    ).catch(() => { /* non-fatal */ });
-
     const { stdout } = await execSSH(
       ssh,
       `tmux capture-pane -t ${TMUX_SESSION} -p`,
