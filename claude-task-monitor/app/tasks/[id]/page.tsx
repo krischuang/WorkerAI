@@ -142,6 +142,10 @@ export default function TaskDetailPage() {
   const [runError, setRunError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<string>("");
 
+  // Review state
+  const [reviewState, setReviewState] = useState<"idle" | "reviewing" | "done" | "incomplete" | "error">("idle");
+  const [reviewError, setReviewError] = useState<string | null>(null);
+
   // Modals
   const [checkingCompletion, setCheckingCompletion] = useState(false);
   const [showLogForm, setShowLogForm] = useState(false);
@@ -299,6 +303,20 @@ export default function TaskDetailPage() {
     }
   }
 
+  async function handleReview() {
+    setReviewState("reviewing");
+    setReviewError(null);
+    const res = await fetch(`/api/tasks/${id}/review`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      setReviewState("error");
+      setReviewError(data.error ?? "Review failed");
+      return;
+    }
+    setReviewState(data.verdict === "done" ? "done" : "incomplete");
+    loadTask();
+  }
+
   async function handleAddLog(e: React.FormEvent) {
     e.preventDefault();
     await fetch(`/api/tasks/${id}/logs`, {
@@ -345,11 +363,38 @@ export default function TaskDetailPage() {
             <p className="text-sm text-zinc-700 mt-1 max-w-2xl">{task.description}</p>
           )}
         </div>
-        <div className="flex gap-2 shrink-0 ml-4">
+        <div className="flex items-center gap-2 shrink-0 ml-4">
           <PriorityBadge priority={task.priority} />
           <StatusBadge status={task.status} />
+          {task.status === "completed" && (
+            <Btn
+              variant="secondary"
+              size="sm"
+              onClick={handleReview}
+              disabled={reviewState === "reviewing"}
+            >
+              {reviewState === "reviewing" ? "Reviewing…" : "Review"}
+            </Btn>
+          )}
         </div>
       </div>
+
+      {/* ── Review result banner ─────────────────────────────────────────────── */}
+      {reviewState === "done" && (
+        <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 font-medium">
+          Archived — Claude confirmed complete
+        </div>
+      )}
+      {reviewState === "incomplete" && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium">
+          Back to pending — Claude found it incomplete
+        </div>
+      )}
+      {reviewState === "error" && reviewError && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {reviewError}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-3 mb-6">
         <div className="bg-white rounded-lg border border-zinc-200 p-3">
