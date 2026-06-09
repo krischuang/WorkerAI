@@ -1,12 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createHash } from "crypto";
 import { isLocalOrigin } from "@/lib/exec-guards";
 
 export const AUTH_COOKIE = "__auth";
 
 /** sha256 hash of the secret stored as the cookie value, so the raw secret never leaves the server. */
-export function cookieToken(secret: string): string {
-  return createHash("sha256").update(`auth:${secret}`).digest("hex");
+export async function cookieToken(secret: string): Promise<string> {
+  const data = new TextEncoder().encode(`auth:${secret}`);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function isPublicPath(pathname: string): boolean {
@@ -15,7 +18,7 @@ function isPublicPath(pathname: string): boolean {
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Static assets and Next.js internals — always pass through.
@@ -53,7 +56,7 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const expected = cookieToken(secret);
+  const expected = await cookieToken(secret);
   const cookie = request.cookies.get(AUTH_COOKIE)?.value;
 
   if (cookie === expected) return NextResponse.next();
