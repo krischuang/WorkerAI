@@ -88,9 +88,12 @@ export interface SSHConfig {
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
-const TMUX_SESSION = "claude";
+const DEFAULT_tmuxSession = "claude";
 
-export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<ClaudeUsageResult> {
+export async function fetchClaudeUsageViaTmux(
+  config: SSHConfig,
+  tmuxSession = DEFAULT_tmuxSession,
+): Promise<ClaudeUsageResult> {
   const ssh = {
     host: config.host,
     port: config.port,
@@ -103,7 +106,7 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
   try {
     const { stdout } = await execSSH(
       ssh,
-      `tmux has-session -t ${TMUX_SESSION} 2>/dev/null && echo yes || echo no`,
+      `tmux has-session -t ${tmuxSession} 2>/dev/null && echo yes || echo no`,
       5_000
     );
     sessionExists = stdout.trim() === "yes";
@@ -118,15 +121,15 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
     return {
       success: false, status: "offline", rawOutput: "", parsed: {},
       error:
-        `tmux session '${TMUX_SESSION}' not found. ` +
-        `Create it:\n  tmux new-session -d -s ${TMUX_SESSION}\n  tmux send-keys -t ${TMUX_SESSION} 'claude' Enter`,
+        `tmux session '${tmuxSession}' not found. ` +
+        `Create it:\n  tmux new-session -d -s ${tmuxSession}\n  tmux send-keys -t ${tmuxSession} 'claude' Enter`,
     };
   }
 
   // ── 2. Pre-flight: check current pane state ───────────────────────────────
   let before = "";
   try {
-    const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${TMUX_SESSION} -p`, 5_000);
+    const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${tmuxSession} -p`, 5_000);
     before = cleanPane(stdout);
   } catch { /* non-fatal */ }
 
@@ -147,7 +150,7 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
 
   // ── 3. Send /usage and wait for the panel to render ───────────────────────
   try {
-    await execSSH(ssh, `tmux send-keys -t ${TMUX_SESSION} "/usage" Enter && sleep 3`, 12_000);
+    await execSSH(ssh, `tmux send-keys -t ${tmuxSession} "/usage" Enter && sleep 3`, 12_000);
   } catch (err) {
     return {
       success: false, status: "error", rawOutput: "", parsed: {},
@@ -161,7 +164,7 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
   let captured = "";
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${TMUX_SESSION} -p`, 5_000);
+      const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${tmuxSession} -p`, 5_000);
       captured = cleanPane(stdout);
       if (looksLikeUsage(captured)) break;
       if (attempt < 2) {
@@ -179,7 +182,7 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
   try {
     await execSSH(
       ssh,
-      `tmux send-keys -t ${TMUX_SESSION} Escape 2>/dev/null; sleep 0.8`,
+      `tmux send-keys -t ${tmuxSession} Escape 2>/dev/null; sleep 0.8`,
       5_000
     );
   } catch { /* non-fatal */ }
@@ -195,7 +198,7 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
     parsed,
     error: hasData
       ? undefined
-      : "Could not extract usage data. Is Claude CLI running in the 'claude' tmux session?",
+      : `Could not extract usage data. Is Claude CLI running in the '${tmuxSession}' tmux session?`,
   };
 }
 
@@ -213,7 +216,9 @@ export interface LaunchClaudeResult {
  */
 export async function launchClaudeInTmux(
   config: SSHConfig,
-  mode: ClaudePermissionMode
+  mode: ClaudePermissionMode,
+  tmuxSession = DEFAULT_tmuxSession,
+  workDir?: string,
 ): Promise<LaunchClaudeResult> {
   const ssh = {
     host: config.host,
@@ -221,20 +226,21 @@ export async function launchClaudeInTmux(
     username: config.username,
     sshKeyPath: config.sshKeyPath,
   };
-  const claudeCommand = getClaudeLaunchCommand(mode);
+  const baseCommand = getClaudeLaunchCommand(mode);
+  const claudeCommand = workDir ? `HOME=${workDir} ${baseCommand}` : baseCommand;
 
   // Verify the tmux session exists
   try {
     const { stdout } = await execSSH(
       ssh,
-      `tmux has-session -t ${TMUX_SESSION} 2>/dev/null && echo yes || echo no`,
+      `tmux has-session -t ${tmuxSession} 2>/dev/null && echo yes || echo no`,
       5_000
     );
     if (stdout.trim() !== "yes") {
       // Session doesn't exist — create it and launch Claude
       const createCmd = [
-        `tmux new-session -d -s ${TMUX_SESSION}`,
-        `tmux send-keys -t ${TMUX_SESSION} '${claudeCommand}' Enter`,
+        `tmux new-session -d -s ${tmuxSession}`,
+        `tmux send-keys -t ${tmuxSession} '${claudeCommand}' Enter`,
       ].join(" && ");
       await execSSH(ssh, createCmd, 10_000);
       return { success: true, command: claudeCommand };
@@ -250,9 +256,9 @@ export async function launchClaudeInTmux(
   // Session exists — interrupt any running process, then relaunch
   try {
     const relaunchCmd = [
-      `tmux send-keys -t ${TMUX_SESSION} C-c`,
+      `tmux send-keys -t ${tmuxSession} C-c`,
       `sleep 0.6`,
-      `tmux send-keys -t ${TMUX_SESSION} '${claudeCommand}' Enter`,
+      `tmux send-keys -t ${tmuxSession} '${claudeCommand}' Enter`,
     ].join(" && ");
     await execSSH(ssh, relaunchCmd, 15_000);
     return { success: true, command: claudeCommand };
@@ -283,7 +289,10 @@ export interface ClaudeIdleResult {
  * We also confirm Claude is not actively working by checking that none of
  * the recent lines contain a spinner or "Thinking" indicator.
  */
-export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleResult> {
+export async function detectClaudeIdle(
+  config: SSHConfig,
+  tmuxSession = DEFAULT_tmuxSession,
+): Promise<ClaudeIdleResult> {
   const ssh = {
     host: config.host,
     port: config.port,
@@ -294,7 +303,7 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
   try {
     const { stdout } = await execSSH(
       ssh,
-      `tmux capture-pane -t ${TMUX_SESSION} -p`,
+      `tmux capture-pane -t ${tmuxSession} -p`,
       5_000
     );
     const pane = cleanPane(stdout);
@@ -343,6 +352,7 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
 export async function sendRawPromptToTmux(
   config: SSHConfig,
   promptText: string,
+  tmuxSession = DEFAULT_tmuxSession,
 ): Promise<{ success: boolean; error?: string }> {
   const ssh = {
     host: config.host,
@@ -354,11 +364,11 @@ export async function sendRawPromptToTmux(
   try {
     const { stdout } = await execSSH(
       ssh,
-      `tmux has-session -t ${TMUX_SESSION} 2>/dev/null && echo yes || echo no`,
+      `tmux has-session -t ${tmuxSession} 2>/dev/null && echo yes || echo no`,
       5_000
     );
     if (stdout.trim() !== "yes") {
-      return { success: false, error: `tmux session '${TMUX_SESSION}' not found.` };
+      return { success: false, error: `tmux session '${tmuxSession}' not found.` };
     }
   } catch (err) {
     return {
@@ -377,9 +387,9 @@ export async function sendRawPromptToTmux(
   const cmd = [
     `printf '%s' '${b64}' | base64 -d > ${tmpFile}`,
     `tmux load-buffer ${tmpFile}`,
-    `tmux paste-buffer -t ${TMUX_SESSION}`,
+    `tmux paste-buffer -t ${tmuxSession}`,
     `sleep 0.3`,
-    `tmux send-keys -t ${TMUX_SESSION} Enter`,
+    `tmux send-keys -t ${tmuxSession} Enter`,
     `rm -f ${tmpFile}`,
   ].join(" && ");
 
@@ -402,6 +412,7 @@ export async function sendRawPromptToTmux(
 export async function sendTaskToTmux(
   config: SSHConfig,
   task: DispatchTask,
+  tmuxSession = DEFAULT_tmuxSession,
 ): Promise<{ success: boolean; error?: string }> {
-  return sendRawPromptToTmux(config, buildDispatchPrompt(task));
+  return sendRawPromptToTmux(config, buildDispatchPrompt(task), tmuxSession);
 }
