@@ -143,6 +143,7 @@ export default function TaskDetailPage() {
   const [countdown, setCountdown] = useState<string>("");
 
   // Modals
+  const [checkingCompletion, setCheckingCompletion] = useState(false);
   const [showLogForm, setShowLogForm] = useState(false);
   const [showSummaryForm, setShowSummaryForm] = useState(false);
   const [logForm, setLogForm] = useState({
@@ -214,6 +215,22 @@ export default function TaskDetailPage() {
     if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
   }, []);
 
+  // Auto-poll for task completion while running
+  useEffect(() => {
+    if (task?.status !== "running") return;
+
+    const poll = async () => {
+      const res = await fetch(`/api/tasks/${id}/check-completion`, { method: "POST" });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.completed) loadTask();
+    };
+
+    const interval = setInterval(poll, 30_000);
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.status, id]);
+
   async function assignServer() {
     if (!selectedServerId) return;
     setAssigningServer(true);
@@ -269,6 +286,17 @@ export default function TaskDetailPage() {
       body: JSON.stringify({ status }),
     });
     loadTask();
+  }
+
+  async function checkCompletion() {
+    setCheckingCompletion(true);
+    try {
+      const res = await fetch(`/api/tasks/${id}/check-completion`, { method: "POST" });
+      const data = await res.json();
+      if (data.completed) loadTask();
+    } finally {
+      setCheckingCompletion(false);
+    }
   }
 
   async function handleAddLog(e: React.FormEvent) {
@@ -496,6 +524,19 @@ export default function TaskDetailPage() {
           <Btn variant="ghost" onClick={() => setShowLogForm(true)}>+ Add Log</Btn>
           <Btn variant="ghost" onClick={() => setShowSummaryForm(true)}>Save Result</Btn>
         </div>
+        {task.status === "running" && (
+          <div className="mt-3 flex items-center gap-3">
+            <Btn
+              variant="secondary"
+              size="sm"
+              disabled={checkingCompletion}
+              onClick={checkCompletion}
+            >
+              {checkingCompletion ? "Checking…" : "Check if Done"}
+            </Btn>
+            <span className="text-xs text-zinc-500">Auto-checks every 30 s</span>
+          </div>
+        )}
       </section>
 
       {/* ── Result / Next Action ─────────────────────────────────────────────── */}
