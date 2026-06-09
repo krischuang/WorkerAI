@@ -67,6 +67,7 @@ export default function TasksPage() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(defaultForm);
   const [submitting, setSubmitting] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   function loadTasks() {
     fetch("/api/tasks")
@@ -115,6 +116,16 @@ export default function TasksPage() {
     loadTasks();
   }
 
+  async function clearCompleted() {
+    const completedCount = tasks.filter((t) => t.status === "completed").length;
+    if (completedCount === 0) return;
+    if (!confirm(`Delete all ${completedCount} completed task${completedCount !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+    setClearing(true);
+    await fetch("/api/tasks?status=completed", { method: "DELETE" });
+    setClearing(false);
+    loadTasks();
+  }
+
   const filteredTasks =
     statusFilter === "all" ? tasks : tasks.filter((t) => t.status === statusFilter);
 
@@ -126,9 +137,16 @@ export default function TasksPage() {
         title="Tasks"
         subtitle="All tasks across every project"
         action={
-          <Btn variant="primary" onClick={openForm} disabled={projects.length === 0}>
-            + New Task
-          </Btn>
+          <div className="flex gap-2">
+            {tasks.some((t) => t.status === "completed") && (
+              <Btn variant="secondary" onClick={clearCompleted} disabled={clearing}>
+                {clearing ? "Clearing…" : "Clear completed"}
+              </Btn>
+            )}
+            <Btn variant="primary" onClick={openForm} disabled={projects.length === 0}>
+              + New Task
+            </Btn>
+          </div>
         }
       />
 
