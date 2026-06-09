@@ -298,9 +298,14 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
     };
   }
 
-  // ── 5. Dismiss dialog (Escape, fire-and-forget) ───────────────────────────
-  execSSH(ssh, `sleep 0.5 && tmux send-keys -t ${TMUX_SESSION} Escape 2>/dev/null || true`, 3_000)
-    .catch(() => { /* intentionally ignored */ });
+  // ── 5. Dismiss dialog — await so the pane is clear before returning ────────
+  try {
+    await execSSH(
+      ssh,
+      `tmux send-keys -t ${TMUX_SESSION} Escape 2>/dev/null; sleep 0.8`,
+      5_000
+    );
+  } catch { /* non-fatal */ }
 
   // ── 6. Parse ─────────────────────────────────────────────────────────────
   const hasData = looksLikeUsage(captured);
@@ -410,6 +415,13 @@ export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleRes
   };
 
   try {
+    // Dismiss any open overlay (e.g. /usage panel) before reading the pane state.
+    await execSSH(
+      ssh,
+      `tmux send-keys -t ${TMUX_SESSION} Escape 2>/dev/null; sleep 0.5`,
+      5_000
+    ).catch(() => { /* non-fatal */ });
+
     const { stdout } = await execSSH(
       ssh,
       `tmux capture-pane -t ${TMUX_SESSION} -p`,
