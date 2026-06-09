@@ -57,8 +57,8 @@ function startPoller() {
       console.error(`${TAG} Failed to load servers:`, err);
     }
 
-    for (const srv of servers) {
-      try {
+    await Promise.allSettled(
+      servers.map(async (srv) => {
         const result = await fetchClaudeUsageViaTmux({
           host: srv.host,
           port: srv.port,
@@ -90,10 +90,13 @@ function startPoller() {
               (result.error ? `: ${result.error}` : "")
           );
         }
-      } catch (err) {
-        console.error(`${TAG} ${srv.name}: usage fetch threw:`, err);
-      }
-    }
+      })
+    ).then((results) => {
+      results.forEach((r, i) => {
+        if (r.status === "rejected")
+          console.error(`${TAG} ${servers[i].name}: usage fetch threw:`, r.reason);
+      });
+    });
 
     // ── 2. Detect completion + auto-advance queue ───────────────────────────
     let runningTasks: {
@@ -157,8 +160,8 @@ function startPoller() {
       }
     }
 
-    for (const [serverId, { server: srv, taskIds }] of byServer) {
-      try {
+    await Promise.allSettled(
+      [...byServer.entries()].map(async ([serverId, { server: srv, taskIds }]) => {
         const idleResult = await detectClaudeIdle({
           host: srv.host,
           port: srv.port,
@@ -166,7 +169,7 @@ function startPoller() {
           sshKeyPath: srv.sshKeyPath,
         });
 
-        if (!idleResult.isIdle) continue;
+        if (!idleResult.isIdle) return;
 
         // Claude is idle — mark every running task on this server completed.
         for (const taskId of taskIds) {
@@ -200,69 +203,65 @@ function startPoller() {
         }
 
         // Auto-advance queue: run the next queued task on this server if usage allows.
-        try {
-          const sessionPct = srv.claudeSessionPct ?? 0;
-          const weekPct = srv.claudeWeekPct ?? 0;
+        const sessionPct = srv.claudeSessionPct ?? 0;
+        const weekPct = srv.claudeWeekPct ?? 0;
 
-          if (sessionPct >= 90 || weekPct >= 90) {
-            console.log(
-              `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping queue advance`
-            );
-            continue;
-          }
-
-          const nextTask = await prisma.task.findFirst({
-            where: { serverId, status: "queued" },
-            orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-          });
-
-          if (!nextTask) continue;
-
-          const sendResult = await sendTaskToTmux(
-            {
-              host: srv.host,
-              port: srv.port,
-              username: srv.username,
-              sshKeyPath: srv.sshKeyPath,
-            },
-            { title: nextTask.title, description: nextTask.description }
+        if (sessionPct >= 90 || weekPct >= 90) {
+          console.log(
+            `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping queue advance`
           );
-
-          if (sendResult.success) {
-            await prisma.$transaction([
-              prisma.task.update({
-                where: { id: nextTask.id },
-                data: { status: "running" },
-              }),
-              prisma.executionLog.create({
-                data: {
-                  taskId: nextTask.id,
-                  status: "running",
-                  startedAt: new Date(),
-                  logText:
-                    `Auto-started from queue on server "${srv.name}" (${srv.host})` +
-                    (srv.claudePermissionMode ? ` — mode: ${srv.claudePermissionMode}` : ""),
-                },
-              }),
-            ]);
-            console.log(
-              `${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`
-            );
-          } else {
-            console.warn(
-              `${TAG} Queue advance failed for task ${nextTask.id}: ${sendResult.error}`
-            );
-          }
-        } catch (err) {
-          console.error(`${TAG} Queue advance for server ${srv.host} threw:`, err);
+          return;
         }
-      } catch (err) {
-        console.error(
-          `${TAG} Completion check for server ${srv.host} threw:`,
-          err
+
+        const nextTask = await prisma.task.findFirst({
+          where: { serverId, status: "queued" },
+          orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+        });
+
+        if (!nextTask) return;
+
+        const sendResult = await sendTaskToTmux(
+          {
+            host: srv.host,
+            port: srv.port,
+            username: srv.username,
+            sshKeyPath: srv.sshKeyPath,
+          },
+          { title: nextTask.title, description: nextTask.description }
         );
-      }
-    }
+
+        if (sendResult.success) {
+          await prisma.$transaction([
+            prisma.task.update({
+              where: { id: nextTask.id },
+              data: { status: "running" },
+            }),
+            prisma.executionLog.create({
+              data: {
+                taskId: nextTask.id,
+                status: "running",
+                startedAt: new Date(),
+                logText:
+                  `Auto-started from queue on server "${srv.name}" (${srv.host})` +
+                  (srv.claudePermissionMode ? ` — mode: ${srv.claudePermissionMode}` : ""),
+              },
+            }),
+          ]);
+          console.log(
+            `${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`
+          );
+        } else {
+          console.warn(
+            `${TAG} Queue advance failed for task ${nextTask.id}: ${sendResult.error}`
+          );
+        }
+      })
+    ).then((results) => {
+      [...byServer.values()].forEach(({ server: srv }, i) => {
+        if (results[i].status === "rejected")
+          console.error(`${TAG} Completion check for server ${srv.host} threw:`, results[i].reason);
+      });
+    });
 
     // ── 3. Start queued tasks on idle servers that have nothing running ────────
     // The loop above only covers servers that had running tasks. This step
@@ -304,8 +303,8 @@ function startPoller() {
       console.error(`${TAG} Failed to load queued-only servers:`, err);
     }
 
-    for (const srv of idleServersWithQueue) {
-      try {
+    await Promise.allSettled(
+      idleServersWithQueue.map(async (srv) => {
         const sessionPct = srv.claudeSessionPct ?? 0;
         const weekPct = srv.claudeWeekPct ?? 0;
 
@@ -313,7 +312,7 @@ function startPoller() {
           console.log(
             `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping`
           );
-          continue;
+          return;
         }
 
         const idleResult = await detectClaudeIdle({
@@ -329,7 +328,7 @@ function startPoller() {
             (idleResult.error ? ` — error: ${idleResult.error}` : "") +
             (idleResult.paneText ? `\n  pane tail: ${JSON.stringify(idleResult.paneText.split("\n").filter(l => l.trim()).slice(-4))}` : "")
           );
-          continue;
+          return;
         }
 
         const nextTask = await prisma.task.findFirst({
@@ -337,7 +336,7 @@ function startPoller() {
           orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
         });
 
-        if (!nextTask) continue;
+        if (!nextTask) return;
 
         const sendResult = await sendTaskToTmux(
           { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
@@ -360,10 +359,13 @@ function startPoller() {
         } else {
           console.warn(`${TAG} ${srv.name}: failed to start queued task ${nextTask.id}: ${sendResult.error}`);
         }
-      } catch (err) {
-        console.error(`${TAG} Idle-server queue check for ${srv.host} threw:`, err);
-      }
-    }
+      })
+    ).then((results) => {
+      results.forEach((r, i) => {
+        if (r.status === "rejected")
+          console.error(`${TAG} Idle-server queue check for ${idleServersWithQueue[i].host} threw:`, r.reason);
+      });
+    });
 
     console.log(`${TAG} Check complete`);
   }
