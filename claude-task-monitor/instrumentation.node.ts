@@ -216,6 +216,7 @@ function startPoller() {
         const nextTask = await prisma.task.findFirst({
           where: { serverId, status: "queued" },
           orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+          include: { project: { select: { name: true } } },
         });
 
         if (!nextTask) return;
@@ -227,7 +228,7 @@ function startPoller() {
             username: srv.username,
             sshKeyPath: srv.sshKeyPath,
           },
-          { title: nextTask.title, description: nextTask.description }
+          { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name }
         );
 
         if (sendResult.success) {
@@ -334,13 +335,14 @@ function startPoller() {
         const nextTask = await prisma.task.findFirst({
           where: { serverId: srv.id, status: "queued" },
           orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+          include: { project: { select: { name: true } } },
         });
 
         if (!nextTask) return;
 
         const sendResult = await sendTaskToTmux(
           { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
-          { title: nextTask.title, description: nextTask.description }
+          { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name }
         );
 
         if (sendResult.success) {
