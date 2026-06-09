@@ -140,7 +140,7 @@ export async function register() {
       }
     }
 
-    for (const [, { config, taskIds }] of byServer) {
+    for (const [serverId, { config, taskIds }] of byServer) {
       try {
         const idleResult = await detectClaudeIdle(config);
 
@@ -173,6 +173,58 @@ export async function register() {
           } catch (err) {
             console.error(`${TAG} Task ${taskId}: failed to mark completed:`, err);
           }
+        }
+
+        // Auto-advance queue: start the highest-priority queued task on this server.
+        try {
+          const server = await prisma.server.findUnique({
+            where: { id: serverId },
+            select: {
+              name: true, host: true, port: true, username: true,
+              sshKeyPath: true, claudePermissionMode: true,
+              claudeSessionPct: true, claudeWeekPct: true,
+            },
+          });
+
+          if (!server) continue;
+
+          const sessionPct = server.claudeSessionPct ?? 0;
+          const weekPct = server.claudeWeekPct ?? 0;
+          if (sessionPct >= 90 || weekPct >= 90) {
+            console.log(`${TAG} ${server.name}: usage at limit, skipping queue advance`);
+            continue;
+          }
+
+          const nextTask = await prisma.task.findFirst({
+            where: { serverId, status: "queued" },
+            orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+          });
+
+          if (!nextTask) continue;
+
+          const sendResult = await sendTaskToTmux(
+            { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
+            { title: nextTask.title, description: nextTask.description }
+          );
+
+          if (sendResult.success) {
+            await prisma.$transaction([
+              prisma.task.update({ where: { id: nextTask.id }, data: { status: "running" } }),
+              prisma.executionLog.create({
+                data: {
+                  taskId: nextTask.id,
+                  status: "running",
+                  startedAt: new Date(),
+                  logText: `Auto-started from queue on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
+                },
+              }),
+            ]);
+            console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`);
+          } else {
+            console.warn(`${TAG} Queue advance failed for task ${nextTask.id}: ${sendResult.error}`);
+          }
+        } catch (err) {
+          console.error(`${TAG} Queue advance for server ${config.host} threw:`, err);
         }
       } catch (err) {
         console.error(
