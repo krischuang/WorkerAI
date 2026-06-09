@@ -292,6 +292,51 @@ export async function fetchClaudeUsageViaTmux(config: SSHConfig): Promise<Claude
   };
 }
 
+// ─── Detect if Claude is idle (waiting for input) ────────────────────────────
+
+export interface ClaudeIdleResult {
+  isIdle: boolean;
+  paneText: string;
+  error?: string;
+}
+
+/**
+ * Checks whether the Claude tmux session is idle (waiting for user input).
+ * When Claude finishes a task and returns to the prompt, the last non-empty
+ * line of the pane is just ">" — the input prompt. We use this to detect
+ * that the task has completed.
+ */
+export async function detectClaudeIdle(config: SSHConfig): Promise<ClaudeIdleResult> {
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+
+  try {
+    const { stdout } = await execSSH(
+      ssh,
+      `tmux capture-pane -t ${TMUX_SESSION} -p`,
+      5_000
+    );
+    const pane = cleanPane(stdout);
+    const lines = pane.split("\n").filter((l) => l.trim().length > 0);
+    const lastLine = lines[lines.length - 1] ?? "";
+
+    // Claude Code shows ">" as the sole content of the last line when idle
+    const isIdle = /^>\s*$/.test(lastLine);
+
+    return { isIdle, paneText: pane.slice(-2000) };
+  } catch (err) {
+    return {
+      isIdle: false,
+      paneText: "",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // ─── Send task to Claude in tmux ─────────────────────────────────────────────
 
 /**
