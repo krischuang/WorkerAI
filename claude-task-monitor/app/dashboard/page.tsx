@@ -60,8 +60,9 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetch("/api/dashboard")
-      .then((r) => r.json())
-      .then(setData);
+      .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+      .then(setData)
+      .catch(console.error);
   }, []);
 
   if (!data) return <LoadingState message="Loading dashboard…" />;
