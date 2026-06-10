@@ -47,7 +47,44 @@ type InMsg =
   | { type: "resize"; cols: number; rows: number };
 
 wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
-  // Allow same-host origins only (localhost or the server's own hostname/IP)
+  // ── Origin check — CSRF protection ────────────────────────────────────────
+  //
+  // Security review (relaxation from localhost-only → same-hostname):
+  //
+  // THREAT: a malicious page visited in the user's browser sends a WebSocket
+  // upgrade to this server from a different origin (cross-site WebSocket
+  // hijacking).  The browser always supplies an Origin header on upgrades, so
+  // we can use it as a CSRF token.
+  //
+  // PREVIOUS POLICY: reject any origin that is not `http(s)://localhost[:<port>]`.
+  // This blocked the app when accessed via a remote hostname or tunnel URL
+  // (e.g. a company VPN address, an ngrok tunnel, a secondary NIC IP) because
+  // the Next.js page would be served from that hostname, not localhost, yet the
+  // browser would send that hostname as the Origin.
+  //
+  // CURRENT POLICY: allow the request when either:
+  //   a) No Origin header (direct/programmatic connection — no browser involved).
+  //   b) Origin hostname is `localhost` (legacy and test tooling).
+  //   c) Origin hostname matches the HTTP Host header hostname — i.e. the page
+  //      was served from the same host that is receiving the WS connection.
+  //
+  // WHY THIS IS SAFE: a cross-site attacker's page always has a different
+  // hostname from the server's Host header.  The browser cannot spoof Origin.
+  // The Host header reflects the TCP target chosen by the browser, which a
+  // cross-origin page cannot manipulate to match its own origin.
+  //
+  // EXPANDED ATTACK SURFACE vs. localhost-only:
+  //   Any page served by the *same host* (any port) can now open a WS
+  //   connection.  In practice the host is a single-user machine or a VPN-
+  //   accessible box, so this is acceptable.  Remaining mitigations:
+  //     • Password-protected REST API (session cookie required for the app)
+  //     • SSH private key never leaves the server; never sent to the browser
+  //     • Per-IP connection rate limiting + total connection cap (below)
+  //     • 30-minute idle session timeout
+  //
+  // NOTE: `isLocalOrigin` in lib/exec-guards.ts serves the REST API exec
+  // routes and uses a different, stricter policy (explicit ALLOWED_ORIGINS
+  // list).  The two checks are intentionally separate and must NOT be merged.
   const origin = req.headers.origin ?? "";
   if (origin && !/^https?:\/\/localhost(:\d+)?$/.test(origin)) {
     const reqHost = req.headers.host?.replace(/:\d+$/, "") ?? "";
