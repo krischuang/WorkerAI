@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { PageHeader, Btn, EmptyState } from "@/app/_components/ui";
+import { PageHeader, Btn, EmptyState, Modal, ModalActions } from "@/app/_components/ui";
 
 type ClaudePermissionMode = "read_only" | "workspace_write" | "full_autonomous";
 
@@ -48,6 +48,8 @@ const STATUS_DOT: Record<string, string> = {
 export default function ServersPage() {
   const [servers, setServers] = useState<Server[]>([]);
   const [testing, setTesting] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   function loadServers() {
     fetch("/api/servers")
@@ -66,9 +68,12 @@ export default function ServersPage() {
     loadServers();
   }
 
-  async function handleDelete(id: string, name: string) {
-    if (!confirm(`Delete server "${name}"?`)) return;
-    await fetch(`/api/servers/${id}`, { method: "DELETE" });
+  async function doDelete() {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    await fetch(`/api/servers/${confirmDelete.id}`, { method: "DELETE" });
+    setDeleting(false);
+    setConfirmDelete(null);
     loadServers();
   }
 
@@ -172,7 +177,7 @@ export default function ServersPage() {
                   Open
                 </Link>
                 <button
-                  onClick={() => handleDelete(s.id, s.name)}
+                  onClick={() => setConfirmDelete({ id: s.id, name: s.name })}
                   className="text-xs text-red-700 hover:text-red-900 font-medium transition-colors px-1"
                 >
                   Delete
@@ -181,6 +186,24 @@ export default function ServersPage() {
             </div>
           ))}
         </div>
+      )}
+
+      {confirmDelete && (
+        <Modal title="Delete Server" onClose={() => setConfirmDelete(null)}>
+          <p className="text-sm text-zinc-700 mb-1">
+            Delete server <strong>{confirmDelete.name}</strong>?
+          </p>
+          <p className="text-sm text-zinc-600 mb-4">
+            All command logs will be permanently deleted. Assigned tasks will be unassigned.
+            This cannot be undone.
+          </p>
+          <ModalActions>
+            <Btn variant="secondary" onClick={() => setConfirmDelete(null)}>Cancel</Btn>
+            <Btn variant="danger" onClick={doDelete} disabled={deleting}>
+              {deleting ? "Deleting…" : "Delete Server"}
+            </Btn>
+          </ModalActions>
+        </Modal>
       )}
     </div>
   );

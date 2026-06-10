@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { StatusBadge } from "@/app/_components/StatusBadge";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
+import { TaskDetailPanel } from "@/app/_components/TaskDetailPanel";
 import {
   PageHeader,
   EmptyState,
@@ -66,6 +66,7 @@ export default function TasksPage() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("all");
   const [projectFilter, setProjectFilter] = useState("all");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(defaultForm);
   const [submitting, setSubmitting] = useState(false);
@@ -208,10 +209,10 @@ export default function TasksPage() {
       ) : (
         <div className="space-y-2">
           {filteredTasks.map((task) => (
-            <Link
+            <button
               key={task.id}
-              href={`/tasks/${task.id}`}
-              className="block bg-white border border-zinc-200 rounded-lg px-5 py-4 hover:border-zinc-300 hover:shadow-sm transition-all"
+              onClick={() => setSelectedTaskId(task.id)}
+              className="w-full text-left bg-white border border-zinc-200 rounded-lg px-5 py-4 hover:border-zinc-300 hover:shadow-sm transition-all"
             >
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
@@ -239,9 +240,21 @@ export default function TasksPage() {
                   <StatusBadge status={task.status} />
                 </div>
               </div>
-            </Link>
+            </button>
           ))}
         </div>
+      )}
+
+      {selectedTaskId && (
+        <Modal
+          onClose={() => { setSelectedTaskId(null); loadTasks(); }}
+          size="xl"
+        >
+          <TaskDetailPanel
+            id={selectedTaskId}
+            onClose={() => { setSelectedTaskId(null); loadTasks(); }}
+          />
+        </Modal>
       )}
 
       {showForm && (
