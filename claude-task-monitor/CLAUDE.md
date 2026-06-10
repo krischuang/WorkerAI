@@ -159,7 +159,7 @@ fetch(`/api/foo/${id}`)
 
 ## Authentication
 
-Password authentication is required. The password is set via the `APP_PASSWORD` env var (hashed with bcrypt and stored in the DB or compared at runtime — see `app/api/auth/route.ts`).
+Password authentication is required. The password is set via the `AUTH_SECRET` env var (plaintext value; the cookie stores a SHA-256 hash of it so the raw secret never leaves the server — see `app/api/auth/route.ts` and `middleware.ts`). Generate a strong value with: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
 
 - `POST /api/auth` — validates password, sets a session cookie
 - `DELETE /api/auth` — clears the session cookie (logout)
@@ -412,10 +412,12 @@ All IDs are cuid strings. Cascade deletes on all child relations. `Task.serverId
 ## Environment Variables
 
 ```
-DATABASE_URL="postgresql://postgres:postgres_dev@localhost:5432/claude_task_monitor?schema=public"
-APP_PASSWORD="..."           # required; bcrypt-hashed password for login
+DATABASE_URL="postgresql://postgres:<password>@localhost:5432/claude_task_monitor?schema=public"
+AUTH_SECRET="..."            # required; plaintext secret for the web UI login
 ALLOWED_ORIGINS="..."        # optional; comma-separated extra hostnames for isLocalOrigin
 ```
+
+Dev default (Docker container): `postgres_dev` as the DB password. Never commit `.env` — it is already excluded via `.env*` in `.gitignore`. See `.env.example` for the template.
 
 Set in `.env`. `prisma/seed.ts` requires `import "dotenv/config"` at the top because `tsx` does not auto-load `.env`.
 
