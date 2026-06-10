@@ -1,28 +1,37 @@
 import { prisma } from "@/lib/prisma";
+import { serverError } from "@/lib/api-error";
 
 export async function GET() {
-  const projects = await prisma.project.findMany({
-    include: {
-      _count: { select: { tasks: true } },
-      tasks: {
-        select: { status: true },
+  try {
+    const projects = await prisma.project.findMany({
+      include: {
+        _count: { select: { tasks: true } },
+        tasks: {
+          select: { status: true },
+        },
       },
-    },
-    orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
-  });
-  return Response.json(projects);
+      orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
+    });
+    return Response.json(projects);
+  } catch (err) {
+    return serverError("projects GET", err);
+  }
 }
 
 export async function POST(request: Request) {
-  const body = await request.json();
-  const { name, description, priority, status } = body;
+  try {
+    const body = await request.json();
+    const { name, description, priority, status } = body;
 
-  if (!name) {
-    return Response.json({ error: "Name is required" }, { status: 400 });
+    if (!name) {
+      return Response.json({ error: "Name is required" }, { status: 400 });
+    }
+
+    const project = await prisma.project.create({
+      data: { name, description, priority: priority ?? "P3", status: status ?? "active" },
+    });
+    return Response.json(project, { status: 201 });
+  } catch (err) {
+    return serverError("projects POST", err);
   }
-
-  const project = await prisma.project.create({
-    data: { name, description, priority: priority ?? "P3", status: status ?? "active" },
-  });
-  return Response.json(project, { status: 201 });
 }
