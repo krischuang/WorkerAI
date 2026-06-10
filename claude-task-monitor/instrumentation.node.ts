@@ -21,6 +21,8 @@ import {
   fetchClaudeUsageViaTmux,
   detectClaudeIdle,
   detectTaskCompletion,
+  killTaskTmuxSession,
+  type ClaudePermissionMode,
 } from "./lib/ssh-claude-tmux";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "./lib/task-dispatch";
 import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS } from "./lib/constants";
@@ -264,13 +266,16 @@ function startPoller() {
       });
     });
 
-    // ── 2. Detect completion + auto-advance queue (server-direct tasks) ────────
-    // Only tasks with agentId: null — agent tasks are handled in step 2b.
+    // ── 2. Detect completion (server-direct tasks) ────────────────────────────
+    // Each server-direct task now has its own tmux session (claude_<taskId>),
+    // so tasks are checked individually rather than grouped per server.
+    // Tasks without a taskTmuxSession (legacy) fall back to server.tmuxSession.
     let runningTasks: {
       id: string;
       serverId: string | null;
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
+      taskTmuxSession: string | null;
       updatedAt: Date;
       server: {
         id: string;
@@ -294,6 +299,7 @@ function startPoller() {
           serverId: true,
           completionNonce: true,
           tmuxOutputOffset: true,
+          taskTmuxSession: true,
           updatedAt: true,
           server: {
             select: {
@@ -315,172 +321,107 @@ function startPoller() {
       console.error(`${TAG} Failed to load running tasks:`, err);
     }
 
-    // Group by server — one SSH connection per server.
-    type ServerInfo = (typeof runningTasks)[number]["server"] & {};
-    const byServer = new Map<
-      string,
-      {
-        server: NonNullable<ServerInfo>;
-        taskIds: string[];
-        completionNonce: string | null;
-        tmuxOutputOffset: number | null;
-        startedAt: Date;
-      }
-    >();
-
+    // Collect serverId → server info for queue-advance after completions.
+    const byServer = new Map<string, (typeof runningTasks)[number]["server"] & { id: string }>();
     for (const task of runningTasks) {
-      if (!task.serverId || !task.server) continue;
-      const entry = byServer.get(task.serverId);
-      if (entry) {
-        entry.taskIds.push(task.id);
-      } else {
-        byServer.set(task.serverId, {
-          server: task.server,
-          taskIds: [task.id],
-          completionNonce: task.completionNonce,
-          tmuxOutputOffset: task.tmuxOutputOffset,
-          startedAt: task.updatedAt,
-        });
+      if (task.serverId && task.server && !byServer.has(task.serverId)) {
+        byServer.set(task.serverId, task.server as NonNullable<typeof task.server>);
       }
     }
 
     await Promise.allSettled(
-      [...byServer.entries()].map(async ([serverId, { server: srv, taskIds, completionNonce, tmuxOutputOffset, startedAt }]) => {
+      runningTasks.map(async (task) => {
+        if (!task.serverId || !task.server) return;
+        const srv = task.server;
+        const serverId = task.serverId;
+
         if (offlineServerIds.has(serverId)) {
-          console.log(
-            `${TAG} ${srv.name}: skipping idle check — server offline (tmux session missing)`
-          );
+          console.log(`${TAG} ${srv.name}: skipping completion check for task "${task.id}" — server offline`);
           return;
         }
 
-        // For server-direct tasks, pass the first running task's nonce+offset.
-        const firstTaskId = taskIds[0];
+        // Use the task's own session; fall back to server session for legacy tasks.
+        const checkSession = task.taskTmuxSession ?? srv.tmuxSession;
+        const sshConfig = { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath };
+
         const completionResult = await detectTaskCompletion(
-          { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
-          srv.tmuxSession,
-          firstTaskId,
-          completionNonce ?? undefined,
-          tmuxOutputOffset ?? undefined,
+          sshConfig,
+          checkSession,
+          task.id,
+          task.completionNonce ?? undefined,
+          task.tmuxOutputOffset ?? undefined,
         );
 
         if (completionResult.tmuxMissing) {
-          offlineServerIds.add(serverId);
-          try {
-            await prisma.server.update({
-              where: { id: serverId },
-              data: { status: "failed" },
-            });
-          } catch { /* non-fatal */ }
-          console.log(
-            `${TAG} ${srv.name}: tmux session '${srv.tmuxSession}' not found during completion check — ` +
-            `marking offline, skipping queue advance`
-          );
-          return;
+          if (task.taskTmuxSession) {
+            // The per-task session is gone — treat as completed (session may have
+            // been killed externally) rather than marking the whole server offline.
+            console.log(
+              `${TAG} ${srv.name}: per-task session '${task.taskTmuxSession}' not found — marking task completed`
+            );
+          } else {
+            // Legacy path: missing server session means server is offline.
+            offlineServerIds.add(serverId);
+            try {
+              await prisma.server.update({ where: { id: serverId }, data: { status: "failed" } });
+            } catch { /* non-fatal */ }
+            console.log(
+              `${TAG} ${srv.name}: shared tmux session '${srv.tmuxSession}' not found — marking server offline`
+            );
+            return;
+          }
         }
 
         // Determine how (or whether) the task completed.
         let completedHow: string | null = null;
         if (completionResult.markerFound) {
           completedHow = "completion marker";
-        } else if (completionResult.isIdle && !completionNonce) {
+        } else if (completionResult.tmuxMissing && task.taskTmuxSession) {
+          completedHow = "session gone";
+        } else if (completionResult.isIdle && !task.completionNonce) {
           completedHow = "idle prompt (no nonce)";
         } else if (completionResult.isIdle) {
-          const runMs = Date.now() - startedAt.getTime();
+          const runMs = Date.now() - task.updatedAt.getTime();
           if (runMs >= IDLE_FALLBACK_MIN_MS) {
             completedHow = `idle fallback (no marker after ${Math.round(runMs / 60_000)}m)`;
             console.log(
-              `${TAG} ${srv.name}: task "${firstTaskId}" idle without nonce marker — ` +
+              `${TAG} ${srv.name}: task "${task.id}" idle without nonce marker — ` +
               `using idle fallback after ${Math.round(runMs / 60_000)}m`
             );
           }
         }
         if (!completedHow) return;
 
-        for (const taskId of taskIds) {
-          try {
-            await prisma.$transaction(async (tx) => {
-              const latestLog = await tx.executionLog.findFirst({
-                where: { taskId, status: "running", finishedAt: null },
-                orderBy: { createdAt: "desc" },
-              });
-
-              await tx.task.update({
-                where: { id: taskId },
-                data: { status: "completed" },
-              });
-
-              if (latestLog) {
-                await tx.executionLog.update({
-                  where: { id: latestLog.id },
-                  data: { status: "completed", finishedAt: new Date() },
-                });
-              }
+        try {
+          await prisma.$transaction(async (tx) => {
+            const latestLog = await tx.executionLog.findFirst({
+              where: { taskId: task.id, status: "running", finishedAt: null },
+              orderBy: { createdAt: "desc" },
             });
+            await tx.task.update({ where: { id: task.id }, data: { status: "completed" } });
+            if (latestLog) {
+              await tx.executionLog.update({
+                where: { id: latestLog.id },
+                data: { status: "completed", finishedAt: new Date() },
+              });
+            }
+          });
 
-            clearDispatchBackoff(taskId, backoff);
-            console.log(`[TASK_FINISHED] taskId="${taskId}" detectedBy="${completedHow}"`);
-          } catch (err) {
-            console.error(`${TAG} Task ${taskId}: failed to mark completed:`, err);
+          clearDispatchBackoff(task.id, backoff);
+          console.log(`[TASK_FINISHED] taskId="${task.id}" detectedBy="${completedHow}"`);
+
+          // Clean up the per-task tmux session now that the task is done.
+          if (task.taskTmuxSession) {
+            await killTaskTmuxSession(sshConfig, task.id);
           }
-        }
-
-        const sessionPct = srv.claudeSessionPct ?? 0;
-        const weekPct = srv.claudeWeekPct ?? 0;
-
-        if (sessionPct >= USAGE_THRESHOLD || weekPct >= USAGE_THRESHOLD) {
-          console.log(
-            `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping queue advance`
-          );
-          return;
-        }
-
-        const nextTask = await prisma.task.findFirst({
-          where: { serverId, status: "queued", agentId: null },
-          orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-          include: { project: { select: { name: true } } },
-        });
-
-        if (!nextTask) return;
-
-        if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
-          console.log(
-            `${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`
-          );
-          return;
-        }
-
-        const outcome = await tryDispatchTaskToServer({
-          taskId: nextTask.id,
-          serverId,
-          sshConfig: { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
-          tmuxSession: srv.tmuxSession,
-          task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
-          logText:
-            `Auto-started from queue on server "${srv.name}" (${srv.host})` +
-            (srv.claudePermissionMode ? ` — mode: ${srv.claudePermissionMode}` : ""),
-        });
-
-        if (outcome.ok) {
-          clearDispatchBackoff(nextTask.id, backoff);
-          console.log(
-            `[NEXT_TASK_DISPATCHED] taskId="${nextTask.id}" title="${nextTask.title}" serverId="${serverId}"`,
-          );
-        } else if (outcome.reason === "ssh_failed") {
-          recordDispatchFailure(nextTask.id, backoff);
-          console.warn(
-            `${TAG} Queue advance failed for task ${nextTask.id}: ${outcome.detail} — backoff applied`
-          );
-        } else if (outcome.reason === "tmux_missing") {
-          offlineServerIds.add(serverId);
-          console.warn(
-            `${TAG} ${srv.name}: tmux session missing during dispatch — marked offline`
-          );
+        } catch (err) {
+          console.error(`${TAG} Task ${task.id}: failed to mark completed:`, err);
         }
       })
     ).then((results) => {
-      [...byServer.values()].forEach(({ server: srv }, i) => {
+      runningTasks.forEach((t, i) => {
         if (results[i].status === "rejected")
-          console.error(`${TAG} Completion check for server ${srv.host} threw:`, results[i].reason);
+          console.error(`${TAG} Completion check for task "${t.id}" threw:`, (results[i] as PromiseRejectedResult).reason);
       });
     });
 
@@ -711,29 +652,27 @@ function startPoller() {
       });
     });
 
-    // ── 3. Start queued server-direct tasks on idle servers with no running tasks
-    // Catches servers that are idle but have queued tasks (agentId: null only).
-    let idleServersWithQueue: {
+    // ── 3. Start queued server-direct tasks on servers with capacity ─────────
+    // Per-task sessions allow parallel execution — no idle check needed.
+    // Dispatch any queued task as long as the server's usage is under threshold.
+    // Servers confirmed offline this cycle are skipped.
+    let serversWithQueue: {
       id: string;
       name: string;
       host: string;
       port: number;
       username: string;
       sshKeyPath: string;
-      tmuxSession: string;
       claudePermissionMode: string;
       claudeSessionPct: number | null;
       claudeWeekPct: number | null;
     }[] = [];
 
     try {
-      idleServersWithQueue = await prisma.server.findMany({
+      serversWithQueue = await prisma.server.findMany({
         where: {
           tasks: { some: { status: "queued", agentId: null } },
-          AND: { tasks: { none: { status: "running", agentId: null } } },
-          NOT: {
-            id: { in: [...byServer.keys(), ...offlineServerIds] },
-          },
+          NOT: { id: { in: [...offlineServerIds] } },
         },
         select: {
           id: true,
@@ -742,58 +681,23 @@ function startPoller() {
           port: true,
           username: true,
           sshKeyPath: true,
-          tmuxSession: true,
           claudePermissionMode: true,
           claudeSessionPct: true,
           claudeWeekPct: true,
         },
       });
     } catch (err) {
-      console.error(`${TAG} Failed to load queued-only servers:`, err);
+      console.error(`${TAG} Failed to load servers with queued tasks:`, err);
     }
 
     await Promise.allSettled(
-      idleServersWithQueue.map(async (srv) => {
+      serversWithQueue.map(async (srv) => {
         const sessionPct = srv.claudeSessionPct ?? 0;
         const weekPct = srv.claudeWeekPct ?? 0;
 
         if (sessionPct >= USAGE_THRESHOLD || weekPct >= USAGE_THRESHOLD) {
           console.log(
             `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping`
-          );
-          return;
-        }
-
-        const idleResult = await detectClaudeIdle({
-          host: srv.host,
-          port: srv.port,
-          username: srv.username,
-          sshKeyPath: srv.sshKeyPath,
-        }, srv.tmuxSession);
-
-        if (idleResult.tmuxMissing) {
-          offlineServerIds.add(srv.id);
-          try {
-            await prisma.server.update({
-              where: { id: srv.id },
-              data: { status: "failed" },
-            });
-          } catch { /* non-fatal */ }
-          console.log(
-            `${TAG} ${srv.name}: tmux session '${srv.tmuxSession}' not found — marked offline, skipping queued task`
-          );
-          return;
-        }
-
-        if (!idleResult.isIdle) {
-          console.log(
-            `${TAG} ${srv.name}: has queued tasks but Claude is not idle yet` +
-            (idleResult.error ? ` — error: ${idleResult.error}` : "") +
-            (idleResult.paneText
-              ? `\n  pane tail: ${JSON.stringify(
-                  idleResult.paneText.split("\n").filter(l => l.trim()).slice(-4)
-                )}`
-              : "")
           );
           return;
         }
@@ -807,9 +711,7 @@ function startPoller() {
         if (!nextTask) return;
 
         if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
-          console.log(
-            `${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`
-          );
+          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`);
           return;
         }
 
@@ -817,31 +719,27 @@ function startPoller() {
           taskId: nextTask.id,
           serverId: srv.id,
           sshConfig: { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
-          tmuxSession: srv.tmuxSession,
+          permissionMode: srv.claudePermissionMode as ClaudePermissionMode,
           task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
           logText: `Auto-started from queue on server "${srv.name}" (${srv.host}) — mode: ${srv.claudePermissionMode}`,
         });
 
         if (outcome.ok) {
           clearDispatchBackoff(nextTask.id, backoff);
-          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): dispatched from idle-server queue`);
+          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): dispatched to server "${srv.name}"`);
         } else if (outcome.reason === "ssh_failed") {
           recordDispatchFailure(nextTask.id, backoff);
-          console.warn(
-            `${TAG} ${srv.name}: failed to start queued task ${nextTask.id}: ${outcome.detail} — backoff applied`
-          );
+          console.warn(`${TAG} ${srv.name}: failed to start queued task ${nextTask.id}: ${outcome.detail} — backoff applied`);
         } else if (outcome.reason === "tmux_missing") {
           offlineServerIds.add(srv.id);
-          console.warn(
-            `${TAG} ${srv.name}: tmux session '${srv.tmuxSession}' missing during dispatch — marked offline`
-          );
+          console.warn(`${TAG} ${srv.name}: tmux missing during dispatch — marked offline`);
         }
       })
     ).then((results) => {
       results.forEach((r, i) => {
         if (r.status === "rejected")
           console.error(
-            `${TAG} Idle-server queue check for ${idleServersWithQueue[i].host} threw:`,
+            `${TAG} Queue advance for ${serversWithQueue[i].host} threw:`,
             (r as PromiseRejectedResult).reason
           );
       });
