@@ -20,9 +20,10 @@ import { prisma } from "./lib/prisma";
 import {
   fetchClaudeUsageViaTmux,
   detectClaudeIdle,
+  detectTaskCompletion,
 } from "./lib/ssh-claude-tmux";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "./lib/task-dispatch";
-import { USAGE_THRESHOLD } from "./lib/constants";
+import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS } from "./lib/constants";
 import {
   shouldSkipDueToBackoff,
   recordDispatchFailure,
@@ -268,6 +269,9 @@ function startPoller() {
     let runningTasks: {
       id: string;
       serverId: string | null;
+      completionNonce: string | null;
+      tmuxOutputOffset: number | null;
+      updatedAt: Date;
       server: {
         id: string;
         name: string;
@@ -288,6 +292,9 @@ function startPoller() {
         select: {
           id: true,
           serverId: true,
+          completionNonce: true,
+          tmuxOutputOffset: true,
+          updatedAt: true,
           server: {
             select: {
               id: true,
@@ -312,7 +319,13 @@ function startPoller() {
     type ServerInfo = (typeof runningTasks)[number]["server"] & {};
     const byServer = new Map<
       string,
-      { server: NonNullable<ServerInfo>; taskIds: string[] }
+      {
+        server: NonNullable<ServerInfo>;
+        taskIds: string[];
+        completionNonce: string | null;
+        tmuxOutputOffset: number | null;
+        startedAt: Date;
+      }
     >();
 
     for (const task of runningTasks) {
@@ -324,12 +337,15 @@ function startPoller() {
         byServer.set(task.serverId, {
           server: task.server,
           taskIds: [task.id],
+          completionNonce: task.completionNonce,
+          tmuxOutputOffset: task.tmuxOutputOffset,
+          startedAt: task.updatedAt,
         });
       }
     }
 
     await Promise.allSettled(
-      [...byServer.entries()].map(async ([serverId, { server: srv, taskIds }]) => {
+      [...byServer.entries()].map(async ([serverId, { server: srv, taskIds, completionNonce, tmuxOutputOffset, startedAt }]) => {
         if (offlineServerIds.has(serverId)) {
           console.log(
             `${TAG} ${srv.name}: skipping idle check — server offline (tmux session missing)`
@@ -337,14 +353,17 @@ function startPoller() {
           return;
         }
 
-        const idleResult = await detectClaudeIdle({
-          host: srv.host,
-          port: srv.port,
-          username: srv.username,
-          sshKeyPath: srv.sshKeyPath,
-        }, srv.tmuxSession);
+        // For server-direct tasks, pass the first running task's nonce+offset.
+        const firstTaskId = taskIds[0];
+        const completionResult = await detectTaskCompletion(
+          { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
+          srv.tmuxSession,
+          firstTaskId,
+          completionNonce ?? undefined,
+          tmuxOutputOffset ?? undefined,
+        );
 
-        if (idleResult.tmuxMissing) {
+        if (completionResult.tmuxMissing) {
           offlineServerIds.add(serverId);
           try {
             await prisma.server.update({
@@ -353,13 +372,29 @@ function startPoller() {
             });
           } catch { /* non-fatal */ }
           console.log(
-            `${TAG} ${srv.name}: tmux session '${srv.tmuxSession}' not found during idle check — ` +
+            `${TAG} ${srv.name}: tmux session '${srv.tmuxSession}' not found during completion check — ` +
             `marking offline, skipping queue advance`
           );
           return;
         }
 
-        if (!idleResult.isIdle) return;
+        // Determine how (or whether) the task completed.
+        let completedHow: string | null = null;
+        if (completionResult.markerFound) {
+          completedHow = "completion marker";
+        } else if (completionResult.isIdle && !completionNonce) {
+          completedHow = "idle prompt (no nonce)";
+        } else if (completionResult.isIdle) {
+          const runMs = Date.now() - startedAt.getTime();
+          if (runMs >= IDLE_FALLBACK_MIN_MS) {
+            completedHow = `idle fallback (no marker after ${Math.round(runMs / 60_000)}m)`;
+            console.log(
+              `${TAG} ${srv.name}: task "${firstTaskId}" idle without nonce marker — ` +
+              `using idle fallback after ${Math.round(runMs / 60_000)}m`
+            );
+          }
+        }
+        if (!completedHow) return;
 
         for (const taskId of taskIds) {
           try {
@@ -383,9 +418,7 @@ function startPoller() {
             });
 
             clearDispatchBackoff(taskId, backoff);
-            console.log(
-              `${TAG} Task ${taskId}: detected completion → marked completed`
-            );
+            console.log(`[TASK_FINISHED] taskId="${taskId}" detectedBy="${completedHow}"`);
           } catch (err) {
             console.error(`${TAG} Task ${taskId}: failed to mark completed:`, err);
           }
@@ -429,7 +462,9 @@ function startPoller() {
 
         if (outcome.ok) {
           clearDispatchBackoff(nextTask.id, backoff);
-          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from queue`);
+          console.log(
+            `[NEXT_TASK_DISPATCHED] taskId="${nextTask.id}" title="${nextTask.title}" serverId="${serverId}"`,
+          );
         } else if (outcome.reason === "ssh_failed") {
           recordDispatchFailure(nextTask.id, backoff);
           console.warn(
@@ -453,6 +488,9 @@ function startPoller() {
     let runningAgentTasks: {
       id: string;
       agentId: string | null;
+      completionNonce: string | null;
+      tmuxOutputOffset: number | null;
+      updatedAt: Date;
       agent: {
         id: string;
         name: string;
@@ -475,6 +513,9 @@ function startPoller() {
         select: {
           id: true,
           agentId: true,
+          completionNonce: true,
+          tmuxOutputOffset: true,
+          updatedAt: true,
           agent: {
             select: {
               id: true,
@@ -495,7 +536,13 @@ function startPoller() {
     }
 
     type AgentInfo = NonNullable<(typeof runningAgentTasks)[number]["agent"]>;
-    const byAgent = new Map<string, { agent: AgentInfo; taskIds: string[] }>();
+    const byAgent = new Map<string, {
+      agent: AgentInfo;
+      taskIds: string[];
+      completionNonce: string | null;
+      tmuxOutputOffset: number | null;
+      startedAt: Date;
+    }>();
 
     for (const task of runningAgentTasks) {
       if (!task.agentId || !task.agent) continue;
@@ -503,12 +550,18 @@ function startPoller() {
       if (entry) {
         entry.taskIds.push(task.id);
       } else {
-        byAgent.set(task.agentId, { agent: task.agent, taskIds: [task.id] });
+        byAgent.set(task.agentId, {
+          agent: task.agent,
+          taskIds: [task.id],
+          completionNonce: task.completionNonce,
+          tmuxOutputOffset: task.tmuxOutputOffset,
+          startedAt: task.updatedAt,
+        });
       }
     }
 
     await Promise.allSettled(
-      [...byAgent.entries()].map(async ([agentId, { agent, taskIds }]) => {
+      [...byAgent.entries()].map(async ([agentId, { agent, taskIds, completionNonce, tmuxOutputOffset, startedAt }]) => {
         if (offlineAgentIds.has(agentId)) {
           console.log(
             `${TAG} Agent ${agent.name}: skipping idle check — offline (tmux session missing)`
@@ -516,9 +569,16 @@ function startPoller() {
           return;
         }
 
-        const idleResult = await detectClaudeIdle(agent.server, agent.tmuxSession);
+        const firstTaskId = taskIds[0];
+        const completionResult = await detectTaskCompletion(
+          agent.server,
+          agent.tmuxSession,
+          firstTaskId,
+          completionNonce ?? undefined,
+          tmuxOutputOffset ?? undefined,
+        );
 
-        if (idleResult.tmuxMissing) {
+        if (completionResult.tmuxMissing) {
           offlineAgentIds.add(agentId);
           recordAgentOffline(agentId, agentOfflineStore);
           try {
@@ -528,13 +588,29 @@ function startPoller() {
             });
           } catch { /* non-fatal */ }
           console.log(
-            `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' not found during idle check — ` +
+            `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' not found during completion check — ` +
             `marking offline, skipping queue advance`
           );
           return;
         }
 
-        if (!idleResult.isIdle) return;
+        // Determine how (or whether) the task completed.
+        let completedHow: string | null = null;
+        if (completionResult.markerFound) {
+          completedHow = "completion marker";
+        } else if (completionResult.isIdle && !completionNonce) {
+          completedHow = "idle prompt (no nonce)";
+        } else if (completionResult.isIdle) {
+          const runMs = Date.now() - startedAt.getTime();
+          if (runMs >= IDLE_FALLBACK_MIN_MS) {
+            completedHow = `idle fallback (no marker after ${Math.round(runMs / 60_000)}m)`;
+            console.log(
+              `${TAG} Agent ${agent.name}: task "${firstTaskId}" idle without nonce marker — ` +
+              `using idle fallback after ${Math.round(runMs / 60_000)}m`
+            );
+          }
+        }
+        if (!completedHow) return;
 
         for (const taskId of taskIds) {
           try {
@@ -558,12 +634,21 @@ function startPoller() {
             });
 
             clearDispatchBackoff(taskId, backoff);
-            console.log(
-              `${TAG} Task ${taskId}: agent-task completion detected → marked completed`
-            );
+            console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${completedHow}"`);
           } catch (err) {
             console.error(`${TAG} Task ${taskId}: failed to mark agent task completed:`, err);
           }
+        }
+
+        // Release agent: mark idle before attempting queue advance.
+        try {
+          await prisma.agent.update({
+            where: { id: agentId },
+            data: { status: "idle" },
+          });
+          console.log(`[AGENT_RELEASED] agentId="${agentId}" name="${agent.name}"`);
+        } catch (err) {
+          console.error(`${TAG} Agent ${agent.name}: failed to set idle:`, err);
         }
 
         // Auto-advance this agent's queue after completions.
@@ -603,7 +688,9 @@ function startPoller() {
 
         if (outcome.ok) {
           clearDispatchBackoff(nextTask.id, backoff);
-          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): auto-started from agent queue`);
+          console.log(
+            `[NEXT_TASK_DISPATCHED] taskId="${nextTask.id}" title="${nextTask.title}" agentId="${agentId}"`,
+          );
         } else if (outcome.reason === "ssh_failed") {
           recordDispatchFailure(nextTask.id, backoff);
           console.warn(
