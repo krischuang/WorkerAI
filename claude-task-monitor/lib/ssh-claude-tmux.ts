@@ -29,6 +29,8 @@ import {
   parseUsage,
   looksLikeUsage,
   cleanPane,
+  classifyIdlePane,
+  classifyPreflightPane,
 } from "@/lib/usage-parser";
 import { buildDispatchPrompt, type DispatchTask } from "@/lib/prompt-sanitiser";
 
@@ -88,12 +90,16 @@ export interface SSHConfig {
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
-const DEFAULT_tmuxSession = "claude";
-
 export async function fetchClaudeUsageViaTmux(
   config: SSHConfig,
-  tmuxSession = DEFAULT_tmuxSession,
+  tmuxSession: string,
 ): Promise<ClaudeUsageResult> {
+  if (!tmuxSession || !tmuxSession.trim()) {
+    return {
+      success: false, status: "offline", rawOutput: "", parsed: {},
+      error: "Agent tmuxSession is not configured. Set the tmuxSession field on the agent.",
+    };
+  }
   const ssh = {
     host: config.host,
     port: config.port,
@@ -126,25 +132,41 @@ export async function fetchClaudeUsageViaTmux(
     };
   }
 
-  // ── 2. Pre-flight: check current pane state ───────────────────────────────
+  // ── 2. Pre-flight: check current pane state (tail-window only) ───────────
+  // We inspect only the last PREFLIGHT_TAIL_LINES non-empty lines so that
+  // stale error messages from earlier in the session cannot trigger false
+  // positives.  Full-pane scanning was the bug — do not revert to it.
   let before = "";
   try {
     const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${tmuxSession} -p`, 5_000);
     before = cleanPane(stdout);
   } catch { /* non-fatal */ }
 
-  if (/not\s+logged\s+in|please\s+log\s*in|run\s+claude\s+login/i.test(before)) {
+  const preflight = classifyPreflightPane(before);
+  const preflightTs = preflight.detectedAt.toISOString();
+
+  if (preflight.status === "auth_required") {
+    console.log(`[preflight ${preflightTs}] auth failure detected`);
     return {
       success: false, status: "auth_required",
-      rawOutput: before.slice(-1000), parsed: {},
+      rawOutput: before.slice(-500), parsed: {},
       error: "Claude CLI is not authenticated. SSH in and run 'claude login'.",
     };
   }
-  if (/rate[\s-]limit|too\s+many\s+request/i.test(before)) {
+  if (preflight.status === "rate_limited") {
+    console.log(`[preflight ${preflightTs}] rate limit detected`);
     return {
       success: false, status: "rate_limited",
-      rawOutput: before.slice(-1000), parsed: {},
+      rawOutput: before.slice(-500), parsed: {},
       error: "Claude CLI is rate limited. Wait a moment before refreshing.",
+    };
+  }
+  if (preflight.status === "session_unavailable") {
+    console.log(`[preflight ${preflightTs}] session unavailable detected`);
+    return {
+      success: false, status: "offline",
+      rawOutput: before.slice(-500), parsed: {},
+      error: "Claude CLI session is unavailable.",
     };
   }
 
@@ -194,7 +216,7 @@ export async function fetchClaudeUsageViaTmux(
   return {
     success: hasData,
     status: hasData ? "ok" : "error",
-    rawOutput: captured.slice(-2000),
+    rawOutput: captured.slice(-500),
     parsed,
     error: hasData
       ? undefined
@@ -217,7 +239,7 @@ export interface LaunchClaudeResult {
 export async function launchClaudeInTmux(
   config: SSHConfig,
   mode: ClaudePermissionMode,
-  tmuxSession = DEFAULT_tmuxSession,
+  tmuxSession: string,
   workDir?: string,
 ): Promise<LaunchClaudeResult> {
   const ssh = {
@@ -277,6 +299,8 @@ export interface ClaudeIdleResult {
   isIdle: boolean;
   paneText: string;
   error?: string;
+  /** true when the tmux session itself does not exist */
+  tmuxMissing?: boolean;
 }
 
 /**
@@ -291,8 +315,16 @@ export interface ClaudeIdleResult {
  */
 export async function detectClaudeIdle(
   config: SSHConfig,
-  tmuxSession = DEFAULT_tmuxSession,
+  tmuxSession: string,
 ): Promise<ClaudeIdleResult> {
+  if (!tmuxSession || !tmuxSession.trim()) {
+    return {
+      isIdle: false,
+      paneText: "",
+      tmuxMissing: true,
+      error: "tmuxSession is not configured",
+    };
+  }
   const ssh = {
     host: config.host,
     port: config.port,
@@ -301,26 +333,34 @@ export async function detectClaudeIdle(
   };
 
   try {
-    const { stdout } = await execSSH(
+    const { stdout, stderr, exitCode } = await execSSH(
       ssh,
       `tmux capture-pane -t ${tmuxSession} -p`,
       5_000
     );
+
+    // tmux exits non-zero and prints "can't find session" when the session
+    // does not exist.  Surface this so callers can distinguish "not idle"
+    // from "session missing".
+    if (exitCode !== 0) {
+      const isMissing = /can.?t find session|no server running/i.test(
+        stderr + stdout
+      );
+      return {
+        isIdle: false,
+        paneText: "",
+        tmuxMissing: isMissing,
+        error: isMissing
+          ? `tmux session '${tmuxSession}' not found`
+          : `tmux capture-pane failed (exit ${exitCode}): ${stderr}`,
+      };
+    }
+
     const pane = cleanPane(stdout);
-    const lines = pane.split("\n").filter((l) => l.trim().length > 0);
-
-    // Look for the "> " prompt in the last 6 lines — covers status bars / model
-    // info footers that Claude Code renders below the input area.
-    const tail = lines.slice(-6);
-    const hasPrompt = tail.some((l) => /^[>❯]\s*$/.test(l));
-
-    // Reject if Claude is visibly working (spinner chars, "Thinking", tool calls)
-    const busyPattern = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Thinking\b|esc to interrupt/i;
-    const isBusy = tail.some((l) => busyPattern.test(l));
-
-    const isIdle = hasPrompt && !isBusy;
+    const { isIdle, hasPrompt, isBusy } = classifyIdlePane(pane);
 
     if (!isIdle) {
+      const tail = pane.split("\n").filter((l) => l.trim().length > 0).slice(-6);
       console.log(
         `[idle-detect] NOT idle — hasPrompt=${hasPrompt} isBusy=${isBusy}\n` +
         `  tail lines:\n` +
@@ -352,7 +392,7 @@ export async function detectClaudeIdle(
 export async function sendRawPromptToTmux(
   config: SSHConfig,
   promptText: string,
-  tmuxSession = DEFAULT_tmuxSession,
+  tmuxSession: string,
 ): Promise<{ success: boolean; error?: string }> {
   const ssh = {
     host: config.host,
@@ -412,7 +452,7 @@ export async function sendRawPromptToTmux(
 export async function sendTaskToTmux(
   config: SSHConfig,
   task: DispatchTask,
-  tmuxSession = DEFAULT_tmuxSession,
+  tmuxSession: string,
 ): Promise<{ success: boolean; error?: string }> {
   return sendRawPromptToTmux(config, buildDispatchPrompt(task), tmuxSession);
 }
