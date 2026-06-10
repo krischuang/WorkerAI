@@ -446,10 +446,10 @@ describe("fetchClaudeUsageViaTmux — multiple agents with different sessions", 
     mockExecSSH
       .mockResolvedValueOnce({ stdout: "no", stderr: "", exitCode: 0 }); // has-session
 
-    const [online, offline] = await Promise.all([
-      fetchClaudeUsageViaTmux(SSH_CONFIG, "claude-agent-1"),
-      fetchClaudeUsageViaTmux(SSH_CONFIG, "claude-agent-renamed"),
-    ]);
+    // Run sequentially: the shared vi mock queue is consumed in call order,
+    // so concurrent execution would interleave mock responses unpredictably.
+    const online = await fetchClaudeUsageViaTmux(SSH_CONFIG, "claude-agent-1");
+    const offline = await fetchClaudeUsageViaTmux(SSH_CONFIG, "claude-agent-renamed");
 
     expect(online.success).toBe(true);
     expect(online.parsed.sessionPct).toBe(50);

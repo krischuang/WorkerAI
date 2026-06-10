@@ -16,7 +16,9 @@ interface Agent {
   status: AgentStatus;
   claudePermissionMode: ClaudePermissionMode;
   claudeSessionPct: number | null;
+  claudeSessionResetsAt: string | null;
   claudeWeekPct: number | null;
+  claudeWeekResetsAt: string | null;
   claudeUsageFetchedAt: string | null;
   server: { id: string; name: string; host: string };
   _count: { tasks: number };
@@ -35,15 +37,31 @@ const PERMISSION_LABEL: Record<ClaudePermissionMode, string> = {
   full_autonomous: "Full Autonomous",
 };
 
-function UsageBar({ pct }: { pct: number | null }) {
+function formatResetCountdown(isoString: string | null): string {
+  if (!isoString) return "Reset unknown";
+  const ms = new Date(isoString).getTime() - Date.now();
+  if (ms <= 0) return "Reset unknown";
+  const totalMin = Math.floor(ms / 60000);
+  const days = Math.floor(totalMin / 1440);
+  const hours = Math.floor((totalMin % 1440) / 60);
+  const mins = totalMin % 60;
+  if (days > 0) return `Resets in ${days}d ${hours}h`;
+  if (hours > 0) return `Resets in ${hours}h ${mins}m`;
+  return `Resets in ${mins}m`;
+}
+
+function UsageBar({ pct, resetAt }: { pct: number | null; resetAt?: string | null }) {
   if (pct === null) return <span className="text-zinc-400 text-xs">—</span>;
   const color = pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-green-500";
   return (
-    <div className="flex items-center gap-2">
-      <div className="w-20 h-1.5 bg-zinc-200 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-2">
+        <div className="w-20 h-1.5 bg-zinc-200 rounded-full overflow-hidden">
+          <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+        </div>
+        <span className="text-xs text-zinc-600">{Math.round(pct)}%</span>
       </div>
-      <span className="text-xs text-zinc-600">{Math.round(pct)}%</span>
+      <span className="text-xs text-zinc-500">{formatResetCountdown(resetAt ?? null)}</span>
     </div>
   );
 }
@@ -128,8 +146,8 @@ export default function AgentsPage() {
                           {agent.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3"><UsageBar pct={agent.claudeSessionPct} /></td>
-                      <td className="px-4 py-3"><UsageBar pct={agent.claudeWeekPct} /></td>
+                      <td className="px-4 py-3"><UsageBar pct={agent.claudeSessionPct} resetAt={agent.claudeSessionResetsAt} /></td>
+                      <td className="px-4 py-3"><UsageBar pct={agent.claudeWeekPct} resetAt={agent.claudeWeekResetsAt} /></td>
                       <td className="px-4 py-3 text-xs text-zinc-600">{PERMISSION_LABEL[agent.claudePermissionMode]}</td>
                       <td className="px-4 py-3 text-xs text-zinc-600">{agent._count.tasks}</td>
                       <td className="px-4 py-3">
