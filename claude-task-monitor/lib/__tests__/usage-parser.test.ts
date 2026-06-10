@@ -7,6 +7,8 @@ import {
   parseUsage,
   looksLikeUsage,
   cleanPane,
+  classifyPreflightPane,
+  PREFLIGHT_TAIL_LINES,
 } from "../usage-parser";
 
 // ─── parseUTCResetTime ────────────────────────────────────────────────────────
@@ -82,6 +84,18 @@ describe("parseUTCResetTime", () => {
     expect(lower).not.toBeNull();
     expect(lower!.getUTCMonth()).toBe(5);
   });
+
+  it("handles 12pm (noon) in date+time format", () => {
+    const d = parseUTCResetTime("Jun 15, 12pm");
+    expect(d).not.toBeNull();
+    expect(d!.getUTCHours()).toBe(12); // 12pm stays 12 — no +12
+  });
+
+  it("handles 12am (midnight) in date+time format", () => {
+    const d = parseUTCResetTime("Jun 15, 12am");
+    expect(d).not.toBeNull();
+    expect(d!.getUTCHours()).toBe(0); // 12am → 0
+  });
 });
 
 // ─── toSydney ────────────────────────────────────────────────────────────────
@@ -156,6 +170,22 @@ Resets Jun 15, 9am (UTC)
     const result = extractSection(text, /Current session/i);
     expect(result!.pct).toBe(0);
   });
+
+  it("handles section with % used but no Resets line — resetsRaw is empty string", () => {
+    const text = "Current session\n75% used";
+    const result = extractSection(text, /Current session/i);
+    expect(result).not.toBeNull();
+    expect(result!.pct).toBe(75);
+    expect(result!.resetsRaw).toBe("");
+  });
+
+  it("handles section with Resets line but no % used — pct defaults to 0", () => {
+    const text = "Current session\nResets 9am (UTC)";
+    const result = extractSection(text, /Current session/i);
+    expect(result).not.toBeNull();
+    expect(result!.pct).toBe(0);
+    expect(result!.resetsRaw).toBe("9am");
+  });
 });
 
 // ─── parseUsage ──────────────────────────────────────────────────────────────
@@ -209,6 +239,16 @@ Resets Jun 15, 9am (UTC)
     const result = parseUsage(partial);
     expect(result.sessionPct).toBe(50);
     expect(result.weekPct).toBeUndefined();
+  });
+
+  it("sets resetsAt to undefined when resets string is present but unparseable", () => {
+    // "tomorrow" is not a recognised format — parseUTCResetTime returns null
+    const text = "Current session\n50% used\nResets tomorrow (UTC)\n\nCurrent week (all models)\n20% used\nResets next-week (UTC)";
+    const result = parseUsage(text);
+    expect(result.sessionPct).toBe(50);
+    expect(result.sessionResetsAt).toBeUndefined();
+    expect(result.weekPct).toBe(20);
+    expect(result.weekResetsAt).toBeUndefined();
   });
 });
 
@@ -264,5 +304,106 @@ describe("cleanPane", () => {
 
   it("handles only whitespace", () => {
     expect(cleanPane("   \n   \r\n   ")).toBe("");
+  });
+});
+
+// ─── classifyPreflightPane ────────────────────────────────────────────────────
+
+describe("classifyPreflightPane", () => {
+  it("returns ok for a normal idle pane", () => {
+    const result = classifyPreflightPane("Some task output.\n\n>\n");
+    expect(result.status).toBe("ok");
+  });
+
+  it("returns auth_required when 'not logged in' appears in the tail", () => {
+    const result = classifyPreflightPane("✗ Not logged in.\nRun claude login to authenticate.");
+    expect(result.status).toBe("auth_required");
+  });
+
+  it("returns auth_required when 'please log in' appears in the tail", () => {
+    expect(classifyPreflightPane("Please log in first.").status).toBe("auth_required");
+  });
+
+  it("returns auth_required when 'run claude login' appears in the tail", () => {
+    expect(classifyPreflightPane("Run claude login to continue.").status).toBe("auth_required");
+  });
+
+  it("returns rate_limited when 'rate-limit' appears in the tail", () => {
+    const result = classifyPreflightPane("Error: rate_limit_error\nToo many requests.");
+    expect(result.status).toBe("rate_limited");
+  });
+
+  it("returns rate_limited when 'too many requests' appears in the tail", () => {
+    expect(classifyPreflightPane("too many requests, slow down").status).toBe("rate_limited");
+  });
+
+  it("returns session_unavailable for matching pattern", () => {
+    expect(classifyPreflightPane("Session unavailable. Reconnect.").status).toBe("session_unavailable");
+  });
+
+  it("returns session_unavailable when claude is not connected", () => {
+    expect(classifyPreflightPane("Claude is not connected.").status).toBe("session_unavailable");
+  });
+
+  it("returns session_unavailable when claude is not available", () => {
+    expect(classifyPreflightPane("Claude is not available right now.").status).toBe("session_unavailable");
+  });
+
+  it("auth_required takes precedence over rate_limited (first match wins)", () => {
+    const pane = "not logged in\nrate-limit error";
+    expect(classifyPreflightPane(pane).status).toBe("auth_required");
+  });
+
+  it("returns detectedAt as a recent Date", () => {
+    const before = Date.now();
+    const result = classifyPreflightPane(">");
+    expect(result.detectedAt).toBeInstanceOf(Date);
+    expect(result.detectedAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("returns the inspected lines in tailLines", () => {
+    const result = classifyPreflightPane("line one\nline two\n>");
+    expect(result.tailLines).toContain("line one");
+    expect(result.tailLines).toContain("line two");
+    expect(result.tailLines).toContain(">");
+  });
+
+  it("excludes blank lines from tailLines", () => {
+    const result = classifyPreflightPane("a\n\n\nb\n");
+    expect(result.tailLines).not.toContain("");
+  });
+
+  it(`only inspects the last ${PREFLIGHT_TAIL_LINES} non-empty lines`, () => {
+    // Put a rate-limit error far above the tail window, then fill with clean lines.
+    const oldError = "rate-limit error from ages ago";
+    const cleanLines = Array.from({ length: PREFLIGHT_TAIL_LINES }, (_, i) => `clean line ${i + 1}`);
+    const pane = [oldError, ...cleanLines].join("\n");
+    // The error is now beyond the tail window — should not trigger rate_limited.
+    expect(classifyPreflightPane(pane).status).toBe("ok");
+  });
+
+  it("still detects errors that are within the tail window", () => {
+    // Fill with lines then put the error just inside the window.
+    const prefix = Array.from({ length: PREFLIGHT_TAIL_LINES - 2 }, (_, i) => `ok line ${i}`);
+    const pane = [...prefix, "rate-limit error"].join("\n");
+    expect(classifyPreflightPane(pane).status).toBe("rate_limited");
+  });
+
+  it("returns ok for an empty pane", () => {
+    expect(classifyPreflightPane("").status).toBe("ok");
+  });
+
+  it("is case-insensitive for all status patterns", () => {
+    expect(classifyPreflightPane("NOT LOGGED IN").status).toBe("auth_required");
+    expect(classifyPreflightPane("RATE-LIMIT EXCEEDED").status).toBe("rate_limited");
+    expect(classifyPreflightPane("SESSION UNAVAILABLE").status).toBe("session_unavailable");
+  });
+});
+
+describe("PREFLIGHT_TAIL_LINES", () => {
+  it("is a number in the valid range (20–50)", () => {
+    expect(typeof PREFLIGHT_TAIL_LINES).toBe("number");
+    expect(PREFLIGHT_TAIL_LINES).toBeGreaterThanOrEqual(20);
+    expect(PREFLIGHT_TAIL_LINES).toBeLessThanOrEqual(50);
   });
 });
