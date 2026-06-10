@@ -156,7 +156,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
                 taskId: id,
                 serverId: server.id,
                 sshConfig: { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
-                tmuxSession: server.tmuxSession,
+                permissionMode: server.claudePermissionMode as import("@/lib/ssh-claude-tmux").ClaudePermissionMode,
                 task: { title: task.title, description: task.description, projectName: task.project?.name },
                 logText: `Auto-sent to Claude on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
               });

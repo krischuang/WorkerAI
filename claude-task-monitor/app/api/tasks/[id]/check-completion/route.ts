@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { detectClaudeIdle } from "@/lib/ssh-claude-tmux";
+import { detectClaudeIdle, killTaskTmuxSession } from "@/lib/ssh-claude-tmux";
 import { serverError } from "@/lib/api-error";
 import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
@@ -34,6 +34,7 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
     let sshConfig: { host: string; port: number; username: string; sshKeyPath: string };
     let tmuxSession: string;
     let agentId: string | null = null;
+    let isPerTaskSession = false;
 
     if (task.agent) {
       const s = task.agent.server;
@@ -43,7 +44,15 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
     } else if (task.server) {
       const s = task.server;
       sshConfig = { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath };
-      tmuxSession = s.tmuxSession;
+      // Use the per-task session if present (new parallel execution model).
+      // Fall back to the server's shared session for legacy tasks dispatched
+      // before per-task sessions were introduced.
+      if (task.taskTmuxSession) {
+        tmuxSession = task.taskTmuxSession;
+        isPerTaskSession = true;
+      } else {
+        tmuxSession = s.tmuxSession;
+      }
     } else {
       return NextResponse.json({ completed: false, reason: "No agent or server assigned" });
     }
@@ -77,6 +86,11 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
         ? [prisma.agent.update({ where: { id: agentId }, data: { status: "idle" } })]
         : []),
     ]);
+
+    // Clean up the per-task tmux session now that the task is complete.
+    if (isPerTaskSession) {
+      await killTaskTmuxSession(sshConfig, id);
+    }
 
     return NextResponse.json({ completed: true });
   } catch (err) {
