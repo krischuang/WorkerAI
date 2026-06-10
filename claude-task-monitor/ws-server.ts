@@ -12,6 +12,7 @@ import { validateSshKeyPath } from "./lib/ssh-key-path";
 import {
   makeStore, checkLimits, recordAdmit, recordRelease,
   MAX_TOTAL_CONNECTIONS, MAX_CONNECTIONS_PER_IP, RATE_WINDOW_MS, RATE_LIMIT_MAX,
+  validateWsConnectParams,
 } from "./lib/ws-rate-limit";
 
 const WS_PORT = Number(process.env.WS_PORT ?? 3099);
@@ -91,8 +92,9 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
     }
   }
 
-  if (!serverId && !agentId) {
-    send({ type: "error", message: "serverId or agentId is required" });
+  const connectErr = validateWsConnectParams(serverId, agentId);
+  if (connectErr) {
+    send({ type: "error", message: connectErr });
     ws.close();
     return;
   }

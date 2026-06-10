@@ -1,11 +1,6 @@
 import { prisma } from "@/lib/prisma";
-import { Priority, TaskStatus, CostLevel, TaskType } from "@/app/generated/prisma/client";
 import { serverError } from "@/lib/api-error";
-
-const VALID_PRIORITIES = new Set<string>(Object.values(Priority));
-const VALID_STATUSES = new Set<string>(Object.values(TaskStatus));
-const VALID_COST_LEVELS = new Set<string>(Object.values(CostLevel));
-const VALID_TASK_TYPES = new Set<string>(Object.values(TaskType));
+import { validateTaskCreate } from "@/lib/task-validation";
 
 export async function GET(request: Request) {
   try {
@@ -68,26 +63,10 @@ export async function POST(request: Request) {
       taskType,
     } = body;
 
-    if (!projectId || !title) {
-      return Response.json(
-        { error: "projectId and title are required" },
-        { status: 400 }
-      );
+    const validationErr = validateTaskCreate(body);
+    if (validationErr) {
+      return Response.json({ error: validationErr.message }, { status: 400 });
     }
-    if (typeof title === "string" && title.length > 500) {
-      return Response.json({ error: "title must be 500 characters or fewer" }, { status: 400 });
-    }
-    if (description != null && typeof description === "string" && description.length > 10_000) {
-      return Response.json({ error: "description must be 10 000 characters or fewer" }, { status: 400 });
-    }
-    if (priority != null && !VALID_PRIORITIES.has(priority))
-      return Response.json({ error: `Invalid priority. Must be one of: ${[...VALID_PRIORITIES].join(", ")}` }, { status: 400 });
-    if (status != null && !VALID_STATUSES.has(status))
-      return Response.json({ error: `Invalid status. Must be one of: ${[...VALID_STATUSES].join(", ")}` }, { status: 400 });
-    if (estimatedCostLevel != null && !VALID_COST_LEVELS.has(estimatedCostLevel))
-      return Response.json({ error: `Invalid estimatedCostLevel. Must be one of: ${[...VALID_COST_LEVELS].join(", ")}` }, { status: 400 });
-    if (taskType != null && !VALID_TASK_TYPES.has(taskType))
-      return Response.json({ error: `Invalid taskType. Must be one of: ${[...VALID_TASK_TYPES].join(", ")}` }, { status: 400 });
 
     const task = await prisma.task.create({
       data: {

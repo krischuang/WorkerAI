@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { execSSH } from "@/lib/ssh";
-import { isLocalOrigin, isDestructiveCommand, MAX_COMMAND_LENGTH } from "@/lib/exec-guards";
+import { isLocalOrigin, isDestructiveCommand, validateCommand } from "@/lib/exec-guards";
 import type { NextRequest } from "next/server";
 
 // Allow up to 10 minutes for long-running commands like dnf update, apt upgrade, etc.
@@ -19,15 +19,9 @@ export async function POST(request: NextRequest, ctx: Ctx) {
   const body = await request.json();
   const { command } = body as { command: string };
 
-  if (!command || typeof command !== "string" || command.trim() === "") {
-    return Response.json({ error: "command is required" }, { status: 400 });
-  }
-
-  if (command.length > MAX_COMMAND_LENGTH) {
-    return Response.json(
-      { error: `Command exceeds maximum length of ${MAX_COMMAND_LENGTH} characters` },
-      { status: 400 }
-    );
+  const commandErr = validateCommand(command);
+  if (commandErr) {
+    return Response.json({ error: commandErr }, { status: 400 });
   }
 
   const trimmed = command.trim();

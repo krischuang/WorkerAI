@@ -4,6 +4,7 @@ import {
   checkLimits,
   recordAdmit,
   recordRelease,
+  validateWsConnectParams,
   type RateLimitStore,
 } from "../ws-rate-limit";
 
@@ -201,5 +202,40 @@ describe("admit → release lifecycle", () => {
     // After the window expires all prior timestamps are gone
     const later = now + 3 + 60_001;
     expect(checkLimits("9.9.9.9", later, store, opts).admitted).toBe(true);
+  });
+});
+
+// ─── validateWsConnectParams (WebSocket connect — missing serverId) ───────────
+
+describe("validateWsConnectParams — missing serverId / agentId", () => {
+  it("returns an error when both serverId and agentId are null", () => {
+    const err = validateWsConnectParams(null, null);
+    expect(err).not.toBeNull();
+    expect(err!).toMatch(/serverId or agentId is required/i);
+  });
+
+  it("returns an error when both are empty strings", () => {
+    const err = validateWsConnectParams("", "");
+    expect(err).not.toBeNull();
+  });
+
+  it("returns null when serverId is provided and agentId is null", () => {
+    expect(validateWsConnectParams("server-abc", null)).toBeNull();
+  });
+
+  it("returns null when agentId is provided and serverId is null", () => {
+    expect(validateWsConnectParams(null, "agent-xyz")).toBeNull();
+  });
+
+  it("returns null when both are provided", () => {
+    expect(validateWsConnectParams("server-abc", "agent-xyz")).toBeNull();
+  });
+
+  it("returns an error when serverId is empty and agentId is null", () => {
+    expect(validateWsConnectParams("", null)).not.toBeNull();
+  });
+
+  it("returns an error when agentId is empty and serverId is null", () => {
+    expect(validateWsConnectParams(null, "")).not.toBeNull();
   });
 });

@@ -1,14 +1,9 @@
 import { prisma } from "@/lib/prisma";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "@/lib/task-dispatch";
-import { Priority, TaskStatus, CostLevel, TaskType } from "@/app/generated/prisma/client";
 import { serverError } from "@/lib/api-error";
+import { validateTaskUpdate } from "@/lib/task-validation";
 import type { NextRequest } from "next/server";
 import { USAGE_THRESHOLD } from "@/lib/constants";
-
-const VALID_PRIORITIES = new Set<string>(Object.values(Priority));
-const VALID_STATUSES = new Set<string>(Object.values(TaskStatus));
-const VALID_COST_LEVELS = new Set<string>(Object.values(CostLevel));
-const VALID_TASK_TYPES = new Set<string>(Object.values(TaskType));
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -70,20 +65,10 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       taskType, resultSummary, nextAction, serverId, agentId,
     } = body;
 
-    if (title != null && typeof title === "string" && title.length > 500) {
-      return Response.json({ error: "title must be 500 characters or fewer" }, { status: 400 });
+    const validationErr = validateTaskUpdate(body);
+    if (validationErr) {
+      return Response.json({ error: validationErr.message }, { status: 400 });
     }
-    if (description != null && typeof description === "string" && description.length > 10_000) {
-      return Response.json({ error: "description must be 10 000 characters or fewer" }, { status: 400 });
-    }
-    if (priority != null && !VALID_PRIORITIES.has(priority))
-      return Response.json({ error: `Invalid priority. Must be one of: ${[...VALID_PRIORITIES].join(", ")}` }, { status: 400 });
-    if (status != null && !VALID_STATUSES.has(status))
-      return Response.json({ error: `Invalid status. Must be one of: ${[...VALID_STATUSES].join(", ")}` }, { status: 400 });
-    if (estimatedCostLevel != null && !VALID_COST_LEVELS.has(estimatedCostLevel))
-      return Response.json({ error: `Invalid estimatedCostLevel. Must be one of: ${[...VALID_COST_LEVELS].join(", ")}` }, { status: 400 });
-    if (taskType != null && !VALID_TASK_TYPES.has(taskType))
-      return Response.json({ error: `Invalid taskType. Must be one of: ${[...VALID_TASK_TYPES].join(", ")}` }, { status: 400 });
 
     // When assigning an agent, also set serverId from the agent's server for consistency
     let resolvedServerId = serverId;

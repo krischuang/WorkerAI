@@ -55,3 +55,17 @@ export const DESTRUCTIVE_PATTERNS: RegExp[] = [
 export function isDestructiveCommand(cmd: string): boolean {
   return DESTRUCTIVE_PATTERNS.some((re) => re.test(cmd));
 }
+
+/**
+ * Validates the `command` field from a POST /api/servers/[id]/exec request body.
+ * Returns an error message string on failure, or null on success.
+ */
+export function validateCommand(command: unknown): string | null {
+  if (!command || typeof command !== "string" || command.trim() === "") {
+    return "command is required";
+  }
+  if (command.length > MAX_COMMAND_LENGTH) {
+    return `Command exceeds maximum length of ${MAX_COMMAND_LENGTH} characters`;
+  }
+  return null;
+}
