@@ -161,6 +161,9 @@ model Server {
   tasks         Task[]
   agents        Agent[]
 
+  // tmux session name where Claude CLI runs on this server (for server-direct tasks)
+  tmuxSession   String        @default("claude")
+
   // Claude execution mode — controls which flags are passed when launching Claude CLI
   claudePermissionMode  ClaudePermissionMode @default(workspace_write)
 
