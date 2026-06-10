@@ -31,8 +31,10 @@ import {
   cleanPane,
   classifyIdlePane,
   classifyPreflightPane,
+  detectCompletionBlock,
 } from "@/lib/usage-parser";
 import { buildDispatchPrompt, type DispatchTask } from "@/lib/prompt-sanitiser";
+import { COMPLETION_SCAN_LINES } from "@/lib/constants";
 
 export type { ClaudeUsageParsed };
 
@@ -136,17 +138,34 @@ export async function fetchClaudeUsageViaTmux(
   // We inspect only the last PREFLIGHT_TAIL_LINES non-empty lines so that
   // stale error messages from earlier in the session cannot trigger false
   // positives.  Full-pane scanning was the bug — do not revert to it.
-  let before = "";
-  try {
-    const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${tmuxSession} -p`, 5_000);
-    before = cleanPane(stdout);
-  } catch { /* non-fatal */ }
+  //
+  // auth_required is retried up to 2× with a short delay before declaring
+  // failure, because the pane may transiently show login-related text during
+  // session startup, token refresh, or after a server reboot.
+  const AUTH_PREFLIGHT_RETRY_DELAYS_MS = [2_000, 2_000];
 
-  const preflight = classifyPreflightPane(before);
+  let before = "";
+  let preflight = classifyPreflightPane(before); // sentinel; overwritten below
+
+  for (let attempt = 0; attempt <= AUTH_PREFLIGHT_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${tmuxSession} -p`, 5_000);
+      before = cleanPane(stdout);
+    } catch { /* non-fatal */ }
+
+    preflight = classifyPreflightPane(before);
+
+    if (preflight.status !== "auth_required" || attempt === AUTH_PREFLIGHT_RETRY_DELAYS_MS.length) break;
+
+    const delay = AUTH_PREFLIGHT_RETRY_DELAYS_MS[attempt];
+    console.log(`[preflight] auth_required on attempt ${attempt + 1} — retrying in ${delay}ms`);
+    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+  }
+
   const preflightTs = preflight.detectedAt.toISOString();
 
   if (preflight.status === "auth_required") {
-    console.log(`[preflight ${preflightTs}] auth failure detected`);
+    console.log(`[preflight ${preflightTs}] auth failure confirmed after retries`);
     return {
       success: false, status: "auth_required",
       rawOutput: before.slice(-500), parsed: {},
@@ -378,6 +397,120 @@ export async function detectClaudeIdle(
   }
 }
 
+// ─── Detect task completion (marker + idle fallback) ─────────────────────────
+
+export interface TaskCompletionResult {
+  /** true when a valid structured completion block was found in post-dispatch output */
+  markerFound: boolean;
+  /** true when the pane shows the idle Claude prompt (fallback for tasks without nonce) */
+  isIdle: boolean;
+  /** true when either markerFound or isIdle — caller should mark the task done */
+  completed: boolean;
+  paneText: string;
+  error?: string;
+  tmuxMissing?: boolean;
+}
+
+/**
+ * Checks whether a running task has finished.
+ *
+ * Primary signal: a structured [WORKERAI_RESULT] block appearing AFTER the
+ * dispatch point (outputOffset), with matching taskId, status=completed, and nonce.
+ * The offset ensures we never match the block template that was sent as part
+ * of the prompt instructions.
+ *
+ * Fallback: idle-pane detection — used only when no nonce is provided (tasks
+ * dispatched before the nonce protocol was introduced).
+ *
+ * When the marker is detected, sends Escape to dismiss any blocking prompts
+ * (feedback dialogs, /usage overlays) so the session is ready for the next task.
+ */
+export async function detectTaskCompletion(
+  config: SSHConfig,
+  tmuxSession: string,
+  taskId?: string,
+  expectedNonce?: string,
+  outputOffset?: number,
+): Promise<TaskCompletionResult> {
+  if (!tmuxSession || !tmuxSession.trim()) {
+    return {
+      markerFound: false, isIdle: false, completed: false,
+      paneText: "",
+      tmuxMissing: true,
+      error: "tmuxSession is not configured",
+    };
+  }
+
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+
+  // Capture enough scrollback to cover from outputOffset onward.
+  const captureDepth = (outputOffset !== undefined && outputOffset > 0)
+    ? Math.min(outputOffset + 200, 5000)
+    : COMPLETION_SCAN_LINES;
+
+  try {
+    const { stdout, stderr, exitCode } = await execSSH(
+      ssh,
+      `tmux capture-pane -t ${tmuxSession} -p -S -${captureDepth}`,
+      8_000,
+    );
+
+    if (exitCode !== 0) {
+      const isMissing = /can.?t find session|no server running/i.test(stderr + stdout);
+      return {
+        markerFound: false, isIdle: false, completed: false,
+        paneText: "",
+        tmuxMissing: isMissing,
+        error: isMissing
+          ? `tmux session '${tmuxSession}' not found`
+          : `tmux capture-pane failed (exit ${exitCode}): ${stderr}`,
+      };
+    }
+
+    const pane = cleanPane(stdout);
+
+    // Only scan lines produced after the dispatch point, so the completion
+    // block template embedded in the prompt text is never matched.
+    let scanText: string;
+    if (outputOffset !== undefined && outputOffset > 0) {
+      const lines = pane.split("\n");
+      scanText = lines.length > outputOffset ? lines.slice(outputOffset).join("\n") : "";
+    } else {
+      scanText = pane;
+    }
+
+    const markerFound = (taskId && expectedNonce)
+      ? detectCompletionBlock(scanText, taskId, expectedNonce)
+      : false;
+
+    const { isIdle } = classifyIdlePane(pane);
+    // Idle fallback only applies to tasks dispatched without a nonce.
+    const completed = markerFound || (!expectedNonce && isIdle);
+
+    if (markerFound) {
+      // Dismiss any open dialogs/overlays so the session can accept the next task.
+      await execSSH(
+        ssh,
+        `tmux send-keys -t ${tmuxSession} Escape 2>/dev/null; sleep 0.5`,
+        5_000,
+      ).catch(() => {});
+    }
+
+    return { markerFound, isIdle, completed, paneText: pane.slice(-2000) };
+  } catch (err) {
+    return {
+      markerFound: false, isIdle: false, completed: false,
+      paneText: "",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 // ─── Send task to Claude in tmux ─────────────────────────────────────────────
 
 /**
@@ -448,11 +581,41 @@ export async function sendRawPromptToTmux(
  * Build a structurally hardened prompt from the task fields and paste it into
  * the Claude tmux session.  User-supplied fields are XML-fenced to prevent
  * prompt-injection attacks.
+ *
+ * Captures the current scrollback line count BEFORE sending so the caller can
+ * store an output offset and later skip pre-dispatch pane content when scanning
+ * for the completion block.  Returns outputOffset = pre-dispatch lines +
+ * prompt lines + safety buffer.
  */
 export async function sendTaskToTmux(
   config: SSHConfig,
   task: DispatchTask,
   tmuxSession: string,
-): Promise<{ success: boolean; error?: string }> {
-  return sendRawPromptToTmux(config, buildDispatchPrompt(task), tmuxSession);
+): Promise<{ success: boolean; outputOffset?: number; error?: string }> {
+  const promptText = buildDispatchPrompt(task);
+  const promptLineCount = promptText.split("\n").length;
+
+  // Capture pre-dispatch line count so we can skip old content when checking completion.
+  let outputOffset: number | undefined;
+  try {
+    const ssh = {
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      sshKeyPath: config.sshKeyPath,
+    };
+    const { stdout } = await execSSH(
+      ssh,
+      `tmux capture-pane -t ${tmuxSession} -p -S -${COMPLETION_SCAN_LINES} 2>/dev/null | wc -l`,
+      5_000,
+    );
+    const preLines = parseInt(stdout.trim(), 10);
+    if (!isNaN(preLines)) {
+      // +40 safety buffer covers terminal line-wrapping of the prompt text.
+      outputOffset = preLines + promptLineCount + 40;
+    }
+  } catch { /* non-fatal — proceed without offset */ }
+
+  const result = await sendRawPromptToTmux(config, promptText, tmuxSession);
+  return { ...result, outputOffset };
 }
