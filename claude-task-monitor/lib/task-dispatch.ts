@@ -4,11 +4,11 @@ import { withServerDispatchLock } from "@/lib/dispatch-lock";
 
 export type AgentDispatchOutcome =
   | { ok: true }
-  | { ok: false; reason: "already_running" | "task_not_dispatchable" | "ssh_failed"; detail?: string };
+  | { ok: false; reason: "already_running" | "task_not_dispatchable" | "ssh_failed" | "tmux_missing"; detail?: string };
 
 export type DispatchOutcome =
   | { ok: true }
-  | { ok: false; reason: "already_running" | "task_not_dispatchable" | "ssh_failed"; detail?: string };
+  | { ok: false; reason: "already_running" | "task_not_dispatchable" | "ssh_failed" | "tmux_missing"; detail?: string };
 
 /**
  * Atomically dispatch a task to a server's Claude tmux session.
@@ -22,6 +22,7 @@ export async function tryDispatchTaskToServer(opts: {
   taskId: string;
   serverId: string;
   sshConfig: SSHConfig;
+  tmuxSession: string;
   task: { title: string; description?: string | null; projectName?: string | null };
   logText: string;
 }): Promise<DispatchOutcome> {
@@ -41,22 +42,27 @@ export async function tryDispatchTaskToServer(opts: {
       return { ok: false, reason: "task_not_dispatchable" as const };
     }
 
-    const sendResult = await sendTaskToTmux(opts.sshConfig, opts.task);
+    const sendResult = await sendTaskToTmux(opts.sshConfig, opts.task, opts.tmuxSession);
     if (!sendResult.success) {
+      if (sendResult.error?.includes("not found")) {
+        return { ok: false, reason: "tmux_missing" as const, detail: sendResult.error };
+      }
       return { ok: false, reason: "ssh_failed" as const, detail: sendResult.error };
     }
 
-    await prisma.$transaction([
-      prisma.task.update({ where: { id: opts.taskId }, data: { status: "running" } }),
-      prisma.executionLog.create({
+    // Callback-form transaction gives the adapter a single connection for
+    // both writes, preventing "client already executing a query" pg warnings.
+    await prisma.$transaction(async (tx) => {
+      await tx.task.update({ where: { id: opts.taskId }, data: { status: "running" } });
+      await tx.executionLog.create({
         data: {
           taskId: opts.taskId,
           status: "running",
           startedAt: new Date(),
           logText: opts.logText,
         },
-      }),
-    ]);
+      });
+    });
 
     return { ok: true };
   });
@@ -65,6 +71,9 @@ export async function tryDispatchTaskToServer(opts: {
 /**
  * Atomically dispatch a task to a specific agent's Claude tmux session.
  * Locks on agentId so each agent handles one task at a time independently.
+ *
+ * Returns tmux_missing if the agent has no tmuxSession configured or if the
+ * session does not exist on the server — callers should mark the agent offline.
  */
 export async function tryDispatchTaskToAgent(opts: {
   taskId: string;
@@ -74,6 +83,15 @@ export async function tryDispatchTaskToAgent(opts: {
   task: { title: string; description?: string | null; projectName?: string | null };
   logText: string;
 }): Promise<AgentDispatchOutcome> {
+  // Validate before acquiring the lock — no SSH needed for this check.
+  if (!opts.tmuxSession || !opts.tmuxSession.trim()) {
+    return {
+      ok: false,
+      reason: "tmux_missing" as const,
+      detail: "Agent has no tmuxSession configured. Set the tmuxSession field on the agent record.",
+    };
+  }
+
   return withServerDispatchLock(opts.agentId, async () => {
     const runningCount = await prisma.task.count({
       where: { agentId: opts.agentId, status: "running" },
@@ -90,20 +108,28 @@ export async function tryDispatchTaskToAgent(opts: {
 
     const sendResult = await sendTaskToTmux(opts.sshConfig, opts.task, opts.tmuxSession);
     if (!sendResult.success) {
+      if (sendResult.error?.includes("not found")) {
+        // Session is missing — mark agent offline so the poller stops retrying.
+        await prisma.agent.update({
+          where: { id: opts.agentId },
+          data: { status: "offline" },
+        }).catch(() => {});
+        return { ok: false, reason: "tmux_missing" as const, detail: sendResult.error };
+      }
       return { ok: false, reason: "ssh_failed" as const, detail: sendResult.error };
     }
 
-    await prisma.$transaction([
-      prisma.task.update({ where: { id: opts.taskId }, data: { status: "running" } }),
-      prisma.executionLog.create({
+    await prisma.$transaction(async (tx) => {
+      await tx.task.update({ where: { id: opts.taskId }, data: { status: "running" } });
+      await tx.executionLog.create({
         data: {
           taskId: opts.taskId,
           status: "running",
           startedAt: new Date(),
           logText: opts.logText,
         },
-      }),
-    ]);
+      });
+    });
 
     return { ok: true };
   });
