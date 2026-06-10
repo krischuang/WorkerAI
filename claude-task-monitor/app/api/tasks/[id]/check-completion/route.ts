@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { detectClaudeIdle } from "@/lib/ssh-claude-tmux";
 import { serverError } from "@/lib/api-error";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
 export const maxDuration = 15;
 
@@ -10,6 +11,10 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function POST(_request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+
+    // Each call opens an SSH connection; cap at 12 per minute per task.
+    const rl = apiRateLimit(`task:check-completion:${id}`, 12, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
 
     const task = await prisma.task.findUnique({
       where: { id },

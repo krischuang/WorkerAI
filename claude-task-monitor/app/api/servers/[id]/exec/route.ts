@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { execSSH } from "@/lib/ssh";
 import { isLocalOrigin, isDestructiveCommand, validateCommand } from "@/lib/exec-guards";
 import type { NextRequest } from "next/server";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
 // Allow up to 10 minutes for long-running commands like dnf update, apt upgrade, etc.
 export const maxDuration = 600;
@@ -16,6 +17,11 @@ export async function POST(request: NextRequest, ctx: Ctx) {
   }
 
   const { id } = await ctx.params;
+
+  // Generous limit for the interactive terminal: 60 per minute per server.
+  const rl = apiRateLimit(`server:exec:${id}`, 60, 60_000);
+  if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
   const body = await request.json();
   const { command } = body as { command: string };
 

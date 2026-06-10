@@ -2,12 +2,17 @@ import { prisma } from "@/lib/prisma";
 import { testConnection } from "@/lib/ssh";
 import { serverError } from "@/lib/api-error";
 import type { NextRequest } from "next/server";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function POST(_req: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+
+    // SSH connection test; cap at 10 per minute per server.
+    const rl = apiRateLimit(`server:connect:${id}`, 10, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
 
     const server = await prisma.server.findUnique({ where: { id } });
     if (!server) return Response.json({ error: "Not found" }, { status: 404 });

@@ -2,12 +2,18 @@ import { prisma } from "@/lib/prisma";
 import { runSSHCommand, ALLOWED_COMMANDS, type AllowedCommand } from "@/lib/ssh";
 import { serverError } from "@/lib/api-error";
 import type { NextRequest } from "next/server";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function POST(request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+
+    // SSH env-check commands; cap at 10 per minute per server.
+    const rl = apiRateLimit(`server:run:${id}`, 10, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
     const body = await request.json();
     const { command } = body as { command: string };
 

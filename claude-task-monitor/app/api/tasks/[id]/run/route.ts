@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "@/lib/task-dispatch";
 import { serverError } from "@/lib/api-error";
 import { USAGE_THRESHOLD } from "@/lib/constants";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
 export const maxDuration = 30;
 
@@ -41,6 +42,10 @@ function usageBlockResponse(sessionPct: number, weekPct: number, s: {
 export async function POST(_request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+
+    // SSH task dispatch; cap at 10 per minute per task.
+    const rl = apiRateLimit(`task:run:${id}`, 10, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
 
     const task = await prisma.task.findUnique({
       where: { id },
