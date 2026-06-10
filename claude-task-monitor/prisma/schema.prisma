@@ -71,6 +71,8 @@ model Task {
   taskType           TaskType       @default(coding)
   resultSummary      String?
   nextAction         String?
+  completionNonce    String?
+  tmuxOutputOffset   Int?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   executionLogs      ExecutionLog[]
