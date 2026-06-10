@@ -146,3 +146,87 @@ export function cleanPane(raw: string): string {
     .replace(/[ \t]+$/gm, "")
     .trim();
 }
+
+// ─── Pre-flight pane classification ──────────────────────────────────────────
+
+/**
+ * How many non-empty lines from the bottom of the pane to inspect during
+ * pre-flight.  Must stay in the 20–50 range.  Mirrors the tail-window
+ * philosophy of classifyIdlePane — do NOT increase this to the full pane or
+ * you reintroduce the stale-detection bug (historical errors triggering false
+ * positives).
+ *
+ * DETECTION STRATEGY
+ * ──────────────────
+ * tmux capture-pane -p returns the entire visible terminal buffer.  Recent
+ * output is anchored at the bottom; older output drifts toward the top.  By
+ * slicing only the tail we treat the most-recent terminal activity as
+ * "current" and ignore anything that has scrolled above the window.
+ *
+ * Do not revert to full-pane scanning.  If you are tempted to do so, read
+ * the commit message for this change first.
+ */
+export const PREFLIGHT_TAIL_LINES = 30;
+
+export type PreflightStatus =
+  | "ok"
+  | "rate_limited"
+  | "auth_required"
+  | "session_unavailable";
+
+export interface PreflightClassification {
+  status: PreflightStatus;
+  /** Non-empty lines that were actually inspected — attach to logs. */
+  tailLines: string[];
+  /** Wall-clock instant the classification was made (for log timestamps). */
+  detectedAt: Date;
+}
+
+/**
+ * Classify a pre-flight pane snapshot using only the last PREFLIGHT_TAIL_LINES
+ * non-empty lines.  Callers must pass a pane already processed by cleanPane().
+ */
+export function classifyPreflightPane(pane: string): PreflightClassification {
+  const lines = pane.split("\n").filter((l) => l.trim().length > 0);
+  const tailLines = lines.slice(-PREFLIGHT_TAIL_LINES);
+  const tail = tailLines.join("\n");
+  const detectedAt = new Date();
+
+  if (/not\s+logged\s+in|please\s+log\s*in|run\s+claude\s+login/i.test(tail)) {
+    return { status: "auth_required", tailLines, detectedAt };
+  }
+  if (/rate[\s-]limit|too\s+many\s+request/i.test(tail)) {
+    return { status: "rate_limited", tailLines, detectedAt };
+  }
+  if (/session\s+unavailable|claude\s+is\s+not\s+(connected|available)/i.test(tail)) {
+    return { status: "session_unavailable", tailLines, detectedAt };
+  }
+
+  return { status: "ok", tailLines, detectedAt };
+}
+
+// ─── Idle pane classification ─────────────────────────────────────────────────
+
+export interface IdleClassification {
+  isIdle: boolean;
+  /** true when a bare `>` or `❯` prompt appears in the last 6 non-empty lines */
+  hasPrompt: boolean;
+  /** true when a spinner, "Thinking", or "esc to interrupt" appears in the tail */
+  isBusy: boolean;
+}
+
+/**
+ * Classify whether a tmux pane (already cleaned by cleanPane) represents an
+ * idle Claude Code session waiting for input.
+ *
+ * Scans the last 6 non-empty lines so that the Claude Code status-bar footer
+ * (rendered below the prompt) doesn't hide the idle signal.
+ */
+export function classifyIdlePane(pane: string): IdleClassification {
+  const lines = pane.split("\n").filter((l) => l.trim().length > 0);
+  const tail = lines.slice(-6);
+  const hasPrompt = tail.some((l) => /^[>❯]\s*$/.test(l));
+  const busyPattern = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|\bThinking\b|esc to interrupt/i;
+  const isBusy = tail.some((l) => busyPattern.test(l));
+  return { isIdle: hasPrompt && !isBusy, hasPrompt, isBusy };
+}
