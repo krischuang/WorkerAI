@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { validateStatusUpdate } from "@/lib/task-validation";
 import type { NextRequest } from "next/server";
+import type { $Enums } from "@/app/generated/prisma/client";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -17,7 +18,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
 
     const task = await prisma.task.update({
       where: { id },
-      data: { status: status as TaskStatus },
+      data: { status: status as $Enums.TaskStatus },
     });
     return Response.json(task);
   } catch (err) {
