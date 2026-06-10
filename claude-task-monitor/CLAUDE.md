@@ -2,7 +2,7 @@
 
 # Claude Task Monitor
 
-Local-first task management platform for tracking AI-assisted work across projects. No auth — single-user, runs on localhost only.
+Task management platform for tracking AI-assisted work across projects. Password-protected; single-user.
 
 ## Tech Stack
 
@@ -38,38 +38,51 @@ app/
   _components/        # shared UI components
     ui.tsx            # design system: PageHeader, Btn, Modal, FormField, EmptyState, inputCls, …
     Nav.tsx           # sidebar navigation
-    StatusBadge.tsx   # task/project status badge (pending/queued/running/paused/completed/failed)
+    StatusBadge.tsx   # task/project/agent status badge
     PriorityBadge.tsx # P1–P4 priority badge
     InteractiveTerminal.tsx  # xterm.js client, loaded with next/dynamic (ssr: false)
-  api/                # route handlers (all "use server" by default)
+  api/                # route handlers
+    auth/             # POST (login) + DELETE (logout) — session cookie
     dashboard/        # GET aggregate stats
     projects/         # CRUD
-    tasks/            # CRUD + status update + execution logs + run (task→server dispatch)
+    tasks/            # CRUD + status update + execution logs + run
     queue/            # GET pending tasks sorted by priority
     reports/daily/    # GET list + POST generate
-    servers/          # CRUD + SSH connect + exec + run + claude-usage (tmux)
+    servers/          # CRUD + SSH connect + exec + run + claude-usage + launch-claude
+    agents/           # CRUD + claude-usage + launch-claude
+  login/page.tsx
   dashboard/page.tsx
   projects/page.tsx
   projects/[id]/page.tsx
-  tasks/page.tsx           # standalone task list with quick-create modal
-  tasks/[id]/page.tsx      # task detail with server assignment, usage gate, run controls
+  tasks/page.tsx
+  tasks/[id]/page.tsx      # task detail — server/agent assignment, usage gate, run controls
   queue/page.tsx
   reports/daily/page.tsx
   servers/page.tsx
   servers/new/page.tsx
-  servers/[id]/page.tsx    # server detail with Claude usage meters
-  servers/[id]/terminal/page.tsx  # full-screen interactive terminal
+  servers/[id]/page.tsx
+  servers/[id]/terminal/page.tsx
   generated/prisma/   # auto-generated — never edit by hand
 lib/
   prisma.ts           # Prisma singleton with pg.Pool (idleTimeoutMillis: 30s)
   ssh.ts              # SSH execution utility (execSSH + runSSHCommand allowlist)
-  ssh-claude-tmux.ts  # Claude usage fetch + task dispatch via tmux
+  ssh-claude-tmux.ts  # Claude usage fetch + idle detection + task dispatch via tmux
   ssh-claude.ts       # Legacy PTY/exec approach — kept but not used by active routes
+  usage-parser.ts     # Pure functions: parse /usage output, cleanPane, classifyIdlePane
+  task-dispatch.ts    # tryDispatchTaskToServer + tryDispatchTaskToAgent (atomic, locked)
+  dispatch-lock.ts    # Per-resource mutex (globalThis map, survives HMR)
+  dispatch-backoff.ts # Exponential backoff for failed dispatches; agent-offline backoff
+  exec-guards.ts      # isLocalOrigin — guards WebSocket and exec routes
+  api-error.ts        # serverError(tag, err) — uniform 500 response helper
+  constants.ts        # USAGE_THRESHOLD = 90
+  prompt-sanitiser.ts # buildDispatchPrompt — sanitises task text before sending to tmux
+  ssh-key-path.ts     # resolveSSHKeyPath — expands ~ and validates key file paths
 prisma/
   schema.prisma       # single source of truth for all models
   migrations/         # never edit by hand
   seed.ts             # sample data
 ws-server.ts          # standalone WebSocket SSH terminal server (port 3099)
+instrumentation.node.ts  # background poller — usage refresh + idle detection + queue advance
 ```
 
 ## Key Patterns
@@ -91,6 +104,15 @@ const prisma = new PrismaClient({ adapter });
 Import path is `@/app/generated/prisma/client` — not `@prisma/client`.
 
 After any schema change: `npm run db:generate`. After any schema change that adds a relation, also restart the dev server — Turbopack caches the old generated client.
+
+Use the **callback form** of `$transaction` when issuing multiple writes — it gives the adapter a single connection and prevents "client already executing a query" pg warnings:
+
+```typescript
+await prisma.$transaction(async (tx) => {
+  await tx.task.update({ where: { id }, data: { status: "running" } });
+  await tx.executionLog.create({ data: { … } });
+});
+```
 
 ### Next.js App Router route params
 
@@ -127,7 +149,6 @@ Every page uses `"use client"` and fetches data with `useEffect` + `fetch`. Ther
 Always return `null` on non-OK responses and guard the next `.then`. Missing the `return` causes `.json()` to be called on an empty error body:
 
 ```typescript
-// correct
 fetch(`/api/foo/${id}`)
   .then((r) => {
     if (!r.ok) { router.push("/fallback"); return null; }
@@ -135,6 +156,18 @@ fetch(`/api/foo/${id}`)
   })
   .then((data) => { if (!data) return; /* use data */ });
 ```
+
+## Authentication
+
+Password authentication is required. The password is set via the `APP_PASSWORD` env var (hashed with bcrypt and stored in the DB or compared at runtime — see `app/api/auth/route.ts`).
+
+- `POST /api/auth` — validates password, sets a session cookie
+- `DELETE /api/auth` — clears the session cookie (logout)
+- `/login` — login page; redirects to dashboard on success
+
+The WebSocket server (`ws-server.ts`) still only accepts connections from `localhost` or origins listed in `ALLOWED_ORIGINS`. The REST API also enforces `isLocalOrigin` on sensitive routes.
+
+**`ALLOWED_ORIGINS` env var** — comma-separated extra hostnames/IPs that `isLocalOrigin` should accept (in addition to `localhost`, `127.0.0.1`, `::1`). Useful when the app is accessed via a local tunnel or secondary NIC.
 
 ## Design System (`app/_components/ui.tsx`)
 
@@ -166,11 +199,13 @@ Nav uses `bg-zinc-900` dark sidebar — `text-zinc-400` passes there (7.1:1) and
 | Status | Colour |
 |---|---|
 | pending | zinc (grey) |
-| queued | violet — assigned to a server, waiting to run |
+| queued | violet — assigned to a server/agent, waiting to run |
 | running | blue |
 | paused | amber |
 | completed | green |
 | failed | red |
+
+Agent status: `idle` (green), `running` (blue), `offline` (zinc), `error` (red).
 
 ## SSH Module (`lib/ssh.ts`)
 
@@ -183,7 +218,7 @@ Two exported functions:
 
 - SSH private key content is **never** stored in the database and **never** sent to the frontend. Only `sshKeyPath` (a filesystem path) is stored.
 - `runSSHCommand` only executes commands in `ALLOWED_COMMANDS`. Do not bypass this for the environment check buttons.
-- The `/api/servers/[id]/exec` route (custom terminal) allows arbitrary commands intentionally — this is a deliberate product decision for a local-only tool.
+- The `/api/servers/[id]/exec` route (custom terminal) allows arbitrary commands intentionally — this is a deliberate product decision.
 
 ### Timeouts
 
@@ -198,21 +233,25 @@ Two exported functions:
 
 Fetches Claude CLI usage by interacting with a `claude` tmux session on the remote server.
 
-**Setup required once on the worker server:**
+**Setup required once on the worker server (per session name):**
 ```bash
-tmux new-session -d -s claude
-tmux send-keys -t claude 'claude' Enter
+tmux new-session -d -s <sessionName>
+tmux send-keys -t <sessionName> 'claude' Enter
 ```
 
-**Key exports:**
-- `fetchClaudeUsageViaTmux(config)` — sends `/usage` to the tmux session and parses the output. Returns `ClaudeUsageResult` with `parsed.sessionPct`, `parsed.sessionResets`, `parsed.weekPct`, `parsed.weekResets`, plus `sessionResetsAt`/`weekResetsAt` (UTC Date) for countdown math.
-- `sendTaskToTmux(config, { title, description })` — base64-encodes the task text and pastes it into the Claude tmux session via `tmux load-buffer` + `paste-buffer`. Called by `POST /api/tasks/[id]/run`.
+**Key exports (all require an explicit `tmuxSession: string` — no default):**
+- `fetchClaudeUsageViaTmux(config, tmuxSession)` — sends `/usage` to the tmux session and parses the output. Returns `ClaudeUsageResult`.
+- `detectClaudeIdle(config, tmuxSession)` — captures the pane and calls `classifyIdlePane`. Returns `ClaudeIdleResult` with `isIdle`, `paneText`, optional `error`, and `tmuxMissing` flag.
+- `sendTaskToTmux(config, task, tmuxSession)` — base64-encodes the task and pastes it via `tmux load-buffer` + `paste-buffer`.
+- `launchClaudeInTmux(config, mode, tmuxSession, workDir?)` — kills the running process and relaunches Claude CLI with the correct permission-mode flags.
+
+Both `fetchClaudeUsageViaTmux` and `detectClaudeIdle` return an `offline`/`tmuxMissing` result immediately if `tmuxSession` is empty or blank — no SSH call is made.
 
 **Why tmux capture-pane instead of PTY/exec:**
 - Claude Code renders a TUI with cursor-positioning escape codes — PTY capture is unreliable
 - `tmux capture-pane -p` returns the terminal screen as already-rendered plain text, no ANSI codes
 
-**Usage data persisted to DB** (`Server` model fields):
+**Usage data persisted to DB** (identical fields on both `Server` and `Agent` models):
 ```
 claudeSessionPct      Float?
 claudeSessionResets   String?    // e.g. "Jun 10, 1:10 am (Sydney)"
@@ -226,21 +265,99 @@ claudeUsageFetchedAt  DateTime?
 
 Reset times are converted from UTC to `Australia/Sydney` timezone for display.
 
+## Idle Pane Detection (`lib/usage-parser.ts`)
+
+`classifyIdlePane(pane: string): IdleClassification` — pure function; takes already-cleaned pane text and returns `{ isIdle, hasPrompt, isBusy }`.
+
+- **`hasPrompt`** — a bare `>` or `❯` appears in the last 6 non-empty lines (covers Claude Code's status-bar footer rendered below the prompt).
+- **`isBusy`** — any of: spinner chars `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, `\bThinking\b`, or `esc to interrupt` in the tail.
+- **`isIdle`** — `hasPrompt && !isBusy`.
+
+The 6-line tail window means a prompt buried more than 6 lines from the bottom is NOT considered idle.
+
+**Rate-limit false-positive:** `fetchClaudeUsageViaTmux` scans the full pane text for `rate-limit` / `too many requests` before sending `/usage`. If a previous task left a rate-limit error message visible in the pane, refresh will return `status: "rate_limited"` even when the API is fine. Fix: push new output into the pane (press Enter a few times) to scroll past the stale error.
+
+## Task Dispatch (`lib/task-dispatch.ts`)
+
+Two atomic dispatch functions, each serialised with a per-resource mutex from `lib/dispatch-lock.ts`:
+
+- **`tryDispatchTaskToServer(opts)`** — dispatches to a server's `tmuxSession`. Requires `tmuxSession` in opts.
+- **`tryDispatchTaskToAgent(opts)`** — dispatches to an agent's `tmuxSession`. Returns `tmux_missing` immediately if `tmuxSession` is blank; also marks the agent `offline` in the DB if the session doesn't exist.
+
+Failure reasons: `already_running` | `task_not_dispatchable` | `ssh_failed` | `tmux_missing`.
+
+The dispatch lock uses `globalThis._serverDispatchLocks` so it survives Next.js HMR module re-evaluation.
+
+## Dispatch Backoff (`lib/dispatch-backoff.ts`)
+
+Prevents the background poller from hammering a broken server or offline agent on every 60 s tick.
+
+**Task dispatch backoff** — exponential, stored in `globalThis._dispatchBackoff` (`Map<taskId, BackoffEntry>`):
+- Base delay: 1 min after first failure
+- Cap: 5 min
+- Cleared on success (`clearDispatchBackoff`)
+
+**Agent offline backoff** — fixed 5 min window, stored in `globalThis._agentOfflineStore` (`Map<agentId, expiryMs>`):
+- Set when `detectClaudeIdle` returns `tmuxMissing: true`
+- Cleared when the agent comes back online
+
+## Background Poller (`instrumentation.node.ts`)
+
+Runs on a 60 s interval via `setInterval` inside `register()`. A `globalThis._pollerRunning` flag prevents overlapping cycles.
+
+**Each cycle:**
+1. Fetch Claude usage for every server (via its `tmuxSession`)
+2. Fetch Claude usage for every agent (via its own `tmuxSession`), skipping agents in offline-backoff
+3. Check running server-direct tasks for idle state → mark completed
+4. Check running agent tasks for idle state → mark completed; set agent `offline` on `tmuxMissing`
+5. Auto-advance server queue: dispatch next `queued` task if server is idle and usage < `USAGE_THRESHOLD` (90%)
+6. Auto-advance agent queue: dispatch next `queued` agent task if agent is idle and usage < threshold
+
+`USAGE_THRESHOLD` is imported from `lib/constants.ts` (value: 90).
+
 ## Task Execution Flow
 
-Tasks can be assigned to a server and dispatched to the Claude CLI running in tmux.
+Tasks can be assigned to a **server** (server-direct) or an **agent** (agent-direct). Both paths share the same execution gate and status lifecycle.
 
-**Assignment:** `PUT /api/tasks/[id]` with `{ serverId }` — auto-advances status from `pending` → `queued`.
+**Assignment:**
+- `PUT /api/tasks/[id]` with `{ serverId }` → status `pending` → `queued`
+- `PUT /api/tasks/[id]` with `{ agentId }` → status `pending` → `queued`
 
-**Execution gate (`POST /api/tasks/[id]/run`):**
+**Execution gate (`POST /api/tasks/[id]/run` or poller):**
 1. Reads cached usage from DB (no SSH round-trip at run-time)
-2. If `sessionPct >= 90` OR `weekPct >= 90` → returns `{ blocked: true, nearestResetsAt }` — does NOT run
-3. If clear → calls `sendTaskToTmux`, marks task `running`, creates an `ExecutionLog`
+2. If `sessionPct >= 90` OR `weekPct >= 90` → blocked; returns `{ blocked: true, nearestResetsAt }`
+3. If clear → calls `tryDispatchTaskToServer` or `tryDispatchTaskToAgent`, marks task `running`, creates `ExecutionLog`
 
 **Frontend (task detail page):**
-- Shows usage progress bars for the assigned server
+- Shows usage progress bars for the assigned server or agent
 - Run button is disabled if either metric ≥ 90%
-- If the API returns `blocked`: shows an amber panel with a live countdown (`H:MM:SS`) to the nearest reset — auto-fires the run when the countdown hits zero
+- If blocked: amber panel with live countdown (`H:MM:SS`) to nearest reset; auto-fires when countdown hits zero
+
+## Agents (`model Agent`)
+
+Agents are named Claude CLI instances that each have their own tmux session on a server. Unlike server-direct tasks (which share the server's single tmux session), each agent has an isolated session and working directory.
+
+| Field | Notes |
+|---|---|
+| `serverId` | parent server (cascade delete) |
+| `name` / `slug` | display name and URL-safe ID; `(serverId, slug)` is unique |
+| `workDir` | working directory passed as `HOME=<workDir>` when launching Claude |
+| `tmuxSession` | required; must be set before any dispatch |
+| `status` | `idle` / `running` / `offline` / `error` |
+| `claudePermissionMode` | `read_only` / `workspace_write` / `full_autonomous` |
+| Claude usage fields | same set as `Server` |
+
+**Setup required once per agent on the worker server:**
+```bash
+tmux new-session -d -s <agent.tmuxSession>
+tmux send-keys -t <agent.tmuxSession> 'claude' Enter
+```
+
+API routes under `app/api/agents/`:
+- `GET/POST /api/agents` — list / create
+- `GET/PUT/DELETE /api/agents/[id]` — detail / update / delete
+- `POST /api/agents/[id]/claude-usage` — refresh usage via SSH
+- `POST /api/agents/[id]/launch-claude` — kill & relaunch Claude CLI in the agent's tmux session
 
 ## Interactive Terminal (`ws-server.ts`)
 
@@ -251,34 +368,23 @@ Tasks can be assigned to a server and dispatched to the Claude CLI running in tm
 | Next.js (Turbopack) | 3000 | App UI and REST API |
 | WebSocket SSH server | 3099 | Interactive PTY terminal (override with `WS_PORT=xxxx`) |
 
-**Architecture:**
-- `ws-server.ts` — standalone `tsx` process; manages SSH sessions with `ssh2.shell()` + PTY allocation
-- `app/_components/InteractiveTerminal.tsx` — xterm.js client component; loaded via `next/dynamic` with `ssr: false`
-- `app/servers/[id]/terminal/page.tsx` — full-screen terminal page
-
 **Protocol** (JSON over WebSocket):
 
 ```
 // Client → server
-{ type: "input", data: string }            // user keystrokes
-{ type: "resize", cols: number, rows: number }  // terminal resize
+{ type: "input", data: string }
+{ type: "resize", cols: number, rows: number }
 
 // Server → client
-{ type: "connected" }                      // SSH shell ready
+{ type: "connected" }
 { type: "output", data: string }           // base64-encoded PTY output
-{ type: "disconnected", reason?: string }  // shell exited
-{ type: "error", message: string }         // connection failure
+{ type: "disconnected", reason?: string }
+{ type: "error", message: string }
 ```
 
 Terminal output is base64-encoded so binary ANSI/UTF-8 bytes survive JSON serialization.
 
-**Security:**
-- SSH private key is read on the server; never sent to the browser
-- WebSocket server rejects connections from non-localhost origins
-- Port defaults to 3099; override with `WS_PORT=xxxx npm run ws` (update `WS_URL` in `InteractiveTerminal.tsx` to match)
-- Sessions auto-close after 30 minutes of idle
-
-**The exec-mode terminal** (one-off commands, no PTY) is preserved on the server detail page at `/servers/[id]`. The interactive terminal lives at `/servers/[id]/terminal`.
+**Security:** SSH private key never sent to browser. WebSocket server rejects non-localhost origins (extended by `ALLOWED_ORIGINS`). Sessions auto-close after 30 minutes idle.
 
 ## Data Models (summary)
 
@@ -287,26 +393,34 @@ Project  (P1–P4 priority, active/paused/archived)
   └── Task  (P1–P4, pending/queued/running/paused/completed/failed, taskType, estimatedCostLevel)
         └── ExecutionLog  (status, logText, outputSummary, errorMessage)
 
-Server  (host, username, port, sshKeyPath, status: unknown/connected/failed)
-  ├── Task[]           — tasks assigned to this server for execution
+Server  (host, username, port, sshKeyPath, tmuxSession, claudePermissionMode, status: unknown/connected/failed)
+  ├── Task[]           — server-direct tasks
+  ├── Agent[]          — agents hosted on this server
   ├── ServerCommandLog — SSH command history
   └── Claude usage fields (sessionPct, weekPct, resetsAt, …)
+
+Agent  (name, slug, workDir, tmuxSession, claudePermissionMode, status: idle/running/offline/error)
+  ├── server (parent Server)
+  ├── Task[] — agent tasks
+  └── Claude usage fields (same set as Server)
 
 DailyReport  (completedCount, failedCount, runningCount, pendingCount, reportText)
 ```
 
-All IDs are cuid strings. Cascade deletes are set on all child relations. `Task.serverId` uses `onDelete: SetNull` — deleting a server unassigns its tasks rather than deleting them.
+All IDs are cuid strings. Cascade deletes on all child relations. `Task.serverId` and `Task.agentId` both use `onDelete: SetNull` — deleting a server or agent unassigns its tasks rather than deleting them.
 
 ## Environment Variables
 
 ```
 DATABASE_URL="postgresql://postgres:postgres_dev@localhost:5432/claude_task_monitor?schema=public"
+APP_PASSWORD="..."           # required; bcrypt-hashed password for login
+ALLOWED_ORIGINS="..."        # optional; comma-separated extra hostnames for isLocalOrigin
 ```
 
 Set in `.env`. `prisma/seed.ts` requires `import "dotenv/config"` at the top because `tsx` does not auto-load `.env`.
 
 ## Known Limitations
 
-- **No authentication** — do not expose this app to the network.
 - **`ssh2` is incompatible with Turbopack's production build** (`non-ecmascript placeable asset`). The dev server works fine. Production builds are blocked until this upstream issue is resolved.
-- **Usage data is cached** — the task execution gate reads usage from the DB, not from a live SSH check. Refresh usage from the server detail page before running if the cached data is stale (>10 min warning shown).
+- **Usage data is cached** — the task execution gate reads usage from the DB, not from a live SSH check. Refresh usage from the server/agent detail page before running if the cached data is stale (>10 min warning shown).
+- **Rate-limit false-positive on refresh** — if a previous task left a `rate_limit_error` visible in the tmux pane, the pre-flight scan in `fetchClaudeUsageViaTmux` will return `status: "rate_limited"` even though the API is fine. Press Enter in the tmux pane to push past the stale text.
