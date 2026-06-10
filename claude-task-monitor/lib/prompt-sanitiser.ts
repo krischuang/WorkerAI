@@ -11,6 +11,8 @@
  * so a payload cannot break out of its XML fence.
  */
 
+import { COMPLETION_BLOCK_START, COMPLETION_BLOCK_END } from "@/lib/constants";
+
 /** Replace any </tag> in user content so it cannot close its containing XML fence. */
 function escapeForTag(tag: string, content: string): string {
   return content.replace(new RegExp(`</${tag}>`, "gi"), `[/${tag}]`);
@@ -26,6 +28,8 @@ export interface DispatchTask {
   title: string;
   description?: string | null;
   projectName?: string | null;
+  taskId: string;
+  nonce: string;
 }
 
 /**
@@ -57,6 +61,17 @@ export function buildDispatchPrompt(task: DispatchTask): string {
   }
 
   lines.push("", "Complete this task now.");
+  lines.push(
+    "",
+    "When you have fully completed the task, output this exact completion block",
+    "(no surrounding text; each field on its own line):",
+    "",
+    COMPLETION_BLOCK_START,
+    `taskId: ${task.taskId}`,
+    "status: completed",
+    `nonce: ${task.nonce}`,
+    COMPLETION_BLOCK_END,
+  );
 
   return lines.join("\n");
 }

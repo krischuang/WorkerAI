@@ -105,6 +105,32 @@ describe("classifyIdlePane — sub-prompt dialogs", () => {
     const dialogLine = "│  ❯ Yes, allow once                                       │";
     expect(/^[>❯]\s*$/.test(dialogLine)).toBe(false);
   });
+
+  it("is NOT idle when [y/n] question immediately precedes a bare > prompt", () => {
+    // Claude Code renders the input cursor on its own line after the question;
+    // without the context check this bare `>` causes a false-positive idle.
+    const paneText = pane("Create /tmp/file.txt? [y/n]", ">");
+    const result = classifyIdlePane(paneText);
+    expect(result.isIdle).toBe(false);
+    expect(result.hasPrompt).toBe(false);
+  });
+
+  it("is NOT idle when [Y/n] variant immediately precedes a bare > prompt", () => {
+    const paneText = pane("Overwrite existing file? [Y/n]", ">");
+    expect(classifyIdlePane(paneText).isIdle).toBe(false);
+  });
+
+  it("is NOT idle when [yes/no] variant immediately precedes a bare > prompt", () => {
+    const paneText = pane("Continue with the operation? [yes/no]", ">");
+    expect(classifyIdlePane(paneText).isIdle).toBe(false);
+  });
+
+  it("is idle when a [y/n] question appears in older output but NOT directly before >", () => {
+    // Resolved sub-prompt: the question line is now separated from the idle > by
+    // normal output — the session returned to the main idle prompt afterwards.
+    const paneText = pane("Create file? [y/n]", "  File created.", ">");
+    expect(classifyIdlePane(paneText).isIdle).toBe(true);
+  });
 });
 
 describe("classifyIdlePane — thinking state", () => {

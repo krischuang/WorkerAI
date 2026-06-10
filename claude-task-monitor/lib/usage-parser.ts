@@ -1,8 +1,10 @@
 /**
- * Pure functions for parsing Claude CLI /usage output.
+ * Pure functions for parsing Claude CLI /usage output and tmux pane state.
  * Extracted from ssh-claude-tmux.ts so they can be unit-tested without
  * requiring an SSH connection or a running tmux session.
  */
+
+import { COMPLETION_BLOCK_START, COMPLETION_BLOCK_END } from "@/lib/constants";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -205,6 +207,54 @@ export function classifyPreflightPane(pane: string): PreflightClassification {
   return { status: "ok", tailLines, detectedAt };
 }
 
+// ─── Completion block detection ──────────────────────────────────────────────
+
+/**
+ * Returns true when a valid structured completion block appears in the pane
+ * text with matching taskId, status=completed, and nonce.
+ *
+ * Expected format (each field on its own line, no extra whitespace):
+ *   [WORKERAI_RESULT]
+ *   taskId: <taskId>
+ *   status: completed
+ *   nonce: <nonce>
+ *   [/WORKERAI_RESULT]
+ *
+ * All three fields must match exactly. Scans all blocks in the text and
+ * returns true as soon as one valid block is found.
+ */
+export function detectCompletionBlock(
+  paneText: string,
+  expectedTaskId: string,
+  expectedNonce: string,
+): boolean {
+  if (!expectedTaskId || !expectedNonce) return false;
+
+  let pos = 0;
+  while (true) {
+    const startIdx = paneText.indexOf(COMPLETION_BLOCK_START, pos);
+    if (startIdx === -1) return false;
+
+    const endIdx = paneText.indexOf(COMPLETION_BLOCK_END, startIdx + COMPLETION_BLOCK_START.length);
+    if (endIdx === -1) return false;
+
+    const block = paneText.slice(startIdx + COMPLETION_BLOCK_START.length, endIdx);
+    const taskIdMatch = block.match(/^taskId:\s*(.+)$/m);
+    const statusMatch = block.match(/^status:\s*(.+)$/m);
+    const nonceMatch  = block.match(/^nonce:\s*(.+)$/m);
+
+    if (
+      taskIdMatch?.[1].trim() === expectedTaskId &&
+      statusMatch?.[1].trim() === "completed" &&
+      nonceMatch?.[1].trim() === expectedNonce
+    ) {
+      return true;
+    }
+
+    pos = startIdx + 1;
+  }
+}
+
 // ─── Idle pane classification ─────────────────────────────────────────────────
 
 export interface IdleClassification {
@@ -221,11 +271,29 @@ export interface IdleClassification {
  *
  * Scans the last 6 non-empty lines so that the Claude Code status-bar footer
  * (rendered below the prompt) doesn't hide the idle signal.
+ *
+ * A bare `>` is only treated as Claude's main idle prompt when the immediately
+ * preceding non-empty tail line does NOT look like a sub-dialog question (e.g.
+ * "Create file? [y/n]").  Such lines appear when Claude Code asks for
+ * confirmation and renders the input cursor on the following line — without
+ * this guard those mid-dialog `>` lines trigger false-positive idle detection.
  */
 export function classifyIdlePane(pane: string): IdleClassification {
   const lines = pane.split("\n").filter((l) => l.trim().length > 0);
   const tail = lines.slice(-6);
-  const hasPrompt = tail.some((l) => /^[>❯]\s*$/.test(l));
+
+  // Patterns that identify a sub-dialog question on the line immediately
+  // before a bare `>`, e.g. "Create /tmp/file.txt? [y/n]".
+  const SUB_DIALOG_PRECEDING = /\[y\/n\]|\[Y\/n\]|\[yes\/no\]/i;
+
+  const hasPrompt = tail.some((l, i) => {
+    if (!/^[>❯]\s*$/.test(l)) return false;
+    // If the immediately preceding tail line looks like a sub-dialog question,
+    // this `>` is a continuation input cursor, not the Claude idle prompt.
+    if (i > 0 && SUB_DIALOG_PRECEDING.test(tail[i - 1])) return false;
+    return true;
+  });
+
   const busyPattern = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|\bThinking\b|esc to interrupt/i;
   const isBusy = tail.some((l) => busyPattern.test(l));
   return { isIdle: hasPrompt && !isBusy, hasPrompt, isBusy };
