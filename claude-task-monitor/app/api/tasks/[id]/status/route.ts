@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { validateStatusUpdate } from "@/lib/task-validation";
+import { validateTransition } from "@/lib/task-transitions";
 import type { NextRequest } from "next/server";
 import type { $Enums } from "@/app/generated/prisma/client";
 
@@ -14,6 +15,19 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     const validationErr = validateStatusUpdate(status);
     if (validationErr) {
       return Response.json({ error: validationErr.message }, { status: 400 });
+    }
+
+    const current = await prisma.task.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    if (!current) {
+      return Response.json({ error: "Not found" }, { status: 404 });
+    }
+
+    const transitionErr = validateTransition(current.status, status as $Enums.TaskStatus);
+    if (transitionErr) {
+      return Response.json({ error: transitionErr.message }, { status: 422 });
     }
 
     const task = await prisma.task.update({
