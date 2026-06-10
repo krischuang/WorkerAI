@@ -312,6 +312,92 @@ export async function launchClaudeInTmux(
   }
 }
 
+// ─── Per-task tmux session management ────────────────────────────────────────
+
+/**
+ * Returns the deterministic tmux session name for a given task.
+ * Format: claude_<taskId>
+ *
+ * Using the taskId keeps names unique, human-readable in `tmux ls`, and
+ * makes it easy to correlate a session to its task in the database.
+ */
+export function taskTmuxSessionName(taskId: string): string {
+  return `claude_${taskId}`;
+}
+
+export interface CreateTaskSessionResult {
+  success: boolean;
+  sessionName: string;
+  error?: string;
+}
+
+/**
+ * Creates a new, isolated tmux session for a single task and launches Claude
+ * inside it.  The session is named claude_<taskId> so multiple tasks can run
+ * in parallel on the same server without sharing a session.
+ *
+ * Waits 2 s after launching Claude so the REPL is ready to receive input by
+ * the time the caller calls sendTaskToTmux.
+ */
+export async function createAndLaunchTaskSession(
+  config: SSHConfig,
+  taskId: string,
+  mode: ClaudePermissionMode,
+  workDir?: string,
+): Promise<CreateTaskSessionResult> {
+  const sessionName = taskTmuxSessionName(taskId);
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+
+  const baseCommand = getClaudeLaunchCommand(mode);
+  const claudeCommand = workDir ? `HOME=${workDir} ${baseCommand}` : baseCommand;
+
+  try {
+    const cmd = [
+      `tmux new-session -d -s ${sessionName}`,
+      `tmux send-keys -t ${sessionName} '${claudeCommand}' Enter`,
+      `sleep 2`,
+    ].join(" && ");
+    await execSSH(ssh, cmd, 20_000);
+    return { success: true, sessionName };
+  } catch (err) {
+    return {
+      success: false,
+      sessionName,
+      error: `Failed to create task session: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * Kills the per-task tmux session created by createAndLaunchTaskSession.
+ * Non-fatal — silently swallows errors so callers can fire-and-forget on
+ * task completion or failure without worrying about cleanup failures.
+ */
+export async function killTaskTmuxSession(
+  config: SSHConfig,
+  taskId: string,
+): Promise<void> {
+  const sessionName = taskTmuxSessionName(taskId);
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+  try {
+    await execSSH(
+      ssh,
+      `tmux kill-session -t ${sessionName} 2>/dev/null || true`,
+      5_000,
+    );
+  } catch { /* non-fatal */ }
+}
+
 // ─── Detect if Claude is idle (waiting for input) ────────────────────────────
 
 export interface ClaudeIdleResult {
