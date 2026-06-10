@@ -236,7 +236,17 @@ export default function ServerDetailPage() {
     setUsageLoading(true);
     try {
       const res = await fetch(`/api/servers/${id}/claude-usage`, { method: "POST" });
-      const result: UsageData = await res.json();
+      let result: UsageData = await res.json();
+      // If auth_required on first attempt, wait and retry once — it may be a
+      // transient false positive from stale pane content after a session restart.
+      if (!result.success && result.status === "auth_required") {
+        await new Promise<void>((resolve) => setTimeout(resolve, 4_000));
+        const retryRes = await fetch(`/api/servers/${id}/claude-usage`, { method: "POST" });
+        const retryResult: UsageData = await retryRes.json();
+        if (retryResult.success || retryResult.status !== "auth_required") {
+          result = retryResult;
+        }
+      }
       setUsageData(result);
       setUsageFetchedAt(new Date());
     } catch {
@@ -542,7 +552,16 @@ export default function ServerDetailPage() {
         {usageData && !usageData.success && usageData.status === "auth_required" && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3 text-sm text-amber-800">
             <span className="font-semibold">Claude CLI is not authenticated.</span>{" "}
-            SSH in and run <code className="font-mono bg-amber-100 px-1 rounded">claude login</code>.
+            If Claude was recently restarted this may be a transient glitch — try{" "}
+            <button
+              onClick={fetchClaudeUsage}
+              disabled={usageLoading}
+              className="underline font-semibold disabled:opacity-50"
+            >
+              refreshing again
+            </button>
+            . If it persists, SSH in and run{" "}
+            <code className="font-mono bg-amber-100 px-1 rounded">claude login</code>.
           </div>
         )}
         {usageData && !usageData.success && usageData.status === "offline" && (
