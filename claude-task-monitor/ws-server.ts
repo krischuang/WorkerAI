@@ -9,9 +9,15 @@ import * as path from "path";
 import * as os from "os";
 import type { IncomingMessage } from "http";
 import { validateSshKeyPath } from "./lib/ssh-key-path";
+import {
+  makeStore, checkLimits, recordAdmit, recordRelease,
+  MAX_TOTAL_CONNECTIONS, MAX_CONNECTIONS_PER_IP, RATE_WINDOW_MS, RATE_LIMIT_MAX,
+} from "./lib/ws-rate-limit";
 
 const WS_PORT = Number(process.env.WS_PORT ?? 3099);
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+const rateLimitStore = makeStore();
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL!,
@@ -29,6 +35,12 @@ function resolveKeyPath(keyPath: string): string {
   return result.resolved;
 }
 
+function getClientIp(req: IncomingMessage): string {
+  // Use the direct socket address — do NOT trust X-Forwarded-For from the client
+  // for rate limiting, as it can be spoofed.
+  return req.socket.remoteAddress ?? "unknown";
+}
+
 type InMsg =
   | { type: "input"; data: string }
   | { type: "resize"; cols: number; rows: number };
@@ -44,6 +56,30 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
       return;
     }
   }
+
+  // Connection limit + per-IP rate limit
+  const clientIp = getClientIp(req);
+  const now = Date.now();
+  const result = checkLimits(clientIp, now, rateLimitStore, {
+    maxTotal:     MAX_TOTAL_CONNECTIONS,
+    maxPerIp:     MAX_CONNECTIONS_PER_IP,
+    rateMax:      RATE_LIMIT_MAX,
+    rateWindowMs: RATE_WINDOW_MS,
+  });
+  if (!result.admitted) {
+    const msg = result.reason === "total_cap"
+      ? "Server overloaded"
+      : result.reason === "ip_cap"
+        ? "Too many connections from your address"
+        : "Connection rate limit exceeded";
+    ws.close(result.reason === "total_cap" ? 1013 : 1008, msg);
+    return;
+  }
+  recordAdmit(clientIp, now, rateLimitStore, RATE_WINDOW_MS);
+
+  // Release the slot when this socket closes for any reason.
+  // "close" always fires after "error" in the ws library, so one listener suffices.
+  ws.once("close", () => recordRelease(clientIp, rateLimitStore));
 
   const url = new URL(req.url ?? "/", `http://localhost:${WS_PORT}`);
   const serverId = url.searchParams.get("serverId");
