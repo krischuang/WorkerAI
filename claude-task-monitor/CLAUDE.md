@@ -72,7 +72,7 @@ lib/
   task-dispatch.ts    # tryDispatchTaskToServer + tryDispatchTaskToAgent (atomic, locked)
   dispatch-lock.ts    # Per-resource mutex (globalThis map, survives HMR)
   dispatch-backoff.ts # Exponential backoff for failed dispatches; agent-offline backoff
-  exec-guards.ts      # isLocalOrigin — guards WebSocket and exec routes
+  exec-guards.ts      # isLocalOrigin — guards REST API exec routes (NOT the WebSocket server)
   api-error.ts        # serverError(tag, err) — uniform 500 response helper
   constants.ts        # USAGE_THRESHOLD = 90
   prompt-sanitiser.ts # buildDispatchPrompt — sanitises task text before sending to tmux
@@ -165,9 +165,9 @@ Password authentication is required. The password is set via the `APP_PASSWORD` 
 - `DELETE /api/auth` — clears the session cookie (logout)
 - `/login` — login page; redirects to dashboard on success
 
-The WebSocket server (`ws-server.ts`) still only accepts connections from `localhost` or origins listed in `ALLOWED_ORIGINS`. The REST API also enforces `isLocalOrigin` on sensitive routes.
+The WebSocket server (`ws-server.ts`) accepts connections when the `Origin` header is absent (direct calls), is `localhost`, or has a hostname that matches the HTTP `Host` header (same-hostname policy). This is broader than localhost-only but prevents cross-site WebSocket hijacking because a browser cannot forge an `Origin` that matches a different host. See the security review comment at the top of the origin-check block in `ws-server.ts` for full rationale. The REST API enforces `isLocalOrigin` on sensitive routes (stricter: localhost IPs + explicit `ALLOWED_ORIGINS` list).
 
-**`ALLOWED_ORIGINS` env var** — comma-separated extra hostnames/IPs that `isLocalOrigin` should accept (in addition to `localhost`, `127.0.0.1`, `::1`). Useful when the app is accessed via a local tunnel or secondary NIC.
+**`ALLOWED_ORIGINS` env var** — comma-separated extra hostnames/IPs that `isLocalOrigin` (REST API) should accept (in addition to `localhost`, `127.0.0.1`, `::1`). This does **not** affect the WebSocket server, which uses same-hostname matching instead.
 
 ## Design System (`app/_components/ui.tsx`)
 
@@ -384,7 +384,7 @@ API routes under `app/api/agents/`:
 
 Terminal output is base64-encoded so binary ANSI/UTF-8 bytes survive JSON serialization.
 
-**Security:** SSH private key never sent to browser. WebSocket server rejects non-localhost origins (extended by `ALLOWED_ORIGINS`). Sessions auto-close after 30 minutes idle.
+**Security:** SSH private key never sent to browser. WebSocket server rejects cross-origin connections via same-hostname origin check (see `ws-server.ts` for security review). Sessions auto-close after 30 minutes idle.
 
 ## Data Models (summary)
 
