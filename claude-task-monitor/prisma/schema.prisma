@@ -73,6 +73,10 @@ model Task {
   nextAction         String?
   completionNonce    String?
   tmuxOutputOffset   Int?
+  // Per-task tmux session name (claude_<taskId>) used for parallel execution on servers.
+  // Null for agent tasks (agents use their own session) and legacy tasks dispatched
+  // before per-task sessions were introduced.
+  taskTmuxSession    String?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   executionLogs      ExecutionLog[]
