@@ -42,8 +42,6 @@ export async function POST(request: NextRequest, ctx: Ctx) {
   const server = await prisma.server.findUnique({ where: { id } });
   if (!server) return Response.json({ error: "Not found" }, { status: 404 });
 
-  const startedAt = new Date();
-  let logStatus: "success" | "failed" = "success";
   let output: string | undefined;
   let errorMessage: string | undefined;
 
@@ -62,28 +60,19 @@ export async function POST(request: NextRequest, ctx: Ctx) {
 
     output = result.stdout || result.stderr || undefined;
     if (result.exitCode !== 0) {
-      logStatus = "failed";
       errorMessage = result.stderr || `Exit code ${result.exitCode}`;
     }
   } catch (err) {
-    logStatus = "failed";
     errorMessage = err instanceof Error ? err.message : String(err);
   }
 
-  await prisma.serverCommandLog.create({
-    data: {
-      serverId: id,
-      command: trimmed,
-      status: logStatus,
-      output,
-      errorMessage,
-      startedAt,
-      finishedAt: new Date(),
-    },
-  });
+  // Exec commands are not logged to ServerCommandLog — commands sent through
+  // the arbitrary exec terminal may contain inline secrets (passwords in CLI
+  // flags, tokens in headers) and the in-memory terminal history in the UI
+  // already provides session-level visibility.
 
   return Response.json({
-    status: logStatus,
+    status: errorMessage ? "failed" : "success",
     output: output ?? "",
     errorMessage: errorMessage ?? null,
   });
