@@ -42,7 +42,12 @@ export async function tryDispatchTaskToServer(opts: {
       return { ok: false, reason: "task_not_dispatchable" as const };
     }
 
-    const sendResult = await sendTaskToTmux(opts.sshConfig, opts.task, opts.tmuxSession);
+    const nonce = crypto.randomUUID();
+    const sendResult = await sendTaskToTmux(
+      opts.sshConfig,
+      { ...opts.task, taskId: opts.taskId, nonce },
+      opts.tmuxSession,
+    );
     if (!sendResult.success) {
       if (sendResult.error?.includes("not found")) {
         return { ok: false, reason: "tmux_missing" as const, detail: sendResult.error };
@@ -53,7 +58,14 @@ export async function tryDispatchTaskToServer(opts: {
     // Callback-form transaction gives the adapter a single connection for
     // both writes, preventing "client already executing a query" pg warnings.
     await prisma.$transaction(async (tx) => {
-      await tx.task.update({ where: { id: opts.taskId }, data: { status: "running" } });
+      await tx.task.update({
+        where: { id: opts.taskId },
+        data: {
+          status: "running",
+          completionNonce: nonce,
+          tmuxOutputOffset: sendResult.outputOffset ?? null,
+        },
+      });
       await tx.executionLog.create({
         data: {
           taskId: opts.taskId,
@@ -64,6 +76,9 @@ export async function tryDispatchTaskToServer(opts: {
       });
     });
 
+    console.log(
+      `[TASK_STARTED] taskId="${opts.taskId}" title="${opts.task.title}" serverId="${opts.serverId}"`,
+    );
     return { ok: true };
   });
 }
@@ -106,7 +121,12 @@ export async function tryDispatchTaskToAgent(opts: {
       return { ok: false, reason: "task_not_dispatchable" as const };
     }
 
-    const sendResult = await sendTaskToTmux(opts.sshConfig, opts.task, opts.tmuxSession);
+    const nonce = crypto.randomUUID();
+    const sendResult = await sendTaskToTmux(
+      opts.sshConfig,
+      { ...opts.task, taskId: opts.taskId, nonce },
+      opts.tmuxSession,
+    );
     if (!sendResult.success) {
       if (sendResult.error?.includes("not found")) {
         // Session is missing — mark agent offline so the poller stops retrying.
@@ -120,7 +140,15 @@ export async function tryDispatchTaskToAgent(opts: {
     }
 
     await prisma.$transaction(async (tx) => {
-      await tx.task.update({ where: { id: opts.taskId }, data: { status: "running" } });
+      await tx.task.update({
+        where: { id: opts.taskId },
+        data: {
+          status: "running",
+          completionNonce: nonce,
+          tmuxOutputOffset: sendResult.outputOffset ?? null,
+        },
+      });
+      await tx.agent.update({ where: { id: opts.agentId }, data: { status: "running" } });
       await tx.executionLog.create({
         data: {
           taskId: opts.taskId,
@@ -131,6 +159,9 @@ export async function tryDispatchTaskToAgent(opts: {
       });
     });
 
+    console.log(
+      `[TASK_STARTED] taskId="${opts.taskId}" title="${opts.task.title}" agentId="${opts.agentId}"`,
+    );
     return { ok: true };
   });
 }
