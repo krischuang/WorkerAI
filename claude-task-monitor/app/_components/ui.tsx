@@ -67,28 +67,41 @@ export function Modal({
   children,
   size = "md",
 }: {
-  title: string;
+  title?: string;
   onClose: () => void;
   children: React.ReactNode;
-  size?: "md" | "lg";
+  size?: "md" | "lg" | "xl";
 }) {
-  const widths = { md: "max-w-md", lg: "max-w-lg" };
+  const widths = { md: "max-w-md", lg: "max-w-lg", xl: "max-w-4xl" };
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
       <div
         className={`bg-white rounded-xl shadow-xl w-full ${widths[size]} max-h-[90vh] overflow-y-auto`}
       >
-        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-zinc-100">
-          <h3 className="font-semibold text-zinc-900">{title}</h3>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="text-zinc-500 hover:text-zinc-900 w-7 h-7 flex items-center justify-center rounded-md hover:bg-zinc-100 transition-colors text-lg leading-none"
-          >
-            ×
-          </button>
-        </div>
+        {title ? (
+          <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-zinc-100">
+            <h3 className="font-semibold text-zinc-900">{title}</h3>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="text-zinc-500 hover:text-zinc-900 w-7 h-7 flex items-center justify-center rounded-md hover:bg-zinc-100 transition-colors text-lg leading-none"
+            >
+              ×
+            </button>
+          </div>
+        ) : (
+          <div className="flex justify-end px-4 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="text-zinc-500 hover:text-zinc-900 w-7 h-7 flex items-center justify-center rounded-md hover:bg-zinc-100 transition-colors text-lg leading-none"
+            >
+              ×
+            </button>
+          </div>
+        )}
         <div className="p-6">{children}</div>
       </div>
     </div>
