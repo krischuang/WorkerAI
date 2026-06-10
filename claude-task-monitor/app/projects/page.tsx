@@ -28,6 +28,8 @@ export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editProject, setEditProject] = useState<Project | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [form, setForm] = useState({
     name: "",
     description: "",
@@ -81,9 +83,12 @@ export default function ProjectsPage() {
     loadProjects();
   }
 
-  async function handleDelete(id: string, name: string) {
-    if (!confirm(`Delete project "${name}" and all its tasks?`)) return;
-    await fetch(`/api/projects/${id}`, { method: "DELETE" });
+  async function doDelete() {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    await fetch(`/api/projects/${confirmDelete.id}`, { method: "DELETE" });
+    setDeleting(false);
+    setConfirmDelete(null);
     loadProjects();
   }
 
@@ -158,6 +163,24 @@ export default function ProjectsPage() {
         </Modal>
       )}
 
+      {confirmDelete && (
+        <Modal title="Delete Project" onClose={() => setConfirmDelete(null)}>
+          <p className="text-sm text-zinc-700 mb-1">
+            Delete project <strong>{confirmDelete.name}</strong>?
+          </p>
+          <p className="text-sm text-zinc-600 mb-4">
+            All tasks and execution logs will be permanently deleted.
+            This cannot be undone.
+          </p>
+          <ModalActions>
+            <Btn variant="secondary" onClick={() => setConfirmDelete(null)}>Cancel</Btn>
+            <Btn variant="danger" onClick={doDelete} disabled={deleting}>
+              {deleting ? "Deleting…" : "Delete Project"}
+            </Btn>
+          </ModalActions>
+        </Modal>
+      )}
+
       {projects.length === 0 ? (
         <EmptyState
           message="No projects yet."
@@ -208,7 +231,7 @@ export default function ProjectsPage() {
                   Edit
                 </button>
                 <button
-                  onClick={() => handleDelete(p.id, p.name)}
+                  onClick={() => setConfirmDelete({ id: p.id, name: p.name })}
                   className="text-xs text-red-700 hover:text-red-900 font-medium transition-colors"
                 >
                   Delete

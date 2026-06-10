@@ -48,6 +48,8 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [editTask, setEditTask] = useState<Task | null>(null);
+  const [confirmDeleteTask, setConfirmDeleteTask] = useState<{ id: string; title: string } | null>(null);
+  const [deletingTask, setDeletingTask] = useState(false);
   const [taskForm, setTaskForm] = useState({
     title: "",
     description: "",
@@ -106,9 +108,12 @@ export default function ProjectDetailPage() {
     loadProject();
   }
 
-  async function handleDeleteTask(taskId: string, title: string) {
-    if (!confirm(`Delete task "${title}"?`)) return;
-    await fetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+  async function doDeleteTask() {
+    if (!confirmDeleteTask) return;
+    setDeletingTask(true);
+    await fetch(`/api/tasks/${confirmDeleteTask.id}`, { method: "DELETE" });
+    setDeletingTask(false);
+    setConfirmDeleteTask(null);
     loadProject();
   }
 
@@ -212,6 +217,24 @@ export default function ProjectDetailPage() {
         </Modal>
       )}
 
+      {confirmDeleteTask && (
+        <Modal title="Delete Task" onClose={() => setConfirmDeleteTask(null)}>
+          <p className="text-sm text-zinc-700 mb-1">
+            Delete task <strong>{confirmDeleteTask.title}</strong>?
+          </p>
+          <p className="text-sm text-zinc-600 mb-4">
+            All execution logs for this task will be permanently deleted.
+            This cannot be undone.
+          </p>
+          <ModalActions>
+            <Btn variant="secondary" onClick={() => setConfirmDeleteTask(null)}>Cancel</Btn>
+            <Btn variant="danger" onClick={doDeleteTask} disabled={deletingTask}>
+              {deletingTask ? "Deleting…" : "Delete Task"}
+            </Btn>
+          </ModalActions>
+        </Modal>
+      )}
+
       {project.tasks.length === 0 ? (
         <div className="bg-white rounded-xl border border-zinc-200 p-8 text-center">
           <p className="text-sm text-zinc-600 mb-4">No tasks yet.</p>
@@ -249,7 +272,7 @@ export default function ProjectDetailPage() {
                   Edit
                 </button>
                 <button
-                  onClick={() => handleDeleteTask(t.id, t.title)}
+                  onClick={() => setConfirmDeleteTask({ id: t.id, title: t.title })}
                   className="text-xs text-red-700 hover:text-red-900 font-medium transition-colors"
                 >
                   Delete
