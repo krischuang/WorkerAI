@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   isLocalOrigin,
   isDestructiveCommand,
+  validateCommand,
   MAX_COMMAND_LENGTH,
 } from "../exec-guards";
 
@@ -118,5 +119,55 @@ describe("isDestructiveCommand — allowed patterns", () => {
 describe("MAX_COMMAND_LENGTH", () => {
   it("is 4096", () => {
     expect(MAX_COMMAND_LENGTH).toBe(4096);
+  });
+});
+
+// ─── validateCommand (POST /api/servers/[id]/exec) ────────────────────────────
+
+describe("validateCommand — missing / empty command", () => {
+  it("returns an error for undefined command", () => {
+    expect(validateCommand(undefined)).toMatch(/required/i);
+  });
+
+  it("returns an error for null command", () => {
+    expect(validateCommand(null)).toMatch(/required/i);
+  });
+
+  it("returns an error for empty string", () => {
+    expect(validateCommand("")).toMatch(/required/i);
+  });
+
+  it("returns an error for whitespace-only string", () => {
+    expect(validateCommand("   ")).toMatch(/required/i);
+  });
+
+  it("returns an error for a non-string type (number)", () => {
+    expect(validateCommand(42)).toMatch(/required/i);
+  });
+
+  it("returns an error for a non-string type (object)", () => {
+    expect(validateCommand({ cmd: "ls" })).toMatch(/required/i);
+  });
+});
+
+describe("validateCommand — valid commands", () => {
+  it("returns null for a valid command string", () => {
+    expect(validateCommand("ls -la")).toBeNull();
+  });
+
+  it("returns null for a single-word command", () => {
+    expect(validateCommand("pwd")).toBeNull();
+  });
+});
+
+describe("validateCommand — length limit", () => {
+  it("returns an error for a command exceeding MAX_COMMAND_LENGTH", () => {
+    const err = validateCommand("x".repeat(MAX_COMMAND_LENGTH + 1));
+    expect(err).not.toBeNull();
+    expect(err!).toMatch(/maximum length/i);
+  });
+
+  it("returns null for a command of exactly MAX_COMMAND_LENGTH characters", () => {
+    expect(validateCommand("x".repeat(MAX_COMMAND_LENGTH))).toBeNull();
   });
 });

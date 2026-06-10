@@ -82,3 +82,19 @@ export function recordRelease(ip: string, store: RateLimitStore) {
   if (n <= 1) store.activeByIp.delete(ip);
   else        store.activeByIp.set(ip, n - 1);
 }
+
+/**
+ * Validates the query-string parameters of an incoming WebSocket terminal
+ * connection.  Returns an error message string on failure, null on success.
+ *
+ * Either `serverId` or `agentId` must be present (non-empty).
+ */
+export function validateWsConnectParams(
+  serverId: string | null,
+  agentId: string | null,
+): string | null {
+  if (!serverId && !agentId) {
+    return "serverId or agentId is required";
+  }
+  return null;
+}
