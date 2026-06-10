@@ -10,7 +10,7 @@ function createPrismaClient() {
   // max: keep pool small for a local dev server.
   const pool = new pg.Pool({
     connectionString: process.env.DATABASE_URL!,
-    max: 5,
+    max: 15,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
   });

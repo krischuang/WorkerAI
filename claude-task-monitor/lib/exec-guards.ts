@@ -19,7 +19,15 @@ export function isLocalOrigin(origin: string | null): boolean {
   try {
     const { hostname } = new URL(origin);
     // Node's URL parser wraps IPv6 addresses in brackets: "[::1]"
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]") {
+      return true;
+    }
+    // Allow additional origins configured via ALLOWED_ORIGINS (comma-separated hostnames or IPs).
+    const extra = process.env.ALLOWED_ORIGINS;
+    if (extra) {
+      return extra.split(",").map((h) => h.trim()).includes(hostname);
+    }
+    return false;
   } catch {
     return false;
   }
