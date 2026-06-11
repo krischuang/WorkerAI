@@ -44,6 +44,14 @@ enum TaskType {
   maintenance
 }
 
+enum ReviewStatus {
+  pending
+  running
+  done
+  incomplete
+  skipped
+}
+
 model Project {
   id          String        @id @default(cuid())
   name        String
@@ -53,6 +61,34 @@ model Project {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   tasks       Task[]
+
+  // Auto-review: queue completed tasks for Claude quality review
+  autoReviewEnabled     Boolean   @default(false)
+
+  // Project improvement scanner
+  autoScanEnabled       Boolean   @default(false)
+  scanFrequencyDays     Int       @default(7)
+  lastScannedAt         DateTime?
+  scans                 ProjectScan[]
+  debtItems             DebtItem[]
+  suggestions           TaskSuggestion[]
+
+  // Continuous improvement engine
+  improvementAutomationLevel  Int       @default(0)
+  cycleFrequencyDays          Int       @default(7)
+  lastImprovementCycleAt      DateTime?
+  nextImprovementCycleAt      DateTime?
+  improvementCycles           ImprovementCycle[]
+
+  // Progress tracking — updated after every task status change
+  completionPct         Float?
+  totalTasks            Int?
+  completedTasks        Int?
+  failedTasks           Int?
+  runningTasks          Int?
+  pendingTasks          Int?
+  progressUpdatedAt     DateTime?
+  estimatedCompletionAt DateTime?
 }
 
 model Task {
@@ -77,14 +113,49 @@ model Task {
   // Null for agent tasks (agents use their own session) and legacy tasks dispatched
   // before per-task sessions were introduced.
   taskTmuxSession    String?
+  // Hard wall-clock timeout in minutes. Resolution: task → server/agent default → 120 min global.
+  timeoutMinutes     Int?
+  // Zombie / stall detection
+  lastProgressAt     DateTime?
+  stallDetectedAt    DateTime?
+  // Retry engine
+  retryCount         Int            @default(0)
+  maxRetries         Int            @default(0)
+  retryAfter         DateTime?
+  lastFailReason     String?
+  // Dependency tracking — number of incomplete prerequisites; 0 means ready to run
+  blockedByCount     Int            @default(0)
+  // Auto-review fields — populated when project.autoReviewEnabled is true
+  autoReviewEnabled  Boolean        @default(false)
+  reviewStatus       ReviewStatus?
+  reviewScheduledAt  DateTime?
+  reviewStartedAt    DateTime?
+  reviewCompletedAt  DateTime?
+  reviewVerdictNotes String?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   executionLogs      ExecutionLog[]
+  dependents         TaskDependency[] @relation("DependentTask")
+  prerequisites      TaskDependency[] @relation("PrerequisiteTask")
 
   @@index([status])
   @@index([priority])
   @@index([projectId])
   @@index([serverId])
+  @@index([reviewStatus])
+}
+
+model TaskDependency {
+  id          String   @id @default(cuid())
+  taskId      String
+  task        Task     @relation("DependentTask", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOnId String
+  dependsOn   Task     @relation("PrerequisiteTask", fields: [dependsOnId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@unique([taskId, dependsOnId])
+  @@index([taskId])
+  @@index([dependsOnId])
 }
 
 model ExecutionLog {
@@ -97,7 +168,20 @@ model ExecutionLog {
   logText       String?
   errorMessage  String?
   outputSummary String?
+  retryNumber   Int        @default(0)
+  failureReason String?
+  // Enriched completion metadata
+  durationMs    Int?
+  exitReason    String?
+  paneCapture   String?
+  archivedAt    DateTime?
+  // Full-text search vector (tsvector — managed by DB trigger)
+  searchVector  Unsupported("tsvector")?
   createdAt     DateTime   @default(now())
+
+  @@index([taskId])
+  @@index([archivedAt])
+  @@index([finishedAt])
 }
 
 enum ServerStatus {
@@ -136,6 +220,20 @@ model Agent {
   status               AgentStatus          @default(offline)
   claudePermissionMode ClaudePermissionMode @default(workspace_write)
 
+  // Default timeout (minutes) for tasks running on this agent. Overridden per-task.
+  defaultTaskTimeoutMinutes Int?
+
+  // Health monitoring
+  healthScore          Int?
+  consecutiveFailures  Int       @default(0)
+  lastHealthCheckAt    DateTime?
+
+  // Auto-recovery
+  autoRecovery         Boolean   @default(false)
+  recoveryAttempts     Int       @default(0)
+  maxRecoveryAttempts  Int       @default(3)
+  lastRecoveryAt       DateTime?
+
   claudeSessionPct      Float?
   claudeSessionResets   String?
   claudeSessionResetsAt DateTime?
@@ -145,11 +243,48 @@ model Agent {
   claudeUsageRaw        String?
   claudeUsageFetchedAt  DateTime?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  tasks     Task[]
+  // Usage credits and last refresh outcome (set by pipe-pane usage refresh)
+  claudeUsageCreditsEnabled Boolean?
+  claudeLastRefreshStatus   String?   // "ok" | "rate_limited" | "error" | "offline" | "auth_required"
+
+  // Auto-pause on usage limit
+  autoPauseEnabled  Boolean   @default(true)
+  pausedDueToUsage  Boolean   @default(false)
+  pausedAt          DateTime?
+
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  tasks          Task[]
+  workerHealths  WorkerHealth[]
+  recoveryLogs   RecoveryLog[]
+  usageSnapshots AgentUsageSnapshot[]
 
   @@unique([serverId, slug])
+}
+
+// Point-in-time snapshot from a pipe-pane usage capture.
+// Stored on every refresh attempt (success or failure) to preserve history.
+// Never interpret null usagePercent as 0% — null means parsing failed.
+model AgentUsageSnapshot {
+  id                  String    @id @default(cuid())
+  agentId             String
+  agent               Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  // Parsed fields — null means the field was not present in the captured output.
+  usagePercent        Float?    // current week %
+  resetTime           String?   // display string e.g. "Jun 15, 9am (Sydney)"
+  resetAt             DateTime? // parsed UTC DateTime for countdown math
+  usageCreditsEnabled Boolean?  // null = unknown; false = "credits are off"
+
+  // Capture metadata
+  captureStatus String   @default("unknown") // "ok" | "rate_limited" | "error" | "offline" | "auth_required"
+  capturedAt    DateTime @default(now())
+
+  // Truncated raw / cleaned output (2000-char limit each)
+  rawOutput     String?
+  cleanedOutput String?
+
+  @@index([agentId, capturedAt])
 }
 
 model Server {
@@ -173,6 +308,20 @@ model Server {
   // Claude execution mode — controls which flags are passed when launching Claude CLI
   claudePermissionMode  ClaudePermissionMode @default(workspace_write)
 
+  // Default timeout (minutes) for tasks running on this server. Overridden per-task.
+  defaultTaskTimeoutMinutes Int?
+
+  // Health monitoring
+  healthScore          Int?
+  consecutiveFailures  Int       @default(0)
+  lastHealthCheckAt    DateTime?
+
+  // Auto-recovery
+  autoRecovery         Boolean   @default(false)
+  recoveryAttempts     Int       @default(0)
+  maxRecoveryAttempts  Int       @default(3)
+  lastRecoveryAt       DateTime?
+
   // Claude usage — persisted from last successful tmux capture
   claudeSessionPct      Float?
   claudeSessionResets   String?    // Sydney timezone e.g. "Jun 10, 1:10 am (Sydney)"
@@ -182,6 +331,20 @@ model Server {
   claudeWeekResetsAt    DateTime?  // UTC datetime of week reset (for countdown)
   claudeUsageRaw        String?    // raw tmux pane text
   claudeUsageFetchedAt  DateTime?
+
+  // Auto-pause on usage limit
+  autoPauseEnabled  Boolean   @default(true)
+  pausedDueToUsage  Boolean   @default(false)
+  pausedAt          DateTime?
+
+  // Capacity scoring — updated each poller cycle
+  capacityScore        Float?
+  activeTaskCount      Int       @default(0)
+  maxConcurrentTasks   Int       @default(10)
+  capacityUpdatedAt    DateTime?
+
+  workerHealths WorkerHealth[]
+  recoveryLogs  RecoveryLog[]
 }
 
 model ServerCommandLog {
@@ -197,15 +360,279 @@ model ServerCommandLog {
   createdAt    DateTime      @default(now())
 }
 
+// Health check record written each cycle per worker.
+model WorkerHealth {
+  id           String    @id @default(cuid())
+  serverId     String?
+  server       Server?   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  agentId      String?
+  agent        Agent?    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  healthScore  Int
+  sshOk        Boolean
+  tmuxOk       Boolean
+  claudeOk     Boolean
+  latencyMs    Int?
+  errorMessage String?
+  checkedAt    DateTime  @default(now())
+
+  @@index([serverId, checkedAt])
+  @@index([agentId, checkedAt])
+}
+
+// Recovery attempt record written on every manual or auto-recovery call.
+model RecoveryLog {
+  id           String    @id @default(cuid())
+  serverId     String?
+  server       Server?   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  agentId      String?
+  agent        Agent?    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  triggeredBy  String    @default("auto")   // "auto" | "manual"
+  success      Boolean
+  command      String?
+  errorMessage String?
+  createdAt    DateTime  @default(now())
+
+  @@index([serverId, createdAt])
+  @@index([agentId, createdAt])
+}
+
+model TaskTemplate {
+  id                  String    @id @default(cuid())
+  name                String
+  category            String
+  taskType            TaskType  @default(coding)
+  estimatedCostLevel  CostLevel @default(medium)
+  priority            Priority  @default(P3)
+  titleTemplate       String
+  descriptionTemplate String
+  variables           Json      @default("[]")
+  isBuiltIn           Boolean   @default(false)
+  usageCount          Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([category])
+  @@index([isBuiltIn])
+}
+
+// Global key/value configuration store.
+model SystemConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
 model DailyReport {
-  id             String   @id @default(cuid())
-  date           DateTime @default(now())
-  completedCount Int      @default(0)
-  failedCount    Int      @default(0)
-  runningCount   Int      @default(0)
-  pendingCount   Int      @default(0)
-  reportText     String?
-  topProjectId   String?
-  topProjectName String?
-  createdAt      DateTime @default(now())
+  id                   String   @id @default(cuid())
+  date                 DateTime @default(now())
+  completedCount       Int      @default(0)
+  failedCount          Int      @default(0)
+  runningCount         Int      @default(0)
+  pendingCount         Int      @default(0)
+  queuedCount          Int      @default(0)
+  retriedCount         Int      @default(0)
+  timedOutCount        Int      @default(0)
+  recoveryCount        Int      @default(0)
+  avgExecutionMinutes  Float?
+  activeServerCount    Int      @default(0)
+  activeAgentCount     Int      @default(0)
+  generatedBy          String   @default("manual")
+  periodStart          DateTime?
+  periodEnd            DateTime?
+  reportText           String?
+  topProjectId         String?
+  topProjectName       String?
+  createdAt            DateTime @default(now())
+}
+
+// Tracks when a usage-paused server or agent should be automatically resumed.
+// One pending record per resource (unique on resourceType + resourceId).
+// The poller fires triggerDueResumes() each cycle to clear stale pauses.
+model ScheduledResume {
+  id           String   @id @default(cuid())
+  resourceType String   // "server" | "agent"
+  resourceId   String
+  resumeAt     DateTime // UTC time when the quota resets
+  triggered    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([resourceType, resourceId])
+  @@index([resumeAt, triggered])
+}
+
+model WeeklyAnalytics {
+  id                    String   @id @default(cuid())
+  weekStart             DateTime @unique
+  weekEnd               DateTime
+  tasksCompleted        Int      @default(0)
+  tasksFailed           Int      @default(0)
+  tasksRetried          Int      @default(0)
+  tasksTimedOut         Int      @default(0)
+  tasksCreated          Int      @default(0)
+  reviewsRun            Int      @default(0)
+  reviewsPassed         Int      @default(0)
+  reviewsFailed         Int      @default(0)
+  avgExecutionMinutes   Float?
+  p50ExecutionMinutes   Float?
+  p95ExecutionMinutes   Float?
+  workerRecoveries      Int      @default(0)
+  dispatchFailures      Int      @default(0)
+  createdAt             DateTime @default(now())
+
+  @@index([weekStart])
+}
+
+enum ScanStatus {
+  running
+  completed
+  failed
+}
+
+enum SuggestionStatus {
+  pending_review
+  approved
+  rejected
+  converted
+}
+
+enum SuggestionSourceType {
+  scan
+  debt
+  review
+  manual
+}
+
+model TaskSuggestion {
+  id                 String               @id @default(cuid())
+  projectId          String
+  project            Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceType         SuggestionSourceType @default(manual)
+  sourceId           String?
+  title              String
+  description        String
+  priority           Priority             @default(P3)
+  taskType           TaskType             @default(coding)
+  estimatedCostLevel CostLevel            @default(medium)
+  rationale          String?
+  status             SuggestionStatus     @default(pending_review)
+  convertedTaskId    String?
+  reviewNote         String?
+  reviewedAt         DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@index([projectId, status])
+  @@index([sourceType, sourceId])
+}
+
+model ProjectScan {
+  id               String     @id @default(cuid())
+  projectId        String
+  project          Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  scanType         String     @default("gap_analysis")
+  status           ScanStatus @default(running)
+  findings         Json       @default("[]")
+  findingsCount    Int        @default(0)
+  scannedTaskCount Int        @default(0)
+  runOnServerId    String?
+  startedAt        DateTime   @default(now())
+  completedAt      DateTime?
+  errorMessage     String?
+  createdAt        DateTime   @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([status])
+}
+
+enum DebtSeverity {
+  low
+  medium
+  high
+  critical
+}
+
+enum DebtCategory {
+  architecture
+  testing
+  documentation
+  security
+  performance
+}
+
+enum DebtStatus {
+  open
+  acknowledged
+  in_progress
+  resolved
+  wont_fix
+}
+
+model DebtItem {
+  id          String       @id @default(cuid())
+  projectId   String
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title       String
+  description String
+  severity    DebtSeverity @default(medium)
+  category    DebtCategory @default(architecture)
+  status      DebtStatus   @default(open)
+  evidence    Json         @default("{}")
+  resolvedAt  DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([projectId, status])
+  @@index([severity])
+  @@index([status])
+}
+
+enum CycleStatus {
+  idle
+  scanning
+  detecting_debt
+  generating_suggestions
+  awaiting_approval
+  executing
+  reviewing
+  completed
+  cancelled
+  failed
+}
+
+model ImprovementCycle {
+  id                   String      @id @default(cuid())
+  projectId            String
+  project              Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status               CycleStatus @default(idle)
+  automationLevel      Int         @default(1)
+  scanId               String?
+  tasksCreated         Int         @default(0)
+  tasksExecuted        Int         @default(0)
+  tasksReviewed        Int         @default(0)
+  suggestionsGenerated Int         @default(0)
+  suggestionsApproved  Int         @default(0)
+  cycleError           String?
+  startedAt            DateTime    @default(now())
+  completedAt          DateTime?
+  nextCycleAt          DateTime?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  @@index([projectId, createdAt])
+  @@index([status])
+}
+
+// Immutable, append-only event log for every meaningful state change.
+model AuditEvent {
+  id         String   @id @default(cuid())
+  entityType String   // "task" | "project" | "server" | "agent"
+  entityId   String
+  eventType  String   // "task.created", "task.dispatched", "task.completed", etc.
+  actorType  String   @default("system") // "system" | "user" | "poller"
+  payload    Json     @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId, createdAt])
+  @@index([eventType, createdAt])
 }
