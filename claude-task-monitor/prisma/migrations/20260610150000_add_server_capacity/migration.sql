@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "Server" ADD COLUMN "capacityScore" DOUBLE PRECISION,
+ADD COLUMN "activeTaskCount" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN "maxConcurrentTasks" INTEGER NOT NULL DEFAULT 10,
+ADD COLUMN "capacityUpdatedAt" TIMESTAMP(3);
