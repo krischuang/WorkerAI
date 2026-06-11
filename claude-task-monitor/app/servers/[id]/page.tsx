@@ -66,10 +66,16 @@ interface Server {
   // Persisted Claude usage
   claudeSessionPct: number | null;
   claudeSessionResets: string | null;
+  claudeSessionResetsAt: string | null;
   claudeWeekPct: number | null;
   claudeWeekResets: string | null;
+  claudeWeekResetsAt: string | null;
   claudeUsageRaw: string | null;
   claudeUsageFetchedAt: string | null;
+  // Auto-pause
+  pausedDueToUsage: boolean;
+  pausedAt: string | null;
+  autoPauseEnabled: boolean;
 }
 
 interface CommandOutput {
@@ -126,10 +132,14 @@ export default function ServerDetailPage() {
   });
   const [launching, setLaunching] = useState(false);
   const [launchResult, setLaunchResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const [recoverResult, setRecoverResult] = useState<{ success: boolean; message: string } | null>(null);
   const [connectionResult, setConnectionResult] = useState<{
     success: boolean;
     message: string;
   } | null>(null);
+  const [resuming, setResuming] = useState(false);
+  const [countdown, setCountdown] = useState<string | null>(null);
 
   // Command logs — loaded lazily when the section scrolls into view
   const [logs, setLogs] = useState<CommandLog[]>([]);
@@ -194,6 +204,39 @@ export default function ServerDetailPage() {
   useEffect(() => {
     loadServer();
   }, [loadServer]);
+
+  // Live countdown timer when server is paused due to usage.
+  useEffect(() => {
+    if (!server?.pausedDueToUsage) { setCountdown(null); return; }
+
+    function computeCountdown() {
+      const now = Date.now();
+      const candidates = [server!.claudeSessionResetsAt, server!.claudeWeekResetsAt]
+        .filter((s): s is string => s !== null)
+        .map((s) => new Date(s).getTime())
+        .filter((t) => t > now);
+      if (candidates.length === 0) { setCountdown(null); return; }
+      const ms = Math.min(...candidates) - now;
+      const totalSec = Math.floor(ms / 1000);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      setCountdown(h > 0
+        ? `Resumes in ${h}h ${m}m ${s}s`
+        : `Resumes in ${m}m ${s}s`);
+    }
+
+    computeCountdown();
+    const interval = setInterval(computeCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [server?.pausedDueToUsage, server?.claudeSessionResetsAt, server?.claudeWeekResetsAt]);
+
+  async function handleResume() {
+    setResuming(true);
+    await fetch(`/api/servers/${id}/resume`, { method: "POST" });
+    setResuming(false);
+    loadServer();
+  }
 
   const loadLogs = useCallback(async (cursor?: string) => {
     setLogsLoading(true);
@@ -282,6 +325,25 @@ export default function ServerDetailPage() {
       setLaunchResult({ success: false, message: "Request failed — check the server connection." });
     } finally {
       setLaunching(false);
+    }
+  }
+
+  async function recoverSession() {
+    setRecovering(true);
+    setRecoverResult(null);
+    try {
+      const res = await fetch(`/api/servers/${id}/recover`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setRecoverResult({ success: true, message: "Session recovered successfully." });
+        loadServer();
+      } else {
+        setRecoverResult({ success: false, message: data.error ?? "Recovery failed" });
+      }
+    } catch {
+      setRecoverResult({ success: false, message: "Request failed — check the server connection." });
+    } finally {
+      setRecovering(false);
     }
   }
 
@@ -459,6 +521,28 @@ export default function ServerDetailPage() {
         </div>
       )}
 
+      {/* ── Usage Pause Banner ── */}
+      {server.pausedDueToUsage && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-6 flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-amber-900">
+              ⏸ Queue paused — usage limit reached
+            </p>
+            {countdown && (
+              <p className="text-sm text-amber-800 mt-0.5">{countdown}</p>
+            )}
+            {server.pausedAt && (
+              <p className="text-xs text-amber-700 mt-0.5">
+                Paused at {new Date(server.pausedAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+          <Btn variant="secondary" size="sm" onClick={handleResume} disabled={resuming}>
+            {resuming ? "Resuming…" : "Resume Now"}
+          </Btn>
+        </div>
+      )}
+
       {/* ── Claude Settings ── */}
       <section className="mb-6">
         <h2 className="font-semibold text-zinc-900 mb-3">Claude Execution Mode</h2>
@@ -514,6 +598,33 @@ export default function ServerDetailPage() {
             >
               {launchResult.success ? "✓ " : "✗ "}
               {launchResult.message}
+            </div>
+          )}
+
+          <div className="mt-4 pt-4 border-t border-zinc-100 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-zinc-800">Recovery</p>
+              <p className="text-xs text-zinc-500 mt-0.5">Relaunch Claude if the session is offline. Will not run if there are active tasks.</p>
+            </div>
+            <Btn
+              variant="secondary"
+              size="sm"
+              disabled={recovering}
+              onClick={recoverSession}
+            >
+              {recovering ? "Recovering…" : "Recover Session"}
+            </Btn>
+          </div>
+          {recoverResult && (
+            <div
+              className={`mt-3 rounded-lg border p-3 text-sm font-medium ${
+                recoverResult.success
+                  ? "bg-green-50 border-green-200 text-green-800"
+                  : "bg-red-50 border-red-200 text-red-800"
+              }`}
+            >
+              {recoverResult.success ? "✓ " : "✗ "}
+              {recoverResult.message}
             </div>
           )}
 

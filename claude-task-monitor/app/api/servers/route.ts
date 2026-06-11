@@ -22,6 +22,7 @@ export async function GET() {
         runningCount: tasks.filter((t) => t.status === "running").length,
       }))
     );
+
   } catch (err) {
     return serverError("servers GET", err);
   }

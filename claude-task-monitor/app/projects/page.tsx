@@ -15,6 +15,10 @@ interface Project {
   createdAt: string;
   _count: { tasks: number };
   tasks: Array<{ status: string }>;
+  completionPct: number | null;
+  totalTasks: number | null;
+  completedTasks: number | null;
+  estimatedCompletionAt: string | null;
 }
 
 const PRIORITIES = ["P1", "P2", "P3", "P4"];
@@ -222,6 +226,21 @@ export default function ProjectsPage() {
                 <span className="text-blue-700">{countByStatus(p.tasks, "running")} running</span>
                 <span className="text-green-700">{countByStatus(p.tasks, "completed")} done</span>
               </div>
+
+              {p.totalTasks !== null && p.totalTasks > 0 && (
+                <div>
+                  <div className="flex justify-between text-xs text-zinc-600 mb-1">
+                    <span>{Math.round(p.completionPct ?? 0)}% complete</span>
+                    <span>{p.completedTasks ?? 0}/{p.totalTasks}</span>
+                  </div>
+                  <div className="w-full h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-green-500 rounded-full"
+                      style={{ width: `${Math.min(p.completionPct ?? 0, 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
 
               <div className="flex gap-3 pt-1 border-t border-zinc-100">
                 <button

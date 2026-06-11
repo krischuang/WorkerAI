@@ -10,7 +10,11 @@ const links = [
   { href: "/queue", label: "Priority Queue" },
   { href: "/servers", label: "Servers" },
   { href: "/agents", label: "Agents" },
+  { href: "/task-templates", label: "Templates" },
+  { href: "/analytics", label: "Analytics" },
   { href: "/reports/daily", label: "Daily Report" },
+  { href: "/admin/health", label: "Health Monitor" },
+  { href: "/admin/audit", label: "Audit Log" },
 ];
 
 export function Nav() {

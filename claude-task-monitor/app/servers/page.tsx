@@ -31,6 +31,28 @@ interface Server {
   _count: { commandLogs: number };
   queuedCount: number;
   runningCount: number;
+  pausedDueToUsage: boolean;
+  claudeSessionResetsAt: string | null;
+  claudeWeekResetsAt: string | null;
+  capacityScore: number | null;
+  activeTaskCount: number;
+  maxConcurrentTasks: number;
+  capacityUpdatedAt: string | null;
+}
+
+function resumeCountdown(sessionResetsAt: string | null, weekResetsAt: string | null): string | null {
+  const now = Date.now();
+  const candidates = [sessionResetsAt, weekResetsAt]
+    .filter((s): s is string => s !== null)
+    .map((s) => new Date(s).getTime())
+    .filter((t) => t > now);
+  if (candidates.length === 0) return null;
+  const ms = Math.min(...candidates) - now;
+  const totalMin = Math.floor(ms / 60_000);
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  if (hours > 0) return `Resumes in ${hours}h ${mins}m`;
+  return `Resumes in ${mins}m`;
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -45,11 +67,18 @@ const STATUS_DOT: Record<string, string> = {
   failed: "bg-red-500",
 };
 
+function capacityBarColor(score: number): string {
+  if (score >= 60) return "bg-green-500";
+  if (score >= 30) return "bg-amber-400";
+  return "bg-red-500";
+}
+
 export default function ServersPage() {
   const [servers, setServers] = useState<Server[]>([]);
   const [testing, setTesting] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [resuming, setResuming] = useState<string | null>(null);
 
   function loadServers() {
     fetch("/api/servers")
@@ -65,6 +94,13 @@ export default function ServersPage() {
     setTesting(id);
     await fetch(`/api/servers/${id}/connect`, { method: "POST" });
     setTesting(null);
+    loadServers();
+  }
+
+  async function handleResume(id: string) {
+    setResuming(id);
+    await fetch(`/api/servers/${id}/resume`, { method: "POST" });
+    setResuming(null);
     loadServers();
   }
 
@@ -146,6 +182,11 @@ export default function ServersPage() {
                       {s.runningCount} running
                     </span>
                   )}
+                  {s.pausedDueToUsage && (
+                    <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-amber-50 text-amber-700 border-amber-200">
+                      ⏸ usage paused
+                    </span>
+                  )}
                 </div>
                 <p className="text-sm text-zinc-700 mt-0.5 font-mono">
                   {s.username}@{s.host}:{s.port}
@@ -158,10 +199,39 @@ export default function ServersPage() {
                     </span>
                   )}
                 </p>
+                {s.capacityScore !== null && (
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <div className="flex-1 max-w-[160px] h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${capacityBarColor(s.capacityScore)}`}
+                        style={{ width: `${s.capacityScore}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-zinc-600">
+                      {Math.round(s.capacityScore)}% capacity · {s.activeTaskCount}/{s.maxConcurrentTasks} tasks
+                    </span>
+                  </div>
+                )}
+                {s.pausedDueToUsage && (() => {
+                  const cd = resumeCountdown(s.claudeSessionResetsAt, s.claudeWeekResetsAt);
+                  return cd ? (
+                    <p className="text-xs text-amber-600 mt-0.5 font-medium">{cd}</p>
+                  ) : null;
+                })()}
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
                 <span className="text-xs text-zinc-600 font-medium">{s._count.commandLogs} logs</span>
+                {s.pausedDueToUsage && (
+                  <Btn
+                    size="sm"
+                    variant="secondary"
+                    disabled={resuming === s.id}
+                    onClick={() => handleResume(s.id)}
+                  >
+                    {resuming === s.id ? "Resuming…" : "Resume"}
+                  </Btn>
+                )}
                 <Btn
                   size="sm"
                   variant="secondary"

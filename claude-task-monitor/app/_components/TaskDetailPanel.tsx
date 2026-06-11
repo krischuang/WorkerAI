@@ -31,6 +31,9 @@ interface ServerOption {
   id: string;
   name: string;
   host: string;
+  capacityScore: number | null;
+  activeTaskCount: number;
+  maxConcurrentTasks: number;
 }
 
 interface AgentUsage {
@@ -77,6 +80,9 @@ interface Task {
   status: string;
   taskType: string;
   estimatedCostLevel: string;
+  timeoutMinutes: number | null;
+  resolvedTimeoutMinutes: number;
+  timeoutExpiresAt: string | null;
   resultSummary: string | null;
   nextAction: string | null;
   createdAt: string;
@@ -138,13 +144,180 @@ function formatCountdown(ms: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+function formatMinutes(ms: number): string {
+  const totalMin = Math.floor(ms / 60_000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function TimeoutProgressBar({
+  timeoutExpiresAt,
+  resolvedTimeoutMinutes,
+}: {
+  timeoutExpiresAt: string | null;
+  resolvedTimeoutMinutes: number;
+}) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!timeoutExpiresAt) return null;
+
+  const expiresMs = new Date(timeoutExpiresAt).getTime();
+  const totalMs = resolvedTimeoutMinutes * 60_000;
+  const startMs = expiresMs - totalMs;
+  const elapsedMs = Math.max(0, now - startMs);
+  const remainingMs = Math.max(0, expiresMs - now);
+  const pct = Math.min(100, (elapsedMs / totalMs) * 100);
+
+  const isExpired = remainingMs === 0;
+  const isWarning = pct >= 80;
+
+  const barColor = isExpired
+    ? "bg-red-600"
+    : isWarning
+    ? "bg-amber-500"
+    : "bg-blue-500";
+
+  return (
+    <div className="mt-3 p-3 bg-zinc-50 rounded-lg border border-zinc-200">
+      <div className="flex justify-between items-baseline mb-1">
+        <span className="text-xs font-medium text-zinc-700">Execution timeout</span>
+        <span className={`text-xs font-semibold ${isExpired ? "text-red-600" : isWarning ? "text-amber-600" : "text-zinc-600"}`}>
+          {isExpired ? "Timed out" : `${formatMinutes(remainingMs)} remaining`}
+        </span>
+      </div>
+      <div className="w-full bg-zinc-200 rounded-full h-2 mb-1">
+        <div
+          className={`h-2 rounded-full transition-all ${barColor}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <p className="text-xs text-zinc-500">
+        {formatMinutes(elapsedMs)} elapsed of {resolvedTimeoutMinutes}min limit
+      </p>
+    </div>
+  );
+}
+
+// ── Audit Timeline ─────────────────────────────────────────────────────────
+
+interface AuditEvent {
+  id: string;
+  eventType: string;
+  actorType: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+const EVENT_LABEL: Record<string, string> = {
+  "task.created":           "Task created",
+  "task.queued":            "Queued for execution",
+  "task.dispatched":        "Dispatched to Claude",
+  "task.completed":         "Marked completed",
+  "task.failed":            "Marked failed",
+  "task.timeout":           "Execution timed out",
+  "task.retried":           "Retried",
+  "task.review.sent":       "Review sent",
+  "task.review.done":       "Review: done",
+  "task.review.incomplete": "Review: incomplete",
+};
+
+const EVENT_DOT: Record<string, string> = {
+  "task.created":           "bg-zinc-400",
+  "task.queued":            "bg-violet-500",
+  "task.dispatched":        "bg-blue-500",
+  "task.completed":         "bg-green-500",
+  "task.failed":            "bg-red-500",
+  "task.timeout":           "bg-red-400",
+  "task.retried":           "bg-amber-400",
+  "task.review.sent":       "bg-sky-400",
+  "task.review.done":       "bg-emerald-500",
+  "task.review.incomplete": "bg-amber-500",
+};
+
+function AuditTimeline({ taskId }: { taskId: string }) {
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  function load(cursor?: string) {
+    const url = `/api/audit?entityType=task&entityId=${taskId}${cursor ? `&cursor=${cursor}` : ""}`;
+    return fetch(url)
+      .then((r) => r.json())
+      .then((data: { events: AuditEvent[]; nextCursor: string | null }) => {
+        setEvents((prev) => cursor ? [...prev, ...data.events] : data.events);
+        setNextCursor(data.nextCursor);
+      });
+  }
+
+  useEffect(() => {
+    load().finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId]);
+
+  function loadMore() {
+    if (!nextCursor) return;
+    setLoadingMore(true);
+    load(nextCursor).finally(() => setLoadingMore(false));
+  }
+
+  if (loading) return null;
+  if (events.length === 0) return null;
+
+  return (
+    <section className="mt-6">
+      <h2 className="font-semibold text-zinc-900 mb-3">Timeline</h2>
+      <div className="bg-white rounded-xl border border-zinc-200 p-4">
+        <ol className="relative border-l border-zinc-200 ml-2 space-y-4">
+          {events.map((ev) => (
+            <li key={ev.id} className="pl-5">
+              <span className={`absolute left-[-4.5px] mt-1.5 h-2.5 w-2.5 rounded-full border-2 border-white ${EVENT_DOT[ev.eventType] ?? "bg-zinc-300"}`} />
+              <p className="text-sm font-medium text-zinc-900">
+                {EVENT_LABEL[ev.eventType] ?? ev.eventType}
+              </p>
+              <p className="text-xs text-zinc-500">
+                {new Date(ev.createdAt).toLocaleString()}
+                {ev.actorType !== "system" && ` · ${ev.actorType}`}
+              </p>
+            </li>
+          ))}
+        </ol>
+        {nextCursor && (
+          <div className="mt-4 text-center">
+            <Btn variant="ghost" size="sm" onClick={loadMore} disabled={loadingMore}>
+              {loadingMore ? "Loading…" : "Load more"}
+            </Btn>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 const STATUS_BUTTONS = [
+  { label: "Pending", status: "pending", color: "bg-zinc-600 hover:bg-zinc-700" },
   { label: "Queued", status: "queued", color: "bg-violet-700 hover:bg-violet-800" },
   { label: "Running", status: "running", color: "bg-blue-700 hover:bg-blue-800" },
   { label: "Paused", status: "paused", color: "bg-amber-600 hover:bg-amber-700" },
   { label: "Completed", status: "completed", color: "bg-green-700 hover:bg-green-800" },
   { label: "Failed", status: "failed", color: "bg-red-700 hover:bg-red-800" },
 ];
+
+const ALLOWED_STATUS_TRANSITIONS: Record<string, Set<string>> = {
+  pending:   new Set(["queued", "paused"]),
+  queued:    new Set(["running", "pending", "paused"]),
+  running:   new Set(["completed", "failed", "paused"]),
+  paused:    new Set(["queued", "pending"]),
+  completed: new Set(["archived", "pending"]),
+  failed:    new Set(["pending"]),
+  archived:  new Set([]),
+};
 
 export function TaskDetailPanel({
   id,
@@ -528,7 +701,7 @@ export function TaskDetailPanel({
                 <option value="">— select a server —</option>
                 {servers.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} ({s.host})
+                    {s.name} ({s.host}){s.capacityScore !== null ? ` · ${Math.round(s.capacityScore)}% cap` : ""}
                   </option>
                 ))}
               </select>
@@ -658,12 +831,13 @@ export function TaskDetailPanel({
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
         <h2 className="font-semibold text-zinc-900 mb-3">Execution Controls</h2>
         <div className="flex flex-wrap gap-2">
-          {STATUS_BUTTONS.map(({ label, status, color }) => (
+          {STATUS_BUTTONS.filter(({ status }) =>
+            ALLOWED_STATUS_TRANSITIONS[task.status]?.has(status) ?? false
+          ).map(({ label, status, color }) => (
             <button
               key={status}
               onClick={() => updateStatus(status)}
-              disabled={task.status === status}
-              className={`text-sm text-white font-medium px-4 py-2 rounded-lg transition-colors ${color} disabled:opacity-40 disabled:cursor-not-allowed`}
+              className={`text-sm text-white font-medium px-4 py-2 rounded-lg transition-colors ${color}`}
             >
               Mark {label}
             </button>
@@ -683,6 +857,12 @@ export function TaskDetailPanel({
             </Btn>
             <span className="text-xs text-zinc-500">Auto-checks every 30 s</span>
           </div>
+        )}
+        {task.status === "running" && task.timeoutExpiresAt && (
+          <TimeoutProgressBar
+            timeoutExpiresAt={task.timeoutExpiresAt}
+            resolvedTimeoutMinutes={task.resolvedTimeoutMinutes}
+          />
         )}
       </section>
 
@@ -799,6 +979,9 @@ export function TaskDetailPanel({
           </form>
         </Modal>
       )}
+
+      {/* ── Audit Timeline ───────────────────────────────────────────────────── */}
+      <AuditTimeline taskId={id} />
 
       {/* ── Result Summary Modal ─────────────────────────────────────────────── */}
       {showSummaryForm && (

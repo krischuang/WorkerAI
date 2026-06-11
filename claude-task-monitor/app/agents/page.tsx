@@ -22,6 +22,7 @@ interface Agent {
   claudeUsageFetchedAt: string | null;
   server: { id: string; name: string; host: string };
   _count: { tasks: number };
+  pausedDueToUsage: boolean;
 }
 
 const STATUS_BADGE: Record<AgentStatus, string> = {
@@ -142,9 +143,16 @@ export default function AgentsPage() {
                         <div className="text-xs text-zinc-500 font-mono">{agent.tmuxSession}</div>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${STATUS_BADGE[agent.status]}`}>
-                          {agent.status}
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${STATUS_BADGE[agent.status]}`}>
+                            {agent.status}
+                          </span>
+                          {agent.pausedDueToUsage && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border bg-amber-50 text-amber-700 border-amber-200">
+                              ⏸ paused
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3"><UsageBar pct={agent.claudeSessionPct} resetAt={agent.claudeSessionResetsAt} /></td>
                       <td className="px-4 py-3"><UsageBar pct={agent.claudeWeekPct} resetAt={agent.claudeWeekResetsAt} /></td>
