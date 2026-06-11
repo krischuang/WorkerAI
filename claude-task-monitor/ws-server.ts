@@ -6,7 +6,6 @@ import { PrismaClient } from "./app/generated/prisma/client";
 import pg from "pg";
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import type { IncomingMessage } from "http";
 import { validateSshKeyPath } from "./lib/ssh-key-path";
 import {
