@@ -17,6 +17,12 @@ export interface ClaudeUsageParsed {
   weekResetsAt?: Date;
   /** undefined = not found in output; false = "Usage credits are off"; true = "Usage credits are on" */
   usageCreditsEnabled?: boolean;
+  /** Total input tokens for the current session (if present in /usage output) */
+  sessionInputTokens?: number;
+  /** Total output tokens for the current session (if present in /usage output) */
+  sessionOutputTokens?: number;
+  /** Model name extracted from usage output (e.g. "claude-sonnet-4-5") */
+  modelName?: string;
 }
 
 // ─── Internal constants ───────────────────────────────────────────────────────
@@ -128,6 +134,41 @@ export function extractSection(
   };
 }
 
+/**
+ * Parse token counts from /usage output.
+ * Handles formats like:
+ *   "Input: 1,234,567 tokens"  "Output: 123,456 tokens"
+ *   "1,234,567 input tokens"   "123,456 output tokens"
+ *   "Tokens used: 1,234,567 / 2,000,000"
+ */
+export function parseTokenCounts(
+  text: string
+): { inputTokens: number | undefined; outputTokens: number | undefined; modelName: string | undefined } {
+  const clean = (s: string) => parseInt(s.replace(/,/g, ""), 10);
+
+  // "Input tokens: 1,234,567" or "Input: 1,234,567 tokens"
+  const inputMatch =
+    text.match(/input\s*(?:tokens)?[:\s]+([0-9][0-9,]*)\s*(?:tokens)?/i) ||
+    text.match(/([0-9][0-9,]+)\s+input\s+tokens/i);
+  const outputMatch =
+    text.match(/output\s*(?:tokens)?[:\s]+([0-9][0-9,]*)\s*(?:tokens)?/i) ||
+    text.match(/([0-9][0-9,]+)\s+output\s+tokens/i);
+
+  // "Tokens used: 1,234,567 / 2,000,000"
+  const totalUsedMatch = !inputMatch && !outputMatch
+    ? text.match(/tokens\s+used[:\s]+([0-9][0-9,]*)/i)
+    : null;
+
+  // Model name: "claude-sonnet-4-5-20251001" or "claude-opus-4"
+  const modelMatch = text.match(/claude-(?:opus|sonnet|haiku)[-\d.a-z]*/i);
+
+  return {
+    inputTokens: inputMatch ? clean(inputMatch[1]) : totalUsedMatch ? clean(totalUsedMatch[1]) : undefined,
+    outputTokens: outputMatch ? clean(outputMatch[1]) : undefined,
+    modelName: modelMatch ? modelMatch[0].toLowerCase() : undefined,
+  };
+}
+
 export function parseUsage(text: string): ClaudeUsageParsed {
   // \s* tolerates TUI output where inter-word spaces are stripped by pipe-pane
   const session = extractSection(text, /Current\s*session/i);
@@ -137,6 +178,8 @@ export function parseUsage(text: string): ClaudeUsageParsed {
   const creditsOn  = /usage\s+credits?\s+are?\s+on/i.test(text);
   const usageCreditsEnabled = creditsOff ? false : creditsOn ? true : undefined;
 
+  const { inputTokens, outputTokens, modelName } = parseTokenCounts(text);
+
   return {
     sessionPct:           session?.pct,
     sessionResets:        session?.resetsRaw ? utcToSydney(session.resetsRaw) : undefined,
@@ -145,6 +188,9 @@ export function parseUsage(text: string): ClaudeUsageParsed {
     weekResets:           week?.resetsRaw ? utcToSydney(week.resetsRaw) : undefined,
     weekResetsAt:         week?.resetsRaw ? parseUTCResetTime(week.resetsRaw) ?? undefined : undefined,
     usageCreditsEnabled,
+    sessionInputTokens:   inputTokens,
+    sessionOutputTokens:  outputTokens,
+    modelName,
   };
 }
 
