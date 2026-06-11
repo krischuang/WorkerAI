@@ -80,6 +80,10 @@ model Project {
   nextImprovementCycleAt      DateTime?
   improvementCycles           ImprovementCycle[]
 
+  // Scan failure circuit-breaker: pause auto-improvement after 3 consecutive scan failures
+  scanFailureCount      Int       @default(0)
+  autoImprovementPaused Boolean   @default(false)
+
   // Progress tracking — updated after every task status change
   completionPct         Float?
   totalTasks            Int?
@@ -118,6 +122,8 @@ model Task {
   // Zombie / stall detection
   lastProgressAt     DateTime?
   stallDetectedAt    DateTime?
+  // Scheduled dispatch — pending task auto-queues when scheduledFor <= now()
+  scheduledFor       DateTime?
   // Retry engine
   retryCount         Int            @default(0)
   maxRetries         Int            @default(0)
@@ -125,6 +131,8 @@ model Task {
   lastFailReason     String?
   // Dependency tracking — number of incomplete prerequisites; 0 means ready to run
   blockedByCount     Int            @default(0)
+  // Opt out of tmux pane capture for tasks that process sensitive workloads
+  disablePaneCapture Boolean        @default(false)
   // Auto-review fields — populated when project.autoReviewEnabled is true
   autoReviewEnabled  Boolean        @default(false)
   reviewStatus       ReviewStatus?
@@ -143,6 +151,7 @@ model Task {
   @@index([projectId])
   @@index([serverId])
   @@index([reviewStatus])
+  @@index([scheduledFor])
 }
 
 model TaskDependency {
@@ -175,6 +184,10 @@ model ExecutionLog {
   exitReason    String?
   paneCapture   String?
   archivedAt    DateTime?
+  // Cost tracking
+  usageSnapshotPct Float?  // claudeSessionPct at dispatch time (before), for delta calculation
+  tokenCount    Int?       // total tokens used (input + output) for this execution
+  actualCostUsd Float?     // estimated USD cost based on token count and model pricing
   // Full-text search vector (tsvector — managed by DB trigger)
   searchVector  Unsupported("tsvector")?
   createdAt     DateTime   @default(now())
@@ -443,6 +456,52 @@ model DailyReport {
   topProjectId         String?
   topProjectName       String?
   createdAt            DateTime @default(now())
+}
+
+model WeeklyReport {
+  id                  String   @id @default(cuid())
+  weekStart           DateTime
+  completedCount      Int      @default(0)
+  failedCount         Int      @default(0)
+  runningCount        Int      @default(0)
+  pendingCount        Int      @default(0)
+  queuedCount         Int      @default(0)
+  retriedCount        Int      @default(0)
+  timedOutCount       Int      @default(0)
+  recoveryCount       Int      @default(0)
+  avgExecutionMinutes Float?
+  activeServerCount   Int      @default(0)
+  activeAgentCount    Int      @default(0)
+  agentUtilisation    Json     @default("{}")
+  topCompletedTasks   Json     @default("[]")
+  generatedBy         String   @default("manual")
+  reportText          String?
+  createdAt           DateTime @default(now())
+
+  @@index([weekStart])
+}
+
+model MonthlyReport {
+  id                  String   @id @default(cuid())
+  monthStart          DateTime
+  completedCount      Int      @default(0)
+  failedCount         Int      @default(0)
+  runningCount        Int      @default(0)
+  pendingCount        Int      @default(0)
+  queuedCount         Int      @default(0)
+  retriedCount        Int      @default(0)
+  timedOutCount       Int      @default(0)
+  recoveryCount       Int      @default(0)
+  avgExecutionMinutes Float?
+  activeServerCount   Int      @default(0)
+  activeAgentCount    Int      @default(0)
+  agentUtilisation    Json     @default("{}")
+  topCompletedTasks   Json     @default("[]")
+  generatedBy         String   @default("manual")
+  reportText          String?
+  createdAt           DateTime @default(now())
+
+  @@index([monthStart])
 }
 
 // Tracks when a usage-paused server or agent should be automatically resumed.
