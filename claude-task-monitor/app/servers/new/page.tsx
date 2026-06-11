@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { BackLink, Btn, FormField, ModalActions, inputCls } from "@/app/_components/ui";
+import { BackLink, Btn, FormField, inputCls } from "@/app/_components/ui";
 
 export default function NewServerPage() {
   const router = useRouter();
@@ -44,7 +44,7 @@ export default function NewServerPage() {
     <div className="p-8 max-w-xl">
       <BackLink href="/servers" label="Servers" />
 
-      <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 mb-6">
+      <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100 mb-6">
         Add AWS EC2 Server
       </h1>
 
@@ -52,7 +52,7 @@ export default function NewServerPage() {
         <strong>Security note:</strong> Only the path to your SSH key is stored — never the key content itself. The key is read from the local filesystem when a connection is made.
       </div>
 
-      <form onSubmit={handleSubmit} className="bg-white rounded-xl border border-zinc-200 p-6 space-y-5">
+      <form onSubmit={handleSubmit} className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-6 space-y-5">
         <FormField label="Server Name" required>
           <input
             required
@@ -152,7 +152,7 @@ export default function NewServerPage() {
           </Btn>
           <Link
             href="/servers"
-            className="flex-1 text-center border border-zinc-300 text-zinc-800 text-sm font-medium py-2 rounded-lg hover:bg-zinc-50 transition-colors"
+            className="flex-1 text-center border border-zinc-300 dark:border-zinc-600 text-zinc-800 dark:text-zinc-200 text-sm font-medium py-2 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 dark:bg-zinc-950 transition-colors"
           >
             Cancel
           </Link>

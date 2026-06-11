@@ -85,7 +85,7 @@ export default function QueuePage() {
         subtitle="Tasks ready to run sorted by project priority → task priority → age"
         action={
           tasks.length > 0 ? (
-            <span className="text-sm text-zinc-600 font-medium">{tasks.length} waiting</span>
+            <span className="text-sm text-zinc-600 dark:text-zinc-400 font-medium">{tasks.length} waiting</span>
           ) : undefined
         }
       />
@@ -97,14 +97,14 @@ export default function QueuePage() {
           {/* ── Queued (server assigned, ready to run) ── */}
           {queuedTasks.length > 0 && (
             <section>
-              <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wide mb-2">
+              <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wide mb-2">
                 Ready to run ({queuedTasks.length})
               </h2>
               <div className="space-y-2">
                 {queuedTasks.map((t, i) => (
                   <div
                     key={t.id}
-                    className="bg-white rounded-xl border border-violet-200 p-4 flex items-center gap-4"
+                    className="bg-white dark:bg-zinc-900 rounded-xl border border-violet-200 p-4 flex items-center gap-4"
                   >
                     <div className="text-zinc-500 font-mono text-sm w-6 text-center shrink-0 select-none">
                       {i + 1}
@@ -116,14 +116,14 @@ export default function QueuePage() {
                     <div className="flex-1 min-w-0">
                       <Link
                         href={`/tasks/${t.id}`}
-                        className="font-medium text-zinc-900 hover:text-blue-700 truncate block transition-colors"
+                        className="font-medium text-zinc-900 dark:text-zinc-100 hover:text-blue-700 truncate block transition-colors"
                       >
                         {t.title}
                       </Link>
-                      <div className="flex items-center gap-3 mt-0.5 text-xs text-zinc-600">
+                      <div className="flex items-center gap-3 mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
                         <Link
                           href={`/projects/${t.project.id}`}
-                          className="hover:text-zinc-900 transition-colors"
+                          className="hover:text-zinc-900 dark:text-zinc-100 transition-colors"
                         >
                           {t.project.name}
                         </Link>
@@ -157,14 +157,14 @@ export default function QueuePage() {
           {/* ── Pending (no server assigned yet) ── */}
           {pendingTasks.length > 0 && (
             <section>
-              <h2 className="text-sm font-semibold text-zinc-700 uppercase tracking-wide mb-2">
+              <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wide mb-2">
                 Pending — needs server ({pendingTasks.length})
               </h2>
               <div className="space-y-2">
                 {pendingTasks.map((t, i) => (
                   <div
                     key={t.id}
-                    className="bg-white rounded-xl border border-zinc-200 p-4 flex items-center gap-4"
+                    className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-4 flex items-center gap-4"
                   >
                     <div className="text-zinc-500 font-mono text-sm w-6 text-center shrink-0 select-none">
                       {i + 1}
@@ -176,14 +176,14 @@ export default function QueuePage() {
                     <div className="flex-1 min-w-0">
                       <Link
                         href={`/tasks/${t.id}`}
-                        className="font-medium text-zinc-900 hover:text-blue-700 truncate block transition-colors"
+                        className="font-medium text-zinc-900 dark:text-zinc-100 hover:text-blue-700 truncate block transition-colors"
                       >
                         {t.title}
                       </Link>
-                      <div className="flex items-center gap-3 mt-0.5 text-xs text-zinc-600">
+                      <div className="flex items-center gap-3 mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
                         <Link
                           href={`/projects/${t.project.id}`}
-                          className="hover:text-zinc-900 transition-colors"
+                          className="hover:text-zinc-900 dark:text-zinc-100 transition-colors"
                         >
                           {t.project.name}
                         </Link>
