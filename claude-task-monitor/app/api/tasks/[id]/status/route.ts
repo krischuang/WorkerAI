@@ -5,6 +5,7 @@ import { validateTransition } from "@/lib/task-transitions";
 import type { NextRequest } from "next/server";
 import type { $Enums } from "@/app/generated/prisma/client";
 import { recalculateProjectProgress } from "@/lib/project-progress";
+import { emitNotification } from "@/lib/notification";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -37,6 +38,9 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     });
     if (task.projectId) {
       recalculateProjectProgress(task.projectId).catch(() => {});
+    }
+    if (status === "completed" || status === "failed") {
+      emitNotification(id, status === "completed" ? "task.completed" : "task.failed").catch(() => {});
     }
     return Response.json(task);
   } catch (err) {
