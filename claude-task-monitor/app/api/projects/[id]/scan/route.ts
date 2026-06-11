@@ -26,7 +26,6 @@ export async function POST(request: NextRequest, ctx: Ctx) {
         server_busy: 409,
         no_completed_tasks: 400,
         ssh_failed: 502,
-        parse_failed: 422,
         timed_out: 504,
       };
       return NextResponse.json(
