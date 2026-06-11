@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { emitAudit } from "@/lib/audit";
+import { isTemplatePlaceholder } from "@/lib/scan-helpers";
 
 const MAX_SUGGESTIONS_PER_RUN = 10;
 
@@ -39,6 +40,7 @@ export async function generateSuggestionsFromScan(scanId: string): Promise<numbe
   for (const f of findings) {
     if (created >= MAX_SUGGESTIONS_PER_RUN) break;
     if (!f.title || !f.suggestedAction?.trim()) continue;
+    if (isTemplatePlaceholder(f.title) || isTemplatePlaceholder(f.suggestedAction)) continue;
     const normTitle = f.title.toLowerCase().trim();
     if (open.has(normTitle)) continue;
 
@@ -139,6 +141,7 @@ export async function generateSuggestionsForProject(projectId: string): Promise<
     for (const f of findings) {
       if (created >= MAX_SUGGESTIONS_PER_RUN) break;
       if (!f.title || !f.suggestedAction?.trim()) continue;
+      if (isTemplatePlaceholder(f.title) || isTemplatePlaceholder(f.suggestedAction)) continue;
       const normTitle = f.title.toLowerCase().trim();
       if (open.has(normTitle)) continue;
       const priority = severityToPriority(f.severity ?? "medium");

@@ -22,10 +22,6 @@
 import { execSSH } from "@/lib/ssh";
 import {
   type ClaudeUsageParsed,
-  parseUTCResetTime,
-  toSydney,
-  utcToSydney,
-  extractSection,
   parseUsage,
   looksLikeUsage,
   cleanPane,
@@ -145,6 +141,12 @@ export async function fetchClaudeUsageViaTmux(
   // session startup, token refresh, or after a server reboot.
   const AUTH_PREFLIGHT_RETRY_DELAYS_MS = [2_000, 2_000];
 
+  // Push any stale content (e.g. a previous task's rate-limit error) off the
+  // visible pane before capturing.  A blank Enter at Claude's idle prompt is
+  // a no-op and scrolls old text into the scrollback buffer so it falls
+  // outside the tail window that classifyPreflightPane inspects.
+  await execSSH(ssh, `tmux send-keys -t ${tmuxSession} "" Enter && sleep 0.3`, 5_000).catch(() => {});
+
   let before = "";
   let preflight = classifyPreflightPane(before); // sentinel; overwritten below
 
@@ -232,6 +234,14 @@ export async function fetchClaudeUsageViaTmux(
   // ── 6. Parse ─────────────────────────────────────────────────────────────
   const hasData = looksLikeUsage(captured);
   const parsed = hasData ? parseUsage(captured) : {};
+
+  if (!hasData) {
+    const tail = captured.split("\n").filter(l => l.trim()).slice(-10);
+    console.warn(
+      `[usage-parse-fail] session='${tmuxSession}' — last 10 non-empty lines of captured pane:\n` +
+      tail.map((l, i) => `  [${i}] ${JSON.stringify(l)}`).join("\n")
+    );
+  }
 
   return {
     success: hasData,

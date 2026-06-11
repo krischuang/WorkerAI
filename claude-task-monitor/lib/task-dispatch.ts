@@ -43,6 +43,7 @@ export async function tryDispatchTaskToServer(opts: {
   permissionMode: ClaudePermissionMode;
   task: { title: string; description?: string | null; projectName?: string | null };
   logText: string;
+  usageSnapshotPct?: number | null;
 }): Promise<DispatchOutcome> {
   // Lock per task (not per server) — sessions are independent so we only need
   // to prevent the same task from being dispatched twice simultaneously.
@@ -106,6 +107,7 @@ export async function tryDispatchTaskToServer(opts: {
           startedAt: new Date(),
           logText: opts.logText,
           retryNumber: taskData?.retryCount ?? 0,
+          usageSnapshotPct: opts.usageSnapshotPct ?? null,
         },
       });
     });
@@ -141,6 +143,7 @@ export async function tryDispatchTaskToAgent(opts: {
   tmuxSession: string;
   task: { title: string; description?: string | null; projectName?: string | null };
   logText: string;
+  usageSnapshotPct?: number | null;
 }): Promise<AgentDispatchOutcome> {
   // Validate before acquiring the lock — no SSH needed for this check.
   if (!opts.tmuxSession || !opts.tmuxSession.trim()) {
@@ -204,6 +207,7 @@ export async function tryDispatchTaskToAgent(opts: {
           startedAt: new Date(),
           logText: opts.logText,
           retryNumber: taskData?.retryCount ?? 0,
+          usageSnapshotPct: opts.usageSnapshotPct ?? null,
         },
       });
     });
