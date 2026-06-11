@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { PageHeader, Btn } from "@/app/_components/ui";
+import { ReportTabs } from "@/app/_components/ReportTabs";
 
 interface DailyReport {
   id: string;
@@ -28,18 +29,18 @@ export default function DailyReportPage() {
   const [selected, setSelected] = useState<DailyReport | null>(null);
   const [generating, setGenerating] = useState(false);
 
-  function loadReports() {
+  const loadReports = useCallback(() => {
     fetch("/api/reports/daily")
       .then((r) => r.json())
       .then((data) => {
         setReports(data);
-        if (data.length > 0 && !selected) setSelected(data[0]);
+        setSelected((prev) => prev ?? (data.length > 0 ? data[0] : null));
       });
-  }
+  }, []);
 
   useEffect(() => {
     loadReports();
-  }, []);
+  }, [loadReports]);
 
   async function generateReport() {
     setGenerating(true);
@@ -52,6 +53,7 @@ export default function DailyReportPage() {
 
   return (
     <div className="p-8 max-w-5xl">
+      <ReportTabs active="daily" />
       <PageHeader
         title="Daily Report"
         action={
@@ -75,9 +77,9 @@ export default function DailyReportPage() {
             <p className="text-2xl font-bold tracking-tight text-red-700">{selected.failedCount}</p>
             <p className="text-xs text-red-700 mt-0.5 font-medium">Failed</p>
           </div>
-          <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-4 text-center">
-            <p className="text-2xl font-bold tracking-tight text-zinc-700">{selected.pendingCount}</p>
-            <p className="text-xs text-zinc-700 mt-0.5 font-medium">Pending</p>
+          <div className="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-700 rounded-xl p-4 text-center">
+            <p className="text-2xl font-bold tracking-tight text-zinc-700 dark:text-zinc-300">{selected.pendingCount}</p>
+            <p className="text-xs text-zinc-700 dark:text-zinc-300 mt-0.5 font-medium">Pending</p>
           </div>
           <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 text-center">
             <p className="text-2xl font-bold tracking-tight text-violet-700">{selected.queuedCount}</p>
@@ -102,7 +104,7 @@ export default function DailyReportPage() {
 
       <div className="grid grid-cols-4 gap-6">
         <div className="col-span-1">
-          <p className="text-xs font-semibold text-zinc-600 uppercase tracking-wide mb-3">
+          <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wide mb-3">
             History
           </p>
           <ul className="space-y-1">
@@ -113,7 +115,7 @@ export default function DailyReportPage() {
                   className={`w-full text-left text-sm px-3 py-2 rounded-lg transition-colors flex items-center gap-1.5 ${
                     selected?.id === r.id
                       ? "bg-zinc-900 text-white font-medium"
-                      : "text-zinc-700 hover:bg-zinc-100"
+                      : "text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 dark:bg-zinc-800"
                   }`}
                 >
                   <span>
@@ -127,7 +129,7 @@ export default function DailyReportPage() {
                       className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
                         selected?.id === r.id
                           ? "bg-zinc-700 text-zinc-300"
-                          : "bg-zinc-200 text-zinc-600"
+                          : "bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-400"
                       }`}
                     >
                       Auto
@@ -137,17 +139,17 @@ export default function DailyReportPage() {
               </li>
             ))}
             {reports.length === 0 && (
-              <p className="text-xs text-zinc-600">No reports yet.</p>
+              <p className="text-xs text-zinc-600 dark:text-zinc-400">No reports yet.</p>
             )}
           </ul>
         </div>
 
         <div className="col-span-3">
           {selected?.reportText ? (
-            <div className="bg-white rounded-xl border border-zinc-200 p-6">
+            <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-6">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
-                  <h2 className="font-semibold text-zinc-900">
+                  <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">
                     {new Date(selected.date).toDateString()}
                   </h2>
                   {selected.generatedBy === "auto" && (
@@ -168,13 +170,13 @@ export default function DailyReportPage() {
                   </span>
                 </div>
               </div>
-              <pre className="text-sm text-zinc-800 whitespace-pre-wrap font-sans leading-relaxed">
+              <pre className="text-sm text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap font-sans leading-relaxed">
                 {selected.reportText}
               </pre>
             </div>
           ) : (
-            <div className="bg-white rounded-xl border border-zinc-200 p-10 text-center">
-              <p className="text-sm text-zinc-600">
+            <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-10 text-center">
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">
                 Click &ldquo;Generate Today&apos;s Report&rdquo; to create a report from current task data.
               </p>
             </div>
