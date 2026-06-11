@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { validateTaskCreate } from "@/lib/task-validation";
+import { emitAudit } from "@/lib/audit";
+import { recalculateProjectProgress } from "@/lib/project-progress";
 
 export async function GET(request: Request) {
   try {
@@ -9,6 +11,8 @@ export async function GET(request: Request) {
     const status = searchParams.get("status");
     const agentId = searchParams.get("agentId");
     const serverId = searchParams.get("serverId");
+    const stalled = searchParams.get("stalled") === "true";
+    const reviewStatus = searchParams.get("reviewStatus");
 
     const tasks = await prisma.task.findMany({
       where: {
@@ -16,6 +20,9 @@ export async function GET(request: Request) {
         ...(status && { status: status as never }),
         ...(agentId && { agentId }),
         ...(serverId && { serverId }),
+        // stalled=true: running tasks that have a confirmed stall marker
+        ...(stalled && { status: "running", stallDetectedAt: { not: null } }),
+        ...(reviewStatus && { reviewStatus: reviewStatus as never }),
       },
       include: {
         project: { select: { name: true, priority: true } },
@@ -61,6 +68,8 @@ export async function POST(request: Request) {
       status,
       estimatedCostLevel,
       taskType,
+      timeoutMinutes,
+      maxRetries,
     } = body;
 
     const validationErr = validateTaskCreate(body);
@@ -77,9 +86,20 @@ export async function POST(request: Request) {
         status: status ?? "pending",
         estimatedCostLevel: estimatedCostLevel ?? "medium",
         taskType: taskType ?? "coding",
+        ...(timeoutMinutes != null && { timeoutMinutes: Number(timeoutMinutes) }),
+        ...(maxRetries != null && { maxRetries: Number(maxRetries) }),
       },
       include: { project: { select: { name: true } } },
     });
+    await emitAudit({
+      entityType: "task",
+      entityId: task.id,
+      eventType: "task.created",
+      actorType: "user",
+      payload: { projectId, title, priority: task.priority, status: task.status, taskType: task.taskType },
+    });
+    recalculateProjectProgress(task.projectId).catch(() => {});
+
     return Response.json(task, { status: 201 });
   } catch (err) {
     return serverError("tasks POST", err);

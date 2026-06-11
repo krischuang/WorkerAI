@@ -4,6 +4,9 @@ import { serverError } from "@/lib/api-error";
 import { validateTaskUpdate } from "@/lib/task-validation";
 import type { NextRequest } from "next/server";
 import { USAGE_THRESHOLD } from "@/lib/constants";
+import { resolveTaskTimeout, computeTimeoutExpiresAt } from "@/lib/task-timeout";
+import { emitAudit } from "@/lib/audit";
+import { recalculateProjectProgress } from "@/lib/project-progress";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -11,6 +14,7 @@ const SERVER_USAGE_SELECT = {
   id: true,
   name: true,
   host: true,
+  defaultTaskTimeoutMinutes: true,
   claudeSessionPct: true,
   claudeSessionResets: true,
   claudeSessionResetsAt: true,
@@ -28,6 +32,7 @@ const AGENT_USAGE_SELECT = {
   workDir: true,
   status: true,
   claudePermissionMode: true,
+  defaultTaskTimeoutMinutes: true,
   claudeSessionPct: true,
   claudeSessionResets: true,
   claudeSessionResetsAt: true,
@@ -50,7 +55,20 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     const { id } = await ctx.params;
     const task = await prisma.task.findUnique({ where: { id }, include: INCLUDE });
     if (!task) return Response.json({ error: "Not found" }, { status: 404 });
-    return Response.json(task);
+
+    const latestRunningLog = task.executionLogs.find(
+      (l) => l.status === "running" && !l.finishedAt
+    );
+    const timeoutMin = resolveTaskTimeout(
+      task.timeoutMinutes,
+      task.server?.defaultTaskTimeoutMinutes ?? null,
+      task.agent?.defaultTaskTimeoutMinutes ?? null,
+    );
+    const timeoutExpiresAt = latestRunningLog
+      ? computeTimeoutExpiresAt(latestRunningLog.startedAt, timeoutMin)
+      : null;
+
+    return Response.json({ ...task, timeoutExpiresAt, resolvedTimeoutMinutes: timeoutMin });
   } catch (err) {
     return serverError("tasks/[id] GET", err);
   }
@@ -62,7 +80,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     const body = await request.json();
     const {
       title, description, priority, status, estimatedCostLevel,
-      taskType, resultSummary, nextAction, serverId, agentId,
+      taskType, resultSummary, nextAction, serverId, agentId, timeoutMinutes, maxRetries,
     } = body;
 
     const validationErr = validateTaskUpdate(body);
@@ -104,6 +122,8 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(resolvedServerId !== undefined && { serverId: resolvedServerId || null }),
         ...(serverId !== undefined && agentId === undefined && { serverId: serverId || null }),
         ...(autoStatus && { status: autoStatus }),
+        ...(timeoutMinutes !== undefined && { timeoutMinutes: timeoutMinutes === null ? null : Number(timeoutMinutes) }),
+        ...(maxRetries !== undefined && { maxRetries: Number(maxRetries) }),
       },
       include: {
         project: { select: { name: true } },
@@ -111,6 +131,19 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         agent: { select: AGENT_USAGE_SELECT },
       },
     });
+
+    if (autoStatus === "queued") {
+      await emitAudit({
+        entityType: "task",
+        entityId: id,
+        eventType: "task.queued",
+        actorType: "user",
+        payload: {
+          ...(agentId ? { agentId } : {}),
+          ...(resolvedServerId ? { serverId: resolvedServerId } : {}),
+        },
+      });
+    }
 
     // Auto-run: try to send task immediately on assignment
     if (autoStatus === "queued") {
@@ -171,6 +204,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       }
     }
 
+    recalculateProjectProgress(task.projectId).catch(() => {});
     return Response.json(task);
   } catch (err) {
     return serverError("tasks/[id] PUT", err);
@@ -180,7 +214,9 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
 export async function DELETE(_req: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+    const task = await prisma.task.findUnique({ where: { id }, select: { projectId: true } });
     await prisma.task.delete({ where: { id } });
+    if (task?.projectId) recalculateProjectProgress(task.projectId).catch(() => {});
     return new Response(null, { status: 204 });
   } catch (err) {
     return serverError("tasks/[id] DELETE", err);
