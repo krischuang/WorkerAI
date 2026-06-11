@@ -47,9 +47,7 @@ interface PoolEntry {
 }
 
 declare global {
-  // eslint-disable-next-line no-var
   var _sshPool: Map<string, PoolEntry> | undefined;
-  // eslint-disable-next-line no-var
   var _sshPoolCleanupStarted: boolean | undefined;
 }
 

@@ -26,7 +26,8 @@ import {
   type ClaudePermissionMode,
 } from "./lib/ssh-claude-tmux";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "./lib/task-dispatch";
-import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS, POST_RESET_RESTART_BUFFER_MS } from "./lib/constants";
+import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS, POST_RESET_RESTART_BUFFER_MS, estimateCostUsd } from "./lib/constants";
+import { parseTokenCounts } from "./lib/usage-parser";
 import { resolveTaskTimeout } from "./lib/task-timeout";
 import { runHealthChecks } from "./lib/worker-health";
 import { runAutoRecovery } from "./lib/auto-recovery";
@@ -53,10 +54,14 @@ import {
 import { updateAllServerCapacity } from "./lib/server-capacity";
 import { generateDailyReport, todaysReportExists } from "./lib/daily-report-service";
 import { generateWeeklyAnalytics, priorWeekStart, weeklyAnalyticsExists } from "./lib/weekly-analytics-service";
+import { generateWeeklyReport, mondayOfWeek, weeklyReportExists } from "./lib/weekly-report-service";
+import { generateMonthlyReport, firstOfMonth, monthlyReportExists } from "./lib/monthly-report-service";
 import { unblockDependents } from "./lib/task-dependency";
 import { processReviewQueue } from "./lib/task-service";
 import { runDueProjectScans } from "./lib/project-scan-service";
 import { advanceImprovementCycles, startDueImprovementCycles } from "./lib/improvement-cycle-service";
+import { emitNotification } from "./lib/notification";
+import { scrubPaneCapture } from "./lib/pane-scrubber";
 
 const TAG = "[usage-poller]";
 
@@ -69,6 +74,8 @@ const g = globalThis as unknown as {
   _pollerCycleCount?: number;
   _lastArchivalDate?: string | null;
   _lastDailyReportDate?: string | null;
+  _lastWeeklyReportDate?: string | null;
+  _lastMonthlyReportDate?: string | null;
   _lastWeeklyAnalyticsDate?: string | null;
   _lastProjectScanDate?: string | null;
   // zombie-detection pane-line baseline (owned by lib/zombie-detection.ts)
@@ -86,6 +93,8 @@ if (!g._usagePollerStarted) {
   if (g._pollerCycleCount === undefined) g._pollerCycleCount = 0;
   if (g._lastArchivalDate === undefined) g._lastArchivalDate = null;
   if (g._lastDailyReportDate === undefined) g._lastDailyReportDate = null;
+  if (g._lastWeeklyReportDate === undefined) g._lastWeeklyReportDate = null;
+  if (g._lastMonthlyReportDate === undefined) g._lastMonthlyReportDate = null;
   if (g._lastWeeklyAnalyticsDate === undefined) g._lastWeeklyAnalyticsDate = null;
   if (g._lastProjectScanDate === undefined) g._lastProjectScanDate = null;
   if (!g._pendingServerRestarts) g._pendingServerRestarts = new Set();
@@ -141,6 +150,61 @@ async function runDailyReportIfNeeded() {
   } catch (err) {
     console.error(`${TAG} Auto daily report threw:`, err);
   }
+}
+
+async function runWeeklyReportIfNeeded() {
+  const now = new Date();
+  // Only run on Mondays at or after 2 AM UTC
+  if (now.getUTCDay() !== 1 || now.getUTCHours() < 2) return;
+  const weekKey = now.toISOString().slice(0, 10);
+  if (g._lastWeeklyReportDate === weekKey) return;
+  try {
+    const weekStart = mondayOfWeek(now);
+    const exists = await weeklyReportExists(weekStart);
+    if (!exists) {
+      await generateWeeklyReport(weekStart, "auto");
+      console.log(`${TAG} Auto weekly report generated for week starting ${weekKey}`);
+    }
+    g._lastWeeklyReportDate = weekKey;
+  } catch (err) {
+    console.error(`${TAG} Auto weekly report threw:`, err);
+  }
+}
+
+async function runMonthlyReportIfNeeded() {
+  const now = new Date();
+  // Only run on the 1st of each month at or after 3 AM UTC
+  if (now.getUTCDate() !== 1 || now.getUTCHours() < 3) return;
+  const monthKey = now.toISOString().slice(0, 7); // "YYYY-MM"
+  if (g._lastMonthlyReportDate === monthKey) return;
+  try {
+    const monthStart = firstOfMonth(now);
+    const exists = await monthlyReportExists(monthStart);
+    if (!exists) {
+      await generateMonthlyReport(monthStart, "auto");
+      console.log(`${TAG} Auto monthly report generated for ${monthKey}`);
+    }
+    g._lastMonthlyReportDate = monthKey;
+  } catch (err) {
+    console.error(`${TAG} Auto monthly report threw:`, err);
+  }
+}
+
+/**
+ * Try to compute tokenCount and actualCostUsd from a /usage raw output string.
+ * Returns null fields if token counts are absent in the raw output.
+ */
+function computeCostFromRaw(
+  rawUsage: string | null,
+): { tokenCount: number | null; actualCostUsd: number | null } {
+  if (!rawUsage) return { tokenCount: null, actualCostUsd: null };
+  const { inputTokens, outputTokens, modelName } = parseTokenCounts(rawUsage);
+  if (inputTokens == null && outputTokens == null) return { tokenCount: null, actualCostUsd: null };
+  const input = inputTokens ?? 0;
+  const output = outputTokens ?? 0;
+  const total = input + output;
+  const cost = estimateCostUsd(input, output, modelName ?? "default");
+  return { tokenCount: total, actualCostUsd: Math.round(cost * 1_000_000) / 1_000_000 };
 }
 
 function startPoller() {
@@ -299,17 +363,12 @@ function startPoller() {
             (result.error ?? "").includes("not found");
 
           if (isTmuxMissing) {
-            offlineServerIds.add(srv.id);
-            try {
-              await prisma.server.update({
-                where: { id: srv.id },
-                data: { status: "failed", claudeUsageFetchedAt: new Date() },
-              });
-            } catch (dbErr) {
-              console.error(`${TAG} ${srv.name}: failed to mark server offline:`, dbErr);
-            }
-            console.log(
-              `${TAG} ${srv.name}: tmux session '${srv.tmuxSession}' not found — marked offline, queue advance skipped`
+            // The server is reachable (SSH worked) but has no server-level Claude
+            // session.  Don't mark it failed — agents on this server operate
+            // independently and server-direct tasks use per-task sessions that
+            // don't depend on this shared session.
+            console.warn(
+              `${TAG} ${srv.name}: no server-level Claude tmux session '${srv.tmuxSession}' — usage skipped (agents unaffected)`
             );
           } else {
             console.warn(
@@ -514,6 +573,7 @@ function startPoller() {
       taskTmuxSession: string | null;
       timeoutMinutes: number | null;
       updatedAt: Date;
+      disablePaneCapture: boolean;
       executionLogs: { id: string; startedAt: Date; status: string; finishedAt: Date | null }[];
       server: {
         id: string;
@@ -526,6 +586,7 @@ function startPoller() {
         claudePermissionMode: string | null;
         claudeSessionPct: number | null;
         claudeWeekPct: number | null;
+        claudeUsageRaw: string | null;
         defaultTaskTimeoutMinutes: number | null;
       } | null;
     }[] = [];
@@ -542,6 +603,7 @@ function startPoller() {
           taskTmuxSession: true,
           timeoutMinutes: true,
           updatedAt: true,
+          disablePaneCapture: true,
           executionLogs: {
             where: { status: "running", finishedAt: null },
             orderBy: { startedAt: "desc" },
@@ -560,6 +622,7 @@ function startPoller() {
               claudePermissionMode: true,
               claudeSessionPct: true,
               claudeWeekPct: true,
+              claudeUsageRaw: true,
               defaultTaskTimeoutMinutes: true,
             },
           },
@@ -625,6 +688,7 @@ function startPoller() {
             clearDispatchBackoff(task.id, backoff);
             console.log(`[TASK_TIMEOUT] taskId="${task.id}" timeoutMin=${timeoutMin}`);
             emitAudit({ entityType: "task", entityId: task.id, eventType: "task.timeout", actorType: "poller", payload: { timeoutMin, serverId } }).catch(() => {});
+            emitNotification(task.id, "task.failed").catch(() => {});
             recalculateProjectProgress(task.projectId).catch(() => {});
             await evaluateRetry(task.id, "timeout").catch((err) => {
               console.error(`${TAG} Task ${task.id}: retry evaluation failed:`, err);
@@ -687,10 +751,13 @@ function startPoller() {
 
         try {
           const finishedAt = new Date();
-          const paneCapture = completionResult.paneText
-            ? lastNLines(completionResult.paneText, 200)
+          const paneCapture = (!task.disablePaneCapture && completionResult.paneText)
+            ? scrubPaneCapture(lastNLines(completionResult.paneText, 200))
             : null;
           const exitReason = completedHowToExitReason(completedHow);
+
+          // Compute cost from current server usage snapshot (after task ran)
+          const costData = computeCostFromRaw(srv.claudeUsageRaw ?? null);
 
           await prisma.$transaction(async (tx) => {
             const latestLog = await tx.executionLog.findFirst({
@@ -709,6 +776,8 @@ function startPoller() {
                   durationMs,
                   exitReason,
                   paneCapture,
+                  tokenCount: costData.tokenCount,
+                  actualCostUsd: costData.actualCostUsd,
                 },
               });
             }
@@ -717,6 +786,7 @@ function startPoller() {
           clearDispatchBackoff(task.id, backoff);
           console.log(`[TASK_FINISHED] taskId="${task.id}" detectedBy="${completedHow}"`);
           emitAudit({ entityType: "task", entityId: task.id, eventType: "task.completed", actorType: "poller", payload: { detectedBy: completedHow, serverId } }).catch(() => {});
+          emitNotification(task.id, "task.completed").catch(() => {});
           recalculateProjectProgress(task.projectId).catch(() => {});
           unblockDependents(task.id).catch(() => {});
 
@@ -759,6 +829,7 @@ function startPoller() {
       tmuxOutputOffset: number | null;
       timeoutMinutes: number | null;
       updatedAt: Date;
+      disablePaneCapture: boolean;
       executionLogs: { id: string; startedAt: Date; status: string; finishedAt: Date | null }[];
       agent: {
         id: string;
@@ -767,6 +838,7 @@ function startPoller() {
         claudePermissionMode: string;
         claudeSessionPct: number | null;
         claudeWeekPct: number | null;
+        claudeUsageRaw: string | null;
         defaultTaskTimeoutMinutes: number | null;
         server: {
           host: string;
@@ -788,6 +860,7 @@ function startPoller() {
           tmuxOutputOffset: true,
           timeoutMinutes: true,
           updatedAt: true,
+          disablePaneCapture: true,
           executionLogs: {
             where: { status: "running", finishedAt: null },
             orderBy: { startedAt: "desc" },
@@ -802,6 +875,7 @@ function startPoller() {
               claudePermissionMode: true,
               claudeSessionPct: true,
               claudeWeekPct: true,
+              claudeUsageRaw: true,
               defaultTaskTimeoutMinutes: true,
               server: {
                 select: { host: true, port: true, username: true, sshKeyPath: true },
@@ -825,6 +899,7 @@ function startPoller() {
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
       startedAt: Date;
+      disablePaneCapture: boolean;
       // Per-task timeout info — keyed by taskId for timeout enforcement
       taskTimeouts: Map<string, { timeoutMinutes: number | null; logId: string | null; logStartedAt: Date | null }>;
     };
@@ -838,6 +913,7 @@ function startPoller() {
       if (entry) {
         entry.taskIds.push(task.id);
         entry.taskTimeouts.set(task.id, timeoutEntry);
+        if (task.disablePaneCapture) entry.disablePaneCapture = true;
       } else {
         byAgent.set(task.agentId, {
           agent: task.agent,
@@ -845,13 +921,14 @@ function startPoller() {
           completionNonce: task.completionNonce,
           tmuxOutputOffset: task.tmuxOutputOffset,
           startedAt: task.updatedAt,
+          disablePaneCapture: task.disablePaneCapture,
           taskTimeouts: new Map([[task.id, timeoutEntry]]),
         });
       }
     }
 
     await Promise.allSettled(
-      [...byAgent.entries()].map(async ([agentId, { agent, taskIds, completionNonce, tmuxOutputOffset, startedAt, taskTimeouts }]) => {
+      [...byAgent.entries()].map(async ([agentId, { agent, taskIds, completionNonce, tmuxOutputOffset, startedAt, disablePaneCapture: agentGroupDisablePaneCapture, taskTimeouts }]) => {
         if (offlineAgentIds.has(agentId)) {
           console.log(
             `${TAG} Agent ${agent.name}: skipping idle check — offline (tmux session missing)`
@@ -895,6 +972,7 @@ function startPoller() {
             timedOutTaskIds.push(taskId);
             console.log(`[TASK_TIMEOUT] taskId="${taskId}" agentId="${agentId}" timeoutMin=${timeoutMin}`);
             emitAudit({ entityType: "task", entityId: taskId, eventType: "task.timeout", actorType: "poller", payload: { timeoutMin, agentId } }).catch(() => {});
+            emitNotification(taskId, "task.failed").catch(() => {});
             const projIdTimeout = agentTaskProjectId.get(taskId);
             if (projIdTimeout) recalculateProjectProgress(projIdTimeout).catch(() => {});
             await evaluateRetry(taskId, "timeout").catch((err) => {
@@ -951,10 +1029,12 @@ function startPoller() {
         if (!completedHow) return;
 
         const agentFinishedAt = new Date();
-        const agentPaneCapture = completionResult.paneText
-          ? lastNLines(completionResult.paneText, 200)
+        const agentPaneCapture = (!agentGroupDisablePaneCapture && completionResult.paneText)
+          ? scrubPaneCapture(lastNLines(completionResult.paneText, 200))
           : null;
         const agentExitReason = completedHowToExitReason(completedHow);
+
+        const agentCostData = computeCostFromRaw(agent.claudeUsageRaw ?? null);
 
         for (const taskId of remainingTaskIds) {
           try {
@@ -980,6 +1060,8 @@ function startPoller() {
                     durationMs,
                     exitReason: agentExitReason,
                     paneCapture: agentPaneCapture,
+                    tokenCount: agentCostData.tokenCount,
+                    actualCostUsd: agentCostData.actualCostUsd,
                   },
                 });
               }
@@ -988,6 +1070,7 @@ function startPoller() {
             clearDispatchBackoff(taskId, backoff);
             console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${completedHow}"`);
             emitAudit({ entityType: "task", entityId: taskId, eventType: "task.completed", actorType: "poller", payload: { detectedBy: completedHow, agentId } }).catch(() => {});
+            emitNotification(taskId, "task.completed").catch(() => {});
             const projIdCompleted = agentTaskProjectId.get(taskId);
             if (projIdCompleted) {
               recalculateProjectProgress(projIdCompleted).catch(() => {});
@@ -1061,6 +1144,7 @@ function startPoller() {
           tmuxSession: agent.tmuxSession,
           task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
           logText: `Auto-started from queue on agent "${agent.name}" — mode: ${agent.claudePermissionMode}`,
+          usageSnapshotPct: agent.claudeSessionPct,
         });
 
         if (outcome.ok) {
@@ -1087,6 +1171,28 @@ function startPoller() {
           console.error(`${TAG} Agent completion check for ${agent.name} threw:`, results[i].reason);
       });
     });
+
+    // ── 2c. Scheduled task dispatch — auto-queue pending tasks whose scheduledFor has passed ──
+    try {
+      const now = new Date();
+      const dueTasks = await prisma.task.findMany({
+        where: { status: "pending", scheduledFor: { lte: now } },
+        select: { id: true, title: true, projectId: true },
+      });
+      for (const t of dueTasks) {
+        await prisma.task.update({ where: { id: t.id }, data: { status: "queued", scheduledFor: null } });
+        emitAudit({
+          entityType: "task",
+          entityId: t.id,
+          eventType: "task.queued",
+          actorType: "system",
+          payload: { reason: "scheduled_dispatch" },
+        }).catch(() => {});
+        console.log(`${TAG} Scheduled dispatch: queued task ${t.id} (${t.title})`);
+      }
+    } catch (err) {
+      console.error(`${TAG} scheduled task dispatch threw:`, err);
+    }
 
     // ── 3. Start queued server-direct tasks on servers with capacity ─────────
     // Per-task sessions allow parallel execution — no idle check needed.
@@ -1211,6 +1317,7 @@ function startPoller() {
           permissionMode: srv.claudePermissionMode as ClaudePermissionMode,
           task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
           logText: `Auto-started from queue on server "${srv.name}" (${srv.host}) — mode: ${srv.claudePermissionMode}`,
+          usageSnapshotPct: srv.claudeSessionPct,
         });
 
         if (outcome.ok) {
@@ -1391,6 +1498,7 @@ function startPoller() {
           tmuxSession: agent.tmuxSession,
           task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
           logText: `Auto-started from queue on agent "${agent.name}" — mode: ${agent.claudePermissionMode}`,
+          usageSnapshotPct: agent.claudeSessionPct,
         });
 
         if (outcome.ok) {
@@ -1470,6 +1578,12 @@ function startPoller() {
 
     // ── 10. Weekly analytics (Monday 1 AM UTC, once per week) ────────────────
     await runWeeklyAnalyticsIfNeeded();
+
+    // ── 10a. Weekly report (Monday 2 AM UTC, once per week) ──────────────────
+    await runWeeklyReportIfNeeded();
+
+    // ── 10b. Monthly report (1st of month 3 AM UTC, once per month) ──────────
+    await runMonthlyReportIfNeeded();
 
     // ── 11. Auto-review queue (every cycle, max 3 reviews) ───────────────────
     try {

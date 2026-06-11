@@ -18,31 +18,21 @@
 import { prisma } from "@/lib/prisma";
 import { execSSH } from "@/lib/ssh";
 import { killTaskTmuxSession } from "@/lib/ssh-claude-tmux";
+import { emitNotification } from "@/lib/notification";
 
 const TAG = "[zombie]";
 
 // ─── SystemConfig helpers ─────────────────────────────────────────────────────
 
 const DEFAULT_STALL_MIN = 30;
-const DEFAULT_CONFIRM_CYCLES = 2; // unused in per-task confirmation; kept for future use
-
 export async function getSystemConfig(key: string, defaultValue: string): Promise<string> {
   const row = await prisma.systemConfig.findUnique({ where: { key } });
   return row?.value ?? defaultValue;
 }
 
-export async function setSystemConfig(key: string, value: string): Promise<void> {
-  await prisma.systemConfig.upsert({
-    where: { key },
-    create: { key, value },
-    update: { value },
-  });
-}
-
 // ─── In-memory pane-line baseline ────────────────────────────────────────────
 
 declare global {
-  // eslint-disable-next-line no-var
   var _zombiePaneLines: Map<string, number> | undefined;
 }
 
@@ -95,6 +85,7 @@ export async function forceFailTask(
     }
   });
   getPaneLineMap().delete(taskId);
+  emitNotification(taskId, "task.failed").catch(() => {});
 }
 
 // ─── Main zombie scan ─────────────────────────────────────────────────────────
