@@ -13,29 +13,42 @@ export async function GET(request: Request) {
     const serverId = searchParams.get("serverId");
     const stalled = searchParams.get("stalled") === "true";
     const reviewStatus = searchParams.get("reviewStatus");
+    const page = Math.max(1, parseInt(searchParams.get("page") ?? "1") || 1);
+    const limit = Math.min(Math.max(1, parseInt(searchParams.get("limit") ?? "50") || 50), 200);
 
-    const tasks = await prisma.task.findMany({
-      where: {
-        ...(projectId && { projectId }),
-        ...(status && { status: status as never }),
-        ...(agentId && { agentId }),
-        ...(serverId && { serverId }),
-        // stalled=true: running tasks that have a confirmed stall marker
-        ...(stalled && { status: "running", stallDetectedAt: { not: null } }),
-        ...(reviewStatus && { reviewStatus: reviewStatus as never }),
+    const where = {
+      ...(projectId && { projectId }),
+      ...(status && { status: status as never }),
+      ...(agentId && { agentId }),
+      ...(serverId && { serverId }),
+      // stalled=true: running tasks that have a confirmed stall marker
+      ...(stalled && { status: "running", stallDetectedAt: { not: null } }),
+      ...(reviewStatus && { reviewStatus: reviewStatus as never }),
+    };
+
+    const include = {
+      project: { select: { name: true, priority: true } },
+      _count: { select: { executionLogs: true } },
+      executionLogs: {
+        select: { startedAt: true, finishedAt: true, actualCostUsd: true },
+        orderBy: { startedAt: "desc" as const },
+        take: 1,
       },
-      include: {
-        project: { select: { name: true, priority: true } },
-        _count: { select: { executionLogs: true } },
-        executionLogs: {
-          select: { startedAt: true, finishedAt: true },
-          orderBy: { startedAt: "desc" },
-          take: 1,
-        },
-      },
-      orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
-    });
-    return Response.json(tasks);
+    };
+
+    const [tasks, total, completedCount] = await Promise.all([
+      prisma.task.findMany({
+        where: where as never,
+        include,
+        orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.task.count({ where: where as never }),
+      prisma.task.count({ where: { status: "completed" } }),
+    ]);
+
+    return Response.json({ tasks, total, page, limit, completedCount });
   } catch (err) {
     return serverError("tasks GET", err);
   }

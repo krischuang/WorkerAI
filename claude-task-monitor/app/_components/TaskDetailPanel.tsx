@@ -13,6 +13,7 @@ import {
   FormField,
   inputCls,
 } from "@/app/_components/ui";
+import { DependencyManager } from "@/app/_components/DependencyManager";
 
 interface ServerUsage {
   id: string;
@@ -85,6 +86,7 @@ interface Task {
   timeoutExpiresAt: string | null;
   resultSummary: string | null;
   nextAction: string | null;
+  scheduledFor: string | null;
   createdAt: string;
   updatedAt: string;
   project: { id: string; name: string; priority: string };
@@ -104,6 +106,10 @@ interface BlockInfo {
 }
 
 const THRESHOLD = 90;
+
+// Shared backoff schedule for loadTask retries and the completion poller.
+const FETCH_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
+const FETCH_MAX_ATTEMPTS = 8;
 
 function pctColor(pct: number) {
   if (pct >= THRESHOLD) return "bg-red-500";
@@ -354,10 +360,15 @@ export function TaskDetailPanel({
     outputSummary: "",
   });
   const [summaryForm, setSummaryForm] = useState({ resultSummary: "", nextAction: "" });
+  const [scheduleInput, setScheduleInput] = useState("");
+  const [savingSchedule, setSavingSchedule] = useState(false);
 
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadAttemptRef   = useRef(0);
+  const pollAttemptRef   = useRef(0);
+  const [pollConnState, setPollConnState] = useState<"ok" | "retrying" | "offline">("ok");
 
-  function loadTask() {
+  function loadTask(attempt = 0) {
     fetch(`/api/tasks/${id}`)
       .then((r) => {
         if (!r.ok) {
@@ -365,6 +376,8 @@ export function TaskDetailPanel({
           router.push("/tasks");
           return null;
         }
+        loadAttemptRef.current = 0;
+        setPollConnState("ok");
         return r.json();
       })
       .then((data: Task | null) => {
@@ -376,6 +389,18 @@ export function TaskDetailPanel({
         });
         if (data.server) setSelectedServerId(data.server.id);
         if (data.agent) setSelectedAgentId(data.agent.id);
+      })
+      .catch(() => {
+        // Network error — retry with exponential backoff.
+        const next = attempt + 1;
+        loadAttemptRef.current = next;
+        if (next <= FETCH_MAX_ATTEMPTS) {
+          const delay = FETCH_BACKOFF_MS[Math.min(attempt, FETCH_BACKOFF_MS.length - 1)];
+          setPollConnState("retrying");
+          retryTimerRef.current = setTimeout(() => loadTask(next), delay);
+        } else {
+          setPollConnState("offline");
+        }
       });
   }
 
@@ -438,18 +463,50 @@ export function TaskDetailPanel({
     if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
   }, []);
 
+  // Completion poller with exponential backoff on failure.
+  // Uses recursive setTimeout so failure delays don't disturb the success cadence.
   useEffect(() => {
-    if (task?.status !== "running") return;
+    if (task?.status !== "running") {
+      setPollConnState("ok");
+      return;
+    }
 
-    const poll = async () => {
-      const res = await fetch(`/api/tasks/${id}/check-completion`, { method: "POST" });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.completed) loadTask();
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function pollOnce() {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`/api/tasks/${id}/check-completion`, { method: "POST" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        pollAttemptRef.current = 0;
+        setPollConnState("ok");
+        if (data.completed) { loadTask(); return; }
+        // Schedule next regular poll after success.
+        if (!cancelled) timer = setTimeout(pollOnce, 30_000);
+      } catch {
+        if (cancelled) return;
+        const attempt = pollAttemptRef.current;
+        const next = attempt + 1;
+        pollAttemptRef.current = next;
+        const delay = FETCH_BACKOFF_MS[Math.min(attempt, FETCH_BACKOFF_MS.length - 1)];
+        if (next <= FETCH_MAX_ATTEMPTS) {
+          setPollConnState("retrying");
+          timer = setTimeout(pollOnce, delay);
+        } else {
+          setPollConnState("offline");
+        }
+      }
+    }
+
+    // First poll after the standard 30 s interval.
+    timer = setTimeout(pollOnce, 30_000);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-
-    const interval = setInterval(poll, 30_000);
-    return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task?.status, id]);
 
@@ -508,6 +565,17 @@ export function TaskDetailPanel({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     });
+    loadTask();
+  }
+
+  async function saveSchedule(isoOrNull: string | null) {
+    setSavingSchedule(true);
+    await fetch(`/api/tasks/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scheduledFor: isoOrNull }),
+    }).catch(() => {});
+    setSavingSchedule(false);
     loadTask();
   }
 
@@ -596,6 +664,19 @@ export function TaskDetailPanel({
         <div className="flex items-center gap-2 shrink-0 ml-4">
           <PriorityBadge priority={task.priority} />
           <StatusBadge status={task.status} />
+          {/* Poll connection status badge */}
+          {pollConnState === "retrying" && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+              <span className="w-1 h-1 rounded-full bg-amber-500 animate-pulse" />
+              Reconnecting…
+            </span>
+          )}
+          {pollConnState === "offline" && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">
+              <span className="w-1 h-1 rounded-full bg-red-500" />
+              Offline
+            </span>
+          )}
           {task.status === "completed" && (
             <Btn
               variant="secondary"
@@ -826,6 +907,63 @@ export function TaskDetailPanel({
           </>
         )}
       </section>
+
+      {/* ── Dependencies ─────────────────────────────────────────────────────── */}
+      <DependencyManager taskId={id} projectId={task.project.id} />
+
+      {/* ── Schedule Run ────────────────────────────────────────────────────── */}
+      {(task.status === "pending" || task.scheduledFor) && (
+        <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
+          <h2 className="font-semibold text-zinc-900 mb-3">Schedule Run</h2>
+          {task.scheduledFor ? (
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-2 text-sm text-zinc-700">
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span>
+                  Scheduled for{" "}
+                  <strong>
+                    {new Date(task.scheduledFor).toLocaleString(undefined, {
+                      weekday: "short", month: "short", day: "numeric",
+                      hour: "numeric", minute: "2-digit",
+                    })}
+                  </strong>
+                </span>
+              </div>
+              <button
+                onClick={() => saveSchedule(null)}
+                disabled={savingSchedule}
+                className="text-xs text-red-600 hover:text-red-800 font-medium underline disabled:opacity-50"
+              >
+                {savingSchedule ? "Cancelling…" : "Cancel schedule"}
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-end gap-2 flex-wrap">
+              <div className="flex-1 min-w-[200px]">
+                <label className="block text-xs font-medium text-zinc-700 mb-1">Run at</label>
+                <input
+                  type="datetime-local"
+                  value={scheduleInput}
+                  onChange={(e) => setScheduleInput(e.target.value)}
+                  min={new Date().toISOString().slice(0, 16)}
+                  className={inputCls}
+                />
+              </div>
+              <button
+                onClick={() => {
+                  if (!scheduleInput) return;
+                  saveSchedule(new Date(scheduleInput).toISOString());
+                  setScheduleInput("");
+                }}
+                disabled={!scheduleInput || savingSchedule}
+                className="px-4 py-2 text-sm font-medium bg-zinc-900 text-white rounded-lg hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {savingSchedule ? "Saving…" : "Set Schedule"}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* ── Execution Controls ──────────────────────────────────────────────── */}
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">

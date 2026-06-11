@@ -81,6 +81,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     const {
       title, description, priority, status, estimatedCostLevel,
       taskType, resultSummary, nextAction, serverId, agentId, timeoutMinutes, maxRetries,
+      scheduledFor,
     } = body;
 
     const validationErr = validateTaskUpdate(body);
@@ -124,6 +125,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(autoStatus && { status: autoStatus }),
         ...(timeoutMinutes !== undefined && { timeoutMinutes: timeoutMinutes === null ? null : Number(timeoutMinutes) }),
         ...(maxRetries !== undefined && { maxRetries: Number(maxRetries) }),
+        ...(scheduledFor !== undefined && { scheduledFor: scheduledFor === null ? null : new Date(scheduledFor) }),
       },
       include: {
         project: { select: { name: true } },
