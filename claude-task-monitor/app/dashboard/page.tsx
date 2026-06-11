@@ -6,6 +6,20 @@ import { StatusBadge } from "@/app/_components/StatusBadge";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
 import { PageHeader, LoadingState } from "@/app/_components/ui";
 
+interface TodayReport {
+  id: string;
+  completedCount: number;
+  failedCount: number;
+  runningCount: number;
+  queuedCount: number;
+  timedOutCount: number;
+  avgExecutionMinutes: number | null;
+  activeServerCount: number;
+  activeAgentCount: number;
+  generatedBy: string;
+  date: string;
+}
+
 interface ServerSummary {
   totalServers: number;
   connectedServers: number;
@@ -57,12 +71,18 @@ const SERVER_STATUS_DOT: Record<string, string> = {
 
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
+  const [todayReport, setTodayReport] = useState<TodayReport | null | undefined>(undefined);
 
   useEffect(() => {
     fetch("/api/dashboard")
       .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
       .then(setData)
       .catch(console.error);
+    const today = new Date().toISOString().slice(0, 10);
+    fetch(`/api/reports/daily/${today}`)
+      .then((r) => { if (r.status === 404) return null; if (!r.ok) return null; return r.json(); })
+      .then((d) => setTodayReport(d))
+      .catch(() => setTodayReport(null));
   }, []);
 
   if (!data) return <LoadingState message="Loading dashboard…" />;
@@ -82,6 +102,61 @@ export default function DashboardPage() {
         <StatCard label="Failed" value={data.failedTasks} color="text-red-700" />
         <StatCard label="Connected Servers" value={data.servers.connectedServers} color="text-green-700" />
       </div>
+
+      {todayReport !== undefined && (
+        <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <h2 className="font-semibold text-zinc-900">Today&apos;s Report</h2>
+              {todayReport?.generatedBy === "auto" && (
+                <span className="text-xs bg-sky-50 text-sky-700 border border-sky-200 px-2 py-0.5 rounded-full font-medium">
+                  Auto
+                </span>
+              )}
+            </div>
+            <Link href="/reports/daily" className="text-xs text-blue-700 hover:text-blue-900 font-medium transition-colors">
+              Full report →
+            </Link>
+          </div>
+          {todayReport ? (
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+              <div className="text-center">
+                <p className="text-xl font-bold text-green-700">{todayReport.completedCount}</p>
+                <p className="text-xs text-zinc-600 mt-0.5">Completed</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-bold text-red-700">{todayReport.failedCount}</p>
+                <p className="text-xs text-zinc-600 mt-0.5">Failed</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-bold text-blue-700">{todayReport.runningCount}</p>
+                <p className="text-xs text-zinc-600 mt-0.5">Running</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-bold text-violet-700">{todayReport.queuedCount}</p>
+                <p className="text-xs text-zinc-600 mt-0.5">Queued</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-bold text-amber-700">{todayReport.timedOutCount}</p>
+                <p className="text-xs text-zinc-600 mt-0.5">Timed Out</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-bold text-teal-700">
+                  {todayReport.avgExecutionMinutes != null ? `${todayReport.avgExecutionMinutes}m` : "—"}
+                </p>
+                <p className="text-xs text-zinc-600 mt-0.5">Avg Exec</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-600">
+              No report for today yet.{" "}
+              <Link href="/reports/daily" className="text-blue-700 hover:underline">
+                Generate one →
+              </Link>
+            </p>
+          )}
+        </section>
+      )}
 
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
         <div className="flex items-center justify-between mb-4">

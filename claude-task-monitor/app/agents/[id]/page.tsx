@@ -34,11 +34,36 @@ interface Agent {
   claudeWeekResetsAt: string | null;
   claudeUsageRaw: string | null;
   claudeUsageFetchedAt: string | null;
+  claudeUsageCreditsEnabled: boolean | null;
+  claudeLastRefreshStatus: string | null;
   createdAt: string;
   updatedAt: string;
   server: { id: string; name: string; host: string; username: string; port: number };
   _count: { tasks: number };
+  pausedDueToUsage: boolean;
+  pausedAt: string | null;
+  autoPauseEnabled: boolean;
 }
+
+type UsageDisplayStatus = "live" | "stale" | "rate_limited" | "unknown";
+
+function computeDisplayStatus(
+  fetchedAt: string | null,
+  lastRefreshStatus: string | null,
+): UsageDisplayStatus {
+  if (!fetchedAt) return "unknown";
+  if (lastRefreshStatus === "rate_limited") return "rate_limited";
+  if (lastRefreshStatus !== "ok") return "unknown";
+  const ageMs = Date.now() - new Date(fetchedAt).getTime();
+  return ageMs < 10 * 60 * 1000 ? "live" : "stale";
+}
+
+const DISPLAY_STATUS_STYLE: Record<UsageDisplayStatus, { label: string; cls: string }> = {
+  live:         { label: "Live",         cls: "bg-green-50 text-green-700 border-green-200" },
+  stale:        { label: "Stale",        cls: "bg-amber-50 text-amber-700 border-amber-200" },
+  rate_limited: { label: "Rate Limited", cls: "bg-orange-50 text-orange-700 border-orange-200" },
+  unknown:      { label: "Unknown",      cls: "bg-zinc-100 text-zinc-600 border-zinc-200" },
+};
 
 const STATUS_BADGE: Record<AgentStatus, string> = {
   idle:    "bg-green-50 text-green-700 border-green-200",
@@ -61,21 +86,23 @@ const PERMISSION_LABEL: Record<ClaudePermissionMode, string> = {
 
 const THRESHOLD = 90;
 
-function UsageBar({ label, pct, resets }: { label: string; pct: number; resets: string | null }) {
-  const color = pct >= THRESHOLD ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-emerald-500";
-  const blocked = pct >= THRESHOLD;
+function UsageBar({ label, pct, resets }: { label: string; pct: number | null | undefined; resets: string | null }) {
+  const known = pct != null;
+  const p = pct ?? 0;
+  const color = p >= THRESHOLD ? "bg-red-500" : p >= 70 ? "bg-amber-400" : "bg-emerald-500";
+  const blocked = p >= THRESHOLD;
   return (
     <div>
       <div className="flex justify-between items-baseline mb-1">
         <span className="text-xs font-medium text-zinc-700">{label}</span>
         <span className={`text-xs font-semibold ${blocked ? "text-red-600" : "text-zinc-600"}`}>
-          {pct}%
+          {known ? `${p}%` : "—"}
         </span>
       </div>
       <div className="w-full bg-zinc-100 rounded-full h-2 mb-1">
         <div
-          className={`h-2 rounded-full transition-all ${color}`}
-          style={{ width: `${Math.min(pct, 100)}%` }}
+          className={`h-2 rounded-full transition-all ${known ? color : "bg-zinc-300"}`}
+          style={{ width: known ? `${Math.min(p, 100)}%` : "0%" }}
         />
       </div>
       {resets && <p className="text-xs text-zinc-500">Resets {resets}</p>}
@@ -100,6 +127,10 @@ export default function AgentDetailPage() {
   const [launching, setLaunching] = useState(false);
   const [launchResult, setLaunchResult] = useState<{ success: boolean; command?: string; error?: string } | null>(null);
 
+  // Recovery
+  const [recovering, setRecovering] = useState(false);
+  const [recoverResult, setRecoverResult] = useState<{ success: boolean; message: string } | null>(null);
+
   // Edit modal
   const [showEdit, setShowEdit] = useState(false);
   const [editName, setEditName] = useState("");
@@ -111,6 +142,10 @@ export default function AgentDetailPage() {
   // Delete confirm
   const [showDelete, setShowDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Pause / resume
+  const [resuming, setResuming] = useState(false);
+  const [countdown, setCountdown] = useState<string | null>(null);
 
   function loadAgent() {
     fetch(`/api/agents/${id}`)
@@ -144,6 +179,39 @@ export default function AgentDetailPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // Live countdown while paused due to usage.
+  useEffect(() => {
+    if (!agent?.pausedDueToUsage) { setCountdown(null); return; }
+
+    function computeCountdown() {
+      const now = Date.now();
+      const candidates = [agent!.claudeSessionResetsAt, agent!.claudeWeekResetsAt]
+        .filter((s): s is string => s !== null)
+        .map((s) => new Date(s).getTime())
+        .filter((t) => t > now);
+      if (candidates.length === 0) { setCountdown(null); return; }
+      const ms = Math.min(...candidates) - now;
+      const totalSec = Math.floor(ms / 1000);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      setCountdown(h > 0
+        ? `Resumes in ${h}h ${m}m ${s}s`
+        : `Resumes in ${m}m ${s}s`);
+    }
+
+    computeCountdown();
+    const interval = setInterval(computeCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [agent?.pausedDueToUsage, agent?.claudeSessionResetsAt, agent?.claudeWeekResetsAt]);
+
+  async function handleResume() {
+    setResuming(true);
+    await fetch(`/api/agents/${id}/resume`, { method: "POST" });
+    setResuming(false);
+    loadAgent();
+  }
+
   async function handleRefreshUsage() {
     setRefreshing(true);
     setRefreshError(null);
@@ -164,6 +232,25 @@ export default function AgentDetailPage() {
     setLaunching(false);
     setLaunchResult(data.success ? { success: true, command: data.command } : { success: false, error: data.error });
     if (data.success) loadAgent();
+  }
+
+  async function handleRecover() {
+    setRecovering(true);
+    setRecoverResult(null);
+    try {
+      const res = await fetch(`/api/agents/${id}/recover`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setRecoverResult({ success: true, message: "Session recovered successfully." });
+        loadAgent();
+      } else {
+        setRecoverResult({ success: false, message: data.error ?? "Recovery failed" });
+      }
+    } catch {
+      setRecoverResult({ success: false, message: "Request failed." });
+    } finally {
+      setRecovering(false);
+    }
   }
 
   async function handleSaveEdit(e: React.FormEvent) {
@@ -200,8 +287,8 @@ export default function AgentDetailPage() {
     ? Date.now() - new Date(agent.claudeUsageFetchedAt).getTime() > 10 * 60 * 1000
     : false;
 
-  const sessionPct = agent.claudeSessionPct ?? 0;
-  const weekPct = agent.claudeWeekPct ?? 0;
+  const sessionPct = agent.claudeSessionPct;
+  const weekPct = agent.claudeWeekPct;
 
   return (
     <div className="p-6 max-w-3xl">
@@ -226,6 +313,28 @@ export default function AgentDetailPage() {
         </div>
       </div>
 
+      {/* ── Usage Pause Banner ── */}
+      {agent.pausedDueToUsage && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-6 flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-amber-900">
+              ⏸ Queue paused — usage limit reached
+            </p>
+            {countdown && (
+              <p className="text-sm text-amber-800 mt-0.5">{countdown}</p>
+            )}
+            {agent.pausedAt && (
+              <p className="text-xs text-amber-700 mt-0.5">
+                Paused at {new Date(agent.pausedAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+          <Btn variant="secondary" size="sm" onClick={handleResume} disabled={resuming}>
+            {resuming ? "Resuming…" : "Resume Now"}
+          </Btn>
+        </div>
+      )}
+
       {/* ── Info grid ────────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-3 mb-6">
         <div className="bg-white rounded-lg border border-zinc-200 p-3">
@@ -249,7 +358,18 @@ export default function AgentDetailPage() {
       {/* ── Claude Usage ─────────────────────────────────────────────────────── */}
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold text-zinc-900">Claude Usage</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="font-semibold text-zinc-900">Claude Usage</h2>
+            {(() => {
+              const ds = computeDisplayStatus(agent.claudeUsageFetchedAt, agent.claudeLastRefreshStatus);
+              const { label, cls } = DISPLAY_STATUS_STYLE[ds];
+              return (
+                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${cls}`}>
+                  {label}
+                </span>
+              );
+            })()}
+          </div>
           <div className="flex gap-2">
             <Btn
               variant="secondary"
@@ -282,6 +402,21 @@ export default function AgentDetailPage() {
           </div>
         )}
 
+        <div className="mt-2 pt-3 border-t border-zinc-100 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-zinc-800">Recovery</p>
+            <p className="text-xs text-zinc-500 mt-0.5">Relaunch Claude if offline. Will not run if there are active tasks.</p>
+          </div>
+          <Btn variant="secondary" size="sm" disabled={recovering} onClick={handleRecover}>
+            {recovering ? "Recovering…" : "Recover Session"}
+          </Btn>
+        </div>
+        {recoverResult && (
+          <div className={`mt-2 rounded-lg border p-3 text-sm font-medium ${recoverResult.success ? "bg-green-50 border-green-200 text-green-800" : "bg-red-50 border-red-200 text-red-800"}`}>
+            {recoverResult.success ? "✓ " : "✗ "}{recoverResult.message}
+          </div>
+        )}
+
         {agent.claudeUsageFetchedAt ? (
           <>
             {usageStale && (
@@ -289,7 +424,7 @@ export default function AgentDetailPage() {
                 Usage data is over 10 minutes old — refresh for accurate readings.
               </p>
             )}
-            <div className="space-y-4">
+            <div className="space-y-4 mt-4">
               <UsageBar
                 label="Current session"
                 pct={sessionPct}
@@ -301,12 +436,30 @@ export default function AgentDetailPage() {
                 resets={agent.claudeWeekResets}
               />
             </div>
+
+            <div className="mt-4 pt-3 border-t border-zinc-100 grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-xs text-zinc-500 font-medium mb-0.5">Reset Time</p>
+                <p className="text-sm text-zinc-800">{agent.claudeWeekResets ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-xs text-zinc-500 font-medium mb-0.5">Usage Credits</p>
+                <p className="text-sm text-zinc-800">
+                  {agent.claudeUsageCreditsEnabled === null || agent.claudeUsageCreditsEnabled === undefined
+                    ? "—"
+                    : agent.claudeUsageCreditsEnabled
+                      ? "On"
+                      : "Off"}
+                </p>
+              </div>
+            </div>
+
             <p className="text-xs text-zinc-400 mt-3">
               Last updated {new Date(agent.claudeUsageFetchedAt).toLocaleString()}
             </p>
           </>
         ) : (
-          <p className="text-sm text-zinc-500">
+          <p className="text-sm text-zinc-500 mt-4">
             No usage data yet. Click <strong>Refresh Usage</strong> to fetch from the server.
           </p>
         )}

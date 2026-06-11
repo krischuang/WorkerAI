@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { StatusBadge } from "@/app/_components/StatusBadge";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
 import { TaskDetailPanel } from "@/app/_components/TaskDetailPanel";
+import { CreateFromTemplateModal } from "@/app/_components/CreateFromTemplateModal";
 import {
   PageHeader,
   EmptyState,
@@ -68,6 +69,8 @@ export default function TasksPage() {
   const [projectFilter, setProjectFilter] = useState("all");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [showTemplateModal, setShowTemplateModal] = useState(false);
+  const [templateProjectId, setTemplateProjectId] = useState<string>("");
   const [form, setForm] = useState(defaultForm);
   const [submitting, setSubmitting] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -158,6 +161,16 @@ export default function TasksPage() {
                 {clearing ? "Clearing…" : "Clear completed"}
               </Btn>
             )}
+            <Btn
+              variant="secondary"
+              onClick={() => {
+                setTemplateProjectId(projects.length === 1 ? projects[0].id : "");
+                setShowTemplateModal(true);
+              }}
+              disabled={projects.length === 0}
+            >
+              From Template
+            </Btn>
             <Btn variant="primary" onClick={openForm} disabled={projects.length === 0}>
               + New Task
             </Btn>
@@ -336,6 +349,34 @@ export default function TasksPage() {
             </ModalActions>
           </form>
         </Modal>
+      )}
+
+      {showTemplateModal && !templateProjectId && (
+        <Modal title="Choose Project" onClose={() => setShowTemplateModal(false)}>
+          <p className="text-sm text-zinc-700 mb-4">Select the project this task belongs to:</p>
+          <div className="space-y-2 max-h-60 overflow-y-auto">
+            {projects.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setTemplateProjectId(p.id)}
+                className="w-full text-left rounded-lg border border-zinc-200 px-4 py-3 hover:border-zinc-400 hover:bg-zinc-50 transition-colors text-sm font-medium text-zinc-900"
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+          <ModalActions>
+            <Btn variant="secondary" onClick={() => setShowTemplateModal(false)}>Cancel</Btn>
+          </ModalActions>
+        </Modal>
+      )}
+
+      {showTemplateModal && templateProjectId && (
+        <CreateFromTemplateModal
+          projectId={templateProjectId}
+          onClose={() => { setShowTemplateModal(false); setTemplateProjectId(""); }}
+          onCreated={() => { setShowTemplateModal(false); setTemplateProjectId(""); loadTasks(); }}
+        />
       )}
     </div>
   );
