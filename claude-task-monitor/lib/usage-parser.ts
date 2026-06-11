@@ -15,6 +15,8 @@ export interface ClaudeUsageParsed {
   weekPct?: number;
   weekResets?: string;
   weekResetsAt?: Date;
+  /** undefined = not found in output; false = "Usage credits are off"; true = "Usage credits are on" */
+  usageCreditsEnabled?: boolean;
 }
 
 // ─── Internal constants ───────────────────────────────────────────────────────
@@ -56,8 +58,9 @@ export function parseUTCResetTime(str: string): Date | null {
     return candidate;
   }
 
-  // "Mon DD, H:Mam/pm" or "Mon DD, Ham/pm"
-  const dateTime = s.match(/^(\w+)\s+(\d{1,2}),\s+(\d{1,2})(?::(\d{2}))?(am|pm)$/i);
+  // "Mon DD, H:Mam/pm" or "Mon DD, Ham/pm" — \s* tolerates spaces stripped by pipe-pane
+  // Use [A-Za-z]+ (not \w+) so the month name doesn't swallow the day digits
+  const dateTime = s.match(/^([A-Za-z]+)\s*(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?(am|pm)$/i);
   if (dateTime) {
     const month = MONTHS[dateTime[1].toLowerCase()];
     if (month === undefined) return null;
@@ -106,38 +109,73 @@ export function utcToSydney(utcStr: string): string {
 export function extractSection(
   text: string,
   sectionPattern: RegExp
-): { pct: number; resetsRaw: string } | null {
+): { pct: number | undefined; resetsRaw: string } | null {
   const headingMatch = sectionPattern.exec(text);
   if (!headingMatch) return null;
 
   const slice = text.slice(headingMatch.index, headingMatch.index + 300);
   const pctMatch = slice.match(/(\d+)%\s*used/);
-  const resetMatch = slice.match(/Resets\s+(.+?)\s*\(UTC\)/);
+  // \s* instead of \s+ — pipe-pane output strips spaces between words
+  const resetMatch = slice.match(/Resets\s*(.+?)\s*\(UTC\)/);
 
   if (!pctMatch && !resetMatch) return null;
 
   return {
-    pct: pctMatch ? parseInt(pctMatch[1]) : 0,
+    // undefined (not 0) when the percentage isn't in the captured text so the
+    // caller can distinguish "parse succeeded, truly 0%" from "parse failed"
+    pct: pctMatch ? parseInt(pctMatch[1]) : undefined,
     resetsRaw: resetMatch ? resetMatch[1].trim() : "",
   };
 }
 
 export function parseUsage(text: string): ClaudeUsageParsed {
-  const session = extractSection(text, /Current session/i);
-  const week = extractSection(text, /Current week/i);
+  // \s* tolerates TUI output where inter-word spaces are stripped by pipe-pane
+  const session = extractSection(text, /Current\s*session/i);
+  const week = extractSection(text, /Current\s*week/i);
+
+  const creditsOff = /usage\s+credits?\s+are?\s+off/i.test(text);
+  const creditsOn  = /usage\s+credits?\s+are?\s+on/i.test(text);
+  const usageCreditsEnabled = creditsOff ? false : creditsOn ? true : undefined;
 
   return {
-    sessionPct:      session?.pct,
-    sessionResets:   session?.resetsRaw ? utcToSydney(session.resetsRaw) : undefined,
-    sessionResetsAt: session?.resetsRaw ? parseUTCResetTime(session.resetsRaw) ?? undefined : undefined,
-    weekPct:         week?.pct,
-    weekResets:      week?.resetsRaw ? utcToSydney(week.resetsRaw) : undefined,
-    weekResetsAt:    week?.resetsRaw ? parseUTCResetTime(week.resetsRaw) ?? undefined : undefined,
+    sessionPct:           session?.pct,
+    sessionResets:        session?.resetsRaw ? utcToSydney(session.resetsRaw) : undefined,
+    sessionResetsAt:      session?.resetsRaw ? parseUTCResetTime(session.resetsRaw) ?? undefined : undefined,
+    weekPct:              week?.pct,
+    weekResets:           week?.resetsRaw ? utcToSydney(week.resetsRaw) : undefined,
+    weekResetsAt:         week?.resetsRaw ? parseUTCResetTime(week.resetsRaw) ?? undefined : undefined,
+    usageCreditsEnabled,
   };
 }
 
 export function looksLikeUsage(text: string): boolean {
-  return /Current session/i.test(text) || /Current week/i.test(text) || /%\s*used/i.test(text);
+  return /Current\s*session/i.test(text) || /Current\s*week/i.test(text) || /%\s*used/i.test(text);
+}
+
+// ─── ANSI / terminal control stripping ───────────────────────────────────────
+
+/**
+ * Strip ANSI escape sequences and terminal control characters from raw
+ * pipe-pane output.  pipe-pane captures the byte stream as-is, including
+ * cursor-positioning codes, color codes, and alternate-screen sequences —
+ * none of which appear in `tmux capture-pane -p` output.
+ *
+ * Handles:
+ *   - CSI sequences:  ESC [ ... final-byte  (colors, cursor, erase, …)
+ *   - OSC sequences:  ESC ] ... ST           (window title, hyperlinks, …)
+ *   - Other ESC + single char
+ *   - Carriage returns (\r)
+ *   - Non-printable control chars (NUL–BS, VT, FF, SO–US, DEL)
+ */
+export function stripAnsi(raw: string): string {
+  return raw
+    // CSI sequences — param bytes include <>=! in addition to 0-9;? for private modes
+    .replace(/\x1b\[[0-9;?<>=!]*[A-Za-z@]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")    // OSC sequences
+    .replace(/\x1b[^[\]]/g, "")                            // other ESC + char
+    .replace(/\x1b/g, "")                                  // stray ESC
+    .replace(/\r/g, "")                                    // carriage returns
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");   // control chars
 }
 
 // ─── tmux pane cleanup ────────────────────────────────────────────────────────

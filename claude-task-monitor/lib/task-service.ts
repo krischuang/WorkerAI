@@ -13,6 +13,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "@/lib/task-dispatch";
+import { emitAudit } from "@/lib/audit";
 import { detectClaudeIdle, sendRawPromptToTmux } from "@/lib/ssh-claude-tmux";
 // detectClaudeIdle is used in _advanceAgentQueue (agents still need idle check)
 import { withServerDispatchLock } from "@/lib/dispatch-lock";
@@ -185,7 +186,7 @@ async function pollForVerdict(
   ssh: ServerConfig,
   tmuxSession: string,
   timeoutMs: number,
-): Promise<"done" | "incomplete" | null> {
+): Promise<{ verdict: "done" | "incomplete" | null; notes: string | null }> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -196,14 +197,20 @@ async function pollForVerdict(
       const pane = cleanPane(stdout);
       const verdictMatch = pane.match(/VERDICT:\s*(done|incomplete)/i);
       if (verdictMatch) {
-        return verdictMatch[1].toLowerCase() === "done" ? "done" : "incomplete";
+        // Extract up to 500 chars after the verdict line as notes
+        const afterVerdict = pane.slice(pane.indexOf(verdictMatch[0]) + verdictMatch[0].length).trim();
+        const notes = afterVerdict.slice(0, 500) || null;
+        return {
+          verdict: verdictMatch[1].toLowerCase() === "done" ? "done" : "incomplete",
+          notes,
+        };
       }
     } catch {
       // SSH hiccup — keep polling until the deadline
     }
   }
 
-  return null;
+  return { verdict: null, notes: null };
 }
 
 /**
@@ -211,22 +218,24 @@ async function pollForVerdict(
  * the VERDICT response.  Holds the server dispatch lock throughout so no new
  * task can corrupt the session while Claude is replying.
  *
- * Call sites: POST /api/tasks/[id]/review
+ * Supports both server-direct tasks (uses server.tmuxSession) and agent tasks
+ * (uses agent.tmuxSession on the agent's parent server).
+ *
+ * Call sites: POST /api/tasks/[id]/review, processReviewQueue
  */
 export async function reviewTask(taskId: string): Promise<ReviewResult> {
   const task = await prisma.task.findUnique({
     where: { id: taskId },
     include: {
       server: true,
+      agent: { include: { server: true } },
       executionLogs: { orderBy: { createdAt: "desc" }, take: 1 },
     },
   });
 
   if (!task) return { ok: false, reason: "not_found" };
   if (task.status !== "completed") return { ok: false, reason: "not_completed" };
-  if (!task.server) return { ok: false, reason: "no_server" };
 
-  const s = task.server;
   const latestLog = task.executionLogs[0] ?? null;
 
   const reviewPrompt = buildReviewPrompt({
@@ -237,55 +246,152 @@ export async function reviewTask(taskId: string): Promise<ReviewResult> {
     logText: latestLog?.logText,
   });
 
-  const ssh: ServerConfig = {
-    host: s.host,
-    port: s.port,
-    username: s.username,
-    sshKeyPath: s.sshKeyPath,
-  };
+  // ── Resolve server config + tmux session (server or agent path) ──────────────
+  let ssh: ServerConfig;
+  let tmuxSession: string;
+  let lockResourceId: string;
+  let busyWhere: { serverId?: string; agentId?: string };
+
+  if (task.agent) {
+    const a = task.agent;
+    const s = a.server;
+    ssh = { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath };
+    tmuxSession = a.tmuxSession;
+    lockResourceId = a.id;
+    busyWhere = { agentId: a.id };
+  } else if (task.server) {
+    const s = task.server;
+    ssh = { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath };
+    tmuxSession = s.tmuxSession;
+    lockResourceId = s.id;
+    busyWhere = { serverId: s.id };
+  } else {
+    return { ok: false, reason: "no_server" };
+  }
 
   type LockOutcome =
-    | { ok: true; verdict: "done" | "incomplete" | null }
+    | { ok: true; verdict: "done" | "incomplete" | null; notes: string | null }
     | { ok: false; reason: "server_busy" | "ssh_failed"; detail?: string };
 
-  const lockOutcome = await withServerDispatchLock<LockOutcome>(s.id, async () => {
+  const lockOutcome = await withServerDispatchLock<LockOutcome>(lockResourceId, async () => {
     const runningCount = await prisma.task.count({
-      where: { serverId: s.id, status: "running" },
+      where: { ...busyWhere, status: "running" },
     });
     if (runningCount > 0) {
       return { ok: false, reason: "server_busy" } as const;
     }
 
-    const sendResult = await sendRawPromptToTmux(
-      { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
-      reviewPrompt,
-      s.tmuxSession,
-    );
+    const sendResult = await sendRawPromptToTmux(ssh, reviewPrompt, tmuxSession);
     if (!sendResult.success) {
       return { ok: false, reason: "ssh_failed", detail: sendResult.error } as const;
     }
 
-    const verdict = await pollForVerdict(ssh, s.tmuxSession, REVIEW_POLL_TIMEOUT_MS);
-    return { ok: true, verdict } as const;
+    const actorPayload = task.agent
+      ? { agentId: task.agent.id }
+      : { serverId: task.server!.id };
+    await emitAudit({ entityType: "task", entityId: taskId, eventType: "task.review.sent", actorType: "system", payload: actorPayload });
+
+    const { verdict, notes } = await pollForVerdict(ssh, tmuxSession, REVIEW_POLL_TIMEOUT_MS);
+    return { ok: true, verdict, notes } as const;
   });
 
   if (!lockOutcome.ok) return lockOutcome;
 
-  const { verdict } = lockOutcome;
+  const { verdict, notes } = lockOutcome;
+  const completedAt = new Date();
 
   if (verdict === "done") {
-    await prisma.task.update({ where: { id: taskId }, data: { status: "archived" } });
+    await prisma.task.update({
+      where: { id: taskId },
+      data: {
+        status: "archived",
+        reviewStatus: "done",
+        reviewCompletedAt: completedAt,
+        ...(notes && { reviewVerdictNotes: notes }),
+      },
+    });
+    await emitAudit({ entityType: "task", entityId: taskId, eventType: "task.review.done", actorType: "system" });
     return { ok: true, verdict: "done", newStatus: "archived" };
   }
   if (verdict === "incomplete") {
     await prisma.task.update({
       where: { id: taskId },
-      data: { status: "pending", resultSummary: null },
+      data: {
+        status: "pending",
+        resultSummary: null,
+        reviewStatus: "incomplete",
+        reviewCompletedAt: completedAt,
+        ...(notes && { reviewVerdictNotes: notes }),
+      },
     });
+    await emitAudit({ entityType: "task", entityId: taskId, eventType: "task.review.incomplete", actorType: "system" });
     return { ok: true, verdict: "incomplete", newStatus: "pending" };
   }
 
+  // Timed out — leave reviewStatus as running; caller may retry or mark failed
   return { ok: true, verdict: null };
+}
+
+// ─── processReviewQueue ───────────────────────────────────────────────────────
+
+/**
+ * Find tasks whose auto-review grace delay has elapsed and run up to maxBatch
+ * reviews per call.  Called each poller cycle.
+ *
+ * Guard: skips tasks whose assigned resource (server or agent) has running tasks,
+ * matching the same guard used in the manual review route.
+ */
+export async function processReviewQueue(maxBatch = 3): Promise<void> {
+  const due = await prisma.task.findMany({
+    where: {
+      reviewStatus: "pending",
+      reviewScheduledAt: { lte: new Date() },
+    },
+    orderBy: { reviewScheduledAt: "asc" },
+    take: maxBatch,
+    select: { id: true },
+  });
+
+  for (const { id } of due) {
+    // Mark running so parallel cycles don't double-process
+    await prisma.task.update({
+      where: { id },
+      data: { reviewStatus: "running", reviewStartedAt: new Date() },
+    });
+
+    try {
+      const result = await reviewTask(id);
+      if (!result.ok) {
+        if (result.reason === "server_busy") {
+          // Reschedule 5 minutes from now when the resource is free
+          await prisma.task.update({
+            where: { id },
+            data: { reviewStatus: "pending", reviewScheduledAt: new Date(Date.now() + 5 * 60_000) },
+          });
+        } else {
+          // Permanent failure — clear review state so it won't loop
+          await prisma.task.update({
+            where: { id },
+            data: { reviewStatus: "skipped", reviewCompletedAt: new Date() },
+          });
+        }
+      } else if (result.verdict === null) {
+        // Timed out — reschedule
+        await prisma.task.update({
+          where: { id },
+          data: { reviewStatus: "pending", reviewScheduledAt: new Date(Date.now() + 5 * 60_000) },
+        });
+      }
+      // verdict "done" / "incomplete" states already written by reviewTask()
+    } catch (err) {
+      // Unexpected error — mark skipped to avoid infinite retry
+      await prisma.task.update({
+        where: { id },
+        data: { reviewStatus: "skipped", reviewCompletedAt: new Date() },
+      }).catch(() => {});
+      throw err;
+    }
+  }
 }
 
 // ─── checkAndAdvanceQueue ─────────────────────────────────────────────────────
@@ -353,7 +459,12 @@ async function _advanceServerQueue(
   // Each dispatch creates its own claude_<taskId> session independently.
 
   const nextTask = await prisma.task.findFirst({
-    where: { serverId, status: "queued", agentId: null },
+    where: {
+      serverId,
+      status: "queued",
+      agentId: null,
+      OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
+    },
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
     include: { project: { select: { name: true } } },
   });
@@ -422,7 +533,11 @@ async function _advanceAgentQueue(
   if (!idleResult.isIdle) return { dispatched: false, reason: "not_idle" };
 
   const nextTask = await prisma.task.findFirst({
-    where: { agentId, status: "queued" },
+    where: {
+      agentId,
+      status: "queued",
+      OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
+    },
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
     include: { project: { select: { name: true } } },
   });

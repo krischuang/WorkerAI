@@ -29,6 +29,7 @@ import {
   parseUsage,
   looksLikeUsage,
   cleanPane,
+  stripAnsi,
   classifyIdlePane,
   classifyPreflightPane,
   detectCompletionBlock,
@@ -240,6 +241,174 @@ export async function fetchClaudeUsageViaTmux(
     error: hasData
       ? undefined
       : `Could not extract usage data. Is Claude CLI running in the '${tmuxSession}' tmux session?`,
+  };
+}
+
+// ─── pipe-pane stream capture for /usage ─────────────────────────────────────
+
+/**
+ * Extended result that includes the ANSI-stripped cleaned output captured via
+ * pipe-pane.  rawOutput contains the unmodified stream bytes (truncated to
+ * 2000 chars); cleanedOutput is the result of stripAnsi + cleanPane.
+ */
+export interface PipePaneUsageResult extends ClaudeUsageResult {
+  cleanedOutput: string;
+}
+
+/**
+ * Fetch Claude CLI /usage data via tmux pipe-pane stream capture.
+ *
+ * Unlike fetchClaudeUsageViaTmux (which uses capture-pane), this function
+ * enables pipe-pane for a short window to stream raw terminal output to a
+ * temporary file, then immediately disables it and deletes the file.
+ *
+ * Why pipe-pane: Claude Code renders /usage through a TUI that uses the
+ * alternate screen buffer and cursor-positioning escape codes.  capture-pane
+ * captures the rendered screen contents which may not include the overlay when
+ * Claude is using the alternate buffer.  pipe-pane captures the raw byte
+ * stream so the text is always present, just interspersed with ANSI codes that
+ * we strip afterward.
+ *
+ * No persistent log file is created — the temp file is deleted immediately
+ * after reading, and pipe-pane is left disabled after each call.
+ */
+export async function fetchClaudeUsageViaPipePaneTmux(
+  config: SSHConfig,
+  tmuxSession: string,
+): Promise<PipePaneUsageResult> {
+  if (!tmuxSession || !tmuxSession.trim()) {
+    return {
+      success: false, status: "offline", rawOutput: "", cleanedOutput: "", parsed: {},
+      error: "Agent tmuxSession is not configured. Set the tmuxSession field on the agent.",
+    };
+  }
+
+  const ssh = {
+    host: config.host, port: config.port,
+    username: config.username, sshKeyPath: config.sshKeyPath,
+  };
+
+  // ── 1. Verify session exists ───────────────────────────────────────────────
+  let sessionExists: boolean;
+  try {
+    const { stdout } = await execSSH(
+      ssh, `tmux has-session -t ${tmuxSession} 2>/dev/null && echo yes || echo no`, 5_000
+    );
+    sessionExists = stdout.trim() === "yes";
+  } catch (err) {
+    return {
+      success: false, status: "offline", rawOutput: "", cleanedOutput: "", parsed: {},
+      error: `SSH error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!sessionExists) {
+    return {
+      success: false, status: "offline", rawOutput: "", cleanedOutput: "", parsed: {},
+      error:
+        `tmux session '${tmuxSession}' not found. ` +
+        `Create it:\n  tmux new-session -d -s ${tmuxSession}\n  tmux send-keys -t ${tmuxSession} 'claude' Enter`,
+    };
+  }
+
+  // ── 2. Pre-flight: check pane for auth/rate-limit/session errors ───────────
+  let beforeText = "";
+  const AUTH_PREFLIGHT_RETRY_DELAYS_MS = [2_000, 2_000];
+  let preflight = classifyPreflightPane(beforeText);
+
+  for (let attempt = 0; attempt <= AUTH_PREFLIGHT_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${tmuxSession} -p`, 5_000);
+      beforeText = cleanPane(stdout);
+    } catch { /* non-fatal */ }
+
+    preflight = classifyPreflightPane(beforeText);
+    if (preflight.status !== "auth_required" || attempt === AUTH_PREFLIGHT_RETRY_DELAYS_MS.length) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, AUTH_PREFLIGHT_RETRY_DELAYS_MS[attempt]));
+  }
+
+  if (preflight.status === "auth_required") {
+    return {
+      success: false, status: "auth_required",
+      rawOutput: beforeText.slice(-500), cleanedOutput: "", parsed: {},
+      error: "Claude CLI is not authenticated. SSH in and run 'claude login'.",
+    };
+  }
+  if (preflight.status === "rate_limited") {
+    return {
+      success: false, status: "rate_limited",
+      rawOutput: beforeText.slice(-500), cleanedOutput: "", parsed: {},
+      error: "Claude CLI is rate limited. Wait a moment before refreshing.",
+    };
+  }
+  if (preflight.status === "session_unavailable") {
+    return {
+      success: false, status: "offline",
+      rawOutput: beforeText.slice(-500), cleanedOutput: "", parsed: {},
+      error: "Claude CLI session is unavailable.",
+    };
+  }
+
+  // ── 3. Create unique temp file path ───────────────────────────────────────
+  const tmpFile = `/tmp/.claude_usage_pipe_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+  let rawOutput = "";
+  let captureErr: string | undefined;
+
+  try {
+    // ── 4. Enable pipe-pane, send /usage, wait for TUI to render ────────────
+    // pipe-pane -o pipes only pane output (not keystrokes) to the shell command.
+    // The "cat > file" subprocess receives the raw byte stream while active.
+    await execSSH(
+      ssh,
+      `tmux pipe-pane -o -t ${tmuxSession} "cat > ${tmpFile}" && ` +
+      `tmux send-keys -t ${tmuxSession} "/usage" Enter && sleep 4`,
+      14_000,
+    );
+
+    // ── 5. Disable pipe-pane (no command arg = disable) ────────────────────
+    await execSSH(ssh, `tmux pipe-pane -t ${tmuxSession}`, 5_000).catch(() => {});
+
+    // ── 6. Read the captured output ─────────────────────────────────────────
+    const { stdout } = await execSSH(ssh, `cat ${tmpFile} 2>/dev/null || echo ""`, 5_000);
+    rawOutput = stdout;
+
+    // ── 7. Delete temp file immediately ────────────────────────────────────
+    await execSSH(ssh, `rm -f ${tmpFile}`, 5_000).catch(() => {});
+  } catch (err) {
+    captureErr = err instanceof Error ? err.message : String(err);
+    // Best-effort cleanup — do not re-throw
+    await execSSH(ssh, `tmux pipe-pane -t ${tmuxSession} 2>/dev/null; rm -f ${tmpFile}`, 5_000).catch(() => {});
+  }
+
+  // ── 8. Dismiss /usage dialog so the pane accepts the next command ─────────
+  await execSSH(
+    ssh, `tmux send-keys -t ${tmuxSession} Escape 2>/dev/null; sleep 0.5`, 4_000,
+  ).catch(() => {});
+
+  if (captureErr) {
+    return {
+      success: false, status: "error", rawOutput: "", cleanedOutput: "", parsed: {},
+      error: `Capture failed: ${captureErr}`,
+    };
+  }
+
+  // ── 9. Strip ANSI codes and normalize line endings ────────────────────────
+  const cleanedOutput = cleanPane(stripAnsi(rawOutput));
+
+  // ── 10. Parse ─────────────────────────────────────────────────────────────
+  const hasData = looksLikeUsage(cleanedOutput);
+  const parsed = hasData ? parseUsage(cleanedOutput) : {};
+
+  return {
+    success: hasData,
+    status: hasData ? "ok" : "error",
+    rawOutput: rawOutput.slice(-2000),
+    cleanedOutput: cleanedOutput.slice(-2000),
+    parsed,
+    error: hasData
+      ? undefined
+      : `Could not extract usage data from pipe-pane output. Is Claude running in '${tmuxSession}'?`,
   };
 }
 
