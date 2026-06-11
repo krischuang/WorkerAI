@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   PageHeader,
   Btn,
@@ -33,7 +32,7 @@ const CATEGORY_BADGE: Record<string, string> = {
   bugfix:    "bg-red-50 text-red-700 border-red-200",
   docs:      "bg-amber-50 text-amber-700 border-amber-200",
   refactor:  "bg-emerald-50 text-emerald-700 border-emerald-200",
-  custom:    "bg-zinc-100 text-zinc-700 border-zinc-200",
+  custom:    "bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700",
 };
 
 const TASK_TYPES = ["coding", "research", "writing", "review", "maintenance"];
@@ -57,7 +56,6 @@ function extractVariables(text: string): string[] {
 }
 
 export default function TaskTemplatesPage() {
-  const router = useRouter();
   const [templates, setTemplates] = useState<TaskTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -132,7 +130,7 @@ export default function TaskTemplatesPage() {
     loadTemplates();
   }
 
-  if (loading) return <div className="p-8 text-sm text-zinc-600">Loading…</div>;
+  if (loading) return <div className="p-8 text-sm text-zinc-600 dark:text-zinc-400">Loading…</div>;
 
   return (
     <div className="p-8 max-w-4xl">
@@ -151,14 +149,14 @@ export default function TaskTemplatesPage() {
           {templates.map((t) => (
             <div
               key={t.id}
-              className="bg-white rounded-xl border border-zinc-200 p-5 hover:border-zinc-300 transition-colors"
+              className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 hover:border-zinc-300 dark:border-zinc-600 transition-colors"
             >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-semibold text-zinc-900">{t.name}</span>
+                    <span className="font-semibold text-zinc-900 dark:text-zinc-100">{t.name}</span>
                     {t.isBuiltIn && (
-                      <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-zinc-100 text-zinc-600 border-zinc-200">
+                      <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700">
                         built-in
                       </span>
                     )}
@@ -169,21 +167,21 @@ export default function TaskTemplatesPage() {
                     >
                       {t.category}
                     </span>
-                    <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-zinc-50 text-zinc-700 border-zinc-200">
+                    <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-zinc-50 dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700">
                       {t.taskType}
                     </span>
-                    <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-zinc-50 text-zinc-700 border-zinc-200">
+                    <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium bg-zinc-50 dark:bg-zinc-950 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700">
                       {t.priority}
                     </span>
                     {t.usageCount > 0 && (
-                      <span className="text-xs text-zinc-600">{t.usageCount} uses</span>
+                      <span className="text-xs text-zinc-600 dark:text-zinc-400">{t.usageCount} uses</span>
                     )}
                   </div>
-                  <p className="text-sm text-zinc-700 mt-1 font-mono truncate">{t.titleTemplate}</p>
+                  <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-1 font-mono truncate">{t.titleTemplate}</p>
                   {t.variables.length > 0 && (
                     <div className="flex gap-1 mt-1 flex-wrap">
                       {t.variables.map((v) => (
-                        <code key={v} className="text-xs bg-zinc-100 text-zinc-700 px-1.5 py-0.5 rounded">
+                        <code key={v} className="text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 px-1.5 py-0.5 rounded">
                           {`{{${v}}}`}
                         </code>
                       ))}
@@ -308,23 +306,23 @@ export default function TaskTemplatesPage() {
         <Modal title={`Preview: ${preview.name}`} onClose={() => setPreview(null)} size="lg">
           <div className="space-y-4 text-sm">
             <div>
-              <p className="text-xs text-zinc-600 uppercase tracking-wide font-medium mb-1">Title Template</p>
-              <p className="font-mono bg-zinc-50 rounded-lg p-3 text-zinc-900 border border-zinc-200">
+              <p className="text-xs text-zinc-600 dark:text-zinc-400 uppercase tracking-wide font-medium mb-1">Title Template</p>
+              <p className="font-mono bg-zinc-50 dark:bg-zinc-950 rounded-lg p-3 text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-700">
                 {preview.titleTemplate}
               </p>
             </div>
             <div>
-              <p className="text-xs text-zinc-600 uppercase tracking-wide font-medium mb-1">Description Template</p>
-              <pre className="font-mono bg-zinc-50 rounded-lg p-3 text-zinc-900 border border-zinc-200 text-xs whitespace-pre-wrap overflow-auto max-h-64">
+              <p className="text-xs text-zinc-600 dark:text-zinc-400 uppercase tracking-wide font-medium mb-1">Description Template</p>
+              <pre className="font-mono bg-zinc-50 dark:bg-zinc-950 rounded-lg p-3 text-zinc-900 dark:text-zinc-100 border border-zinc-200 dark:border-zinc-700 text-xs whitespace-pre-wrap overflow-auto max-h-64">
                 {preview.descriptionTemplate}
               </pre>
             </div>
             {preview.variables.length > 0 && (
               <div>
-                <p className="text-xs text-zinc-600 uppercase tracking-wide font-medium mb-1">Variables</p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 uppercase tracking-wide font-medium mb-1">Variables</p>
                 <div className="flex gap-1 flex-wrap">
                   {preview.variables.map((v) => (
-                    <code key={v} className="text-xs bg-zinc-100 text-zinc-700 px-2 py-1 rounded border border-zinc-200">
+                    <code key={v} className="text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700">
                       {`{{${v}}}`}
                     </code>
                   ))}
@@ -341,7 +339,7 @@ export default function TaskTemplatesPage() {
       {/* Confirm delete */}
       {confirmDelete && (
         <Modal title="Delete Template" onClose={() => setConfirmDelete(null)}>
-          <p className="text-sm text-zinc-700 mb-4">
+          <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-4">
             Delete template <strong>{confirmDelete.name}</strong>? This cannot be undone.
           </p>
           <ModalActions>

@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Bot } from "lucide-react";
 import { inputCls, Btn } from "@/app/_components/ui";
 
 function LoginForm() {
@@ -41,7 +42,7 @@ function LoginForm() {
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <label className="block text-sm font-medium text-zinc-700 mb-1">
+        <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
           Password
         </label>
         <input
@@ -75,21 +76,24 @@ function LoginForm() {
 
 export default function LoginPage() {
   return (
-    <div className="min-h-screen bg-zinc-50 flex items-center justify-center">
-      <div className="w-full max-w-sm bg-white rounded-xl border border-zinc-200 shadow-sm p-8">
+    <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
-          <h1 className="text-lg font-semibold text-zinc-900 uppercase tracking-widest">
-            Claude Task
-          </h1>
-          <p className="text-xs text-zinc-500 mt-0.5">Monitor</p>
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-zinc-800 mb-4">
+            <Bot className="w-6 h-6 text-zinc-200" />
+          </div>
+          <h1 className="text-xl font-semibold text-white">Task Monitor</h1>
+          <p className="text-sm text-zinc-400 mt-1">Claude AI — local</p>
         </div>
 
-        <Suspense>
-          <LoginForm />
-        </Suspense>
+        <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-700 shadow-2xl p-8">
+          <Suspense>
+            <LoginForm />
+          </Suspense>
+        </div>
 
-        <p className="mt-6 text-xs text-zinc-400 text-center">
-          Local-only · set <code className="font-mono">AUTH_SECRET</code> in <code className="font-mono">.env</code>
+        <p className="mt-5 text-xs text-zinc-600 dark:text-zinc-400 text-center">
+          Set <code className="font-mono text-zinc-400">AUTH_SECRET</code> in <code className="font-mono text-zinc-400">.env</code>
         </p>
       </div>
     </div>

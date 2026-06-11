@@ -62,13 +62,13 @@ const DISPLAY_STATUS_STYLE: Record<UsageDisplayStatus, { label: string; cls: str
   live:         { label: "Live",         cls: "bg-green-50 text-green-700 border-green-200" },
   stale:        { label: "Stale",        cls: "bg-amber-50 text-amber-700 border-amber-200" },
   rate_limited: { label: "Rate Limited", cls: "bg-orange-50 text-orange-700 border-orange-200" },
-  unknown:      { label: "Unknown",      cls: "bg-zinc-100 text-zinc-600 border-zinc-200" },
+  unknown:      { label: "Unknown",      cls: "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700" },
 };
 
 const STATUS_BADGE: Record<AgentStatus, string> = {
   idle:    "bg-green-50 text-green-700 border-green-200",
   running: "bg-blue-50 text-blue-700 border-blue-200",
-  offline: "bg-zinc-100 text-zinc-600 border-zinc-200",
+  offline: "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700",
   error:   "bg-red-50 text-red-700 border-red-200",
 };
 
@@ -94,12 +94,12 @@ function UsageBar({ label, pct, resets }: { label: string; pct: number | null | 
   return (
     <div>
       <div className="flex justify-between items-baseline mb-1">
-        <span className="text-xs font-medium text-zinc-700">{label}</span>
-        <span className={`text-xs font-semibold ${blocked ? "text-red-600" : "text-zinc-600"}`}>
+        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">{label}</span>
+        <span className={`text-xs font-semibold ${blocked ? "text-red-600" : "text-zinc-600 dark:text-zinc-400"}`}>
           {known ? `${p}%` : "—"}
         </span>
       </div>
-      <div className="w-full bg-zinc-100 rounded-full h-2 mb-1">
+      <div className="w-full bg-zinc-100 dark:bg-zinc-800 rounded-full h-2 mb-1">
         <div
           className={`h-2 rounded-full transition-all ${known ? color : "bg-zinc-300"}`}
           style={{ width: known ? `${Math.min(p, 100)}%` : "0%" }}
@@ -203,7 +203,7 @@ export default function AgentDetailPage() {
     computeCountdown();
     const interval = setInterval(computeCountdown, 1000);
     return () => clearInterval(interval);
-  }, [agent?.pausedDueToUsage, agent?.claudeSessionResetsAt, agent?.claudeWeekResetsAt]);
+  }, [agent]);
 
   async function handleResume() {
     setResuming(true);
@@ -337,29 +337,29 @@ export default function AgentDetailPage() {
 
       {/* ── Info grid ────────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-3 mb-6">
-        <div className="bg-white rounded-lg border border-zinc-200 p-3">
+        <div className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 p-3">
           <p className="text-xs text-zinc-500 font-medium mb-0.5">Working directory (HOME)</p>
-          <p className="text-sm font-mono text-zinc-900 break-all">{agent.workDir}</p>
+          <p className="text-sm font-mono text-zinc-900 dark:text-zinc-100 break-all">{agent.workDir}</p>
         </div>
-        <div className="bg-white rounded-lg border border-zinc-200 p-3">
+        <div className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 p-3">
           <p className="text-xs text-zinc-500 font-medium mb-0.5">tmux session</p>
-          <p className="text-sm font-mono text-zinc-900">{agent.tmuxSession}</p>
+          <p className="text-sm font-mono text-zinc-900 dark:text-zinc-100">{agent.tmuxSession}</p>
         </div>
-        <div className="bg-white rounded-lg border border-zinc-200 p-3">
+        <div className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 p-3">
           <p className="text-xs text-zinc-500 font-medium mb-0.5">Permission mode</p>
-          <p className="text-sm text-zinc-900">{PERMISSION_LABEL[agent.claudePermissionMode]}</p>
+          <p className="text-sm text-zinc-900 dark:text-zinc-100">{PERMISSION_LABEL[agent.claudePermissionMode]}</p>
         </div>
-        <div className="bg-white rounded-lg border border-zinc-200 p-3">
+        <div className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 p-3">
           <p className="text-xs text-zinc-500 font-medium mb-0.5">Tasks assigned</p>
-          <p className="text-sm font-semibold text-zinc-900">{agent._count.tasks}</p>
+          <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{agent._count.tasks}</p>
         </div>
       </div>
 
       {/* ── Claude Usage ─────────────────────────────────────────────────────── */}
-      <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
+      <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <h2 className="font-semibold text-zinc-900">Claude Usage</h2>
+            <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Claude Usage</h2>
             {(() => {
               const ds = computeDisplayStatus(agent.claudeUsageFetchedAt, agent.claudeLastRefreshStatus);
               const { label, cls } = DISPLAY_STATUS_STYLE[ds];
@@ -402,9 +402,9 @@ export default function AgentDetailPage() {
           </div>
         )}
 
-        <div className="mt-2 pt-3 border-t border-zinc-100 flex items-center justify-between">
+        <div className="mt-2 pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
           <div>
-            <p className="text-sm font-medium text-zinc-800">Recovery</p>
+            <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Recovery</p>
             <p className="text-xs text-zinc-500 mt-0.5">Relaunch Claude if offline. Will not run if there are active tasks.</p>
           </div>
           <Btn variant="secondary" size="sm" disabled={recovering} onClick={handleRecover}>
@@ -437,14 +437,14 @@ export default function AgentDetailPage() {
               />
             </div>
 
-            <div className="mt-4 pt-3 border-t border-zinc-100 grid grid-cols-2 gap-3">
+            <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 grid grid-cols-2 gap-3">
               <div>
                 <p className="text-xs text-zinc-500 font-medium mb-0.5">Reset Time</p>
-                <p className="text-sm text-zinc-800">{agent.claudeWeekResets ?? "—"}</p>
+                <p className="text-sm text-zinc-800 dark:text-zinc-200">{agent.claudeWeekResets ?? "—"}</p>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 font-medium mb-0.5">Usage Credits</p>
-                <p className="text-sm text-zinc-800">
+                <p className="text-sm text-zinc-800 dark:text-zinc-200">
                   {agent.claudeUsageCreditsEnabled === null || agent.claudeUsageCreditsEnabled === undefined
                     ? "—"
                     : agent.claudeUsageCreditsEnabled
@@ -484,8 +484,8 @@ HOME=${agent.workDir} claude login
       )}
 
       {/* ── Assigned tasks ───────────────────────────────────────────────────── */}
-      <section className="bg-white rounded-xl border border-zinc-200 p-5">
-        <h2 className="font-semibold text-zinc-900 mb-4">Assigned Tasks</h2>
+      <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5">
+        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-4">Assigned Tasks</h2>
         {tasks.length === 0 ? (
           <p className="text-sm text-zinc-500">No tasks assigned to this agent yet.</p>
         ) : (
@@ -494,15 +494,15 @@ HOME=${agent.workDir} claude login
               <Link
                 key={t.id}
                 href={`/tasks/${t.id}`}
-                className="flex items-center justify-between p-3 rounded-lg border border-zinc-100 hover:bg-zinc-50 transition-colors"
+                className="flex items-center justify-between p-3 rounded-lg border border-zinc-100 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800 dark:bg-zinc-950 transition-colors"
               >
                 <div>
-                  <p className="text-sm font-medium text-zinc-900">{t.title}</p>
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{t.title}</p>
                   <p className="text-xs text-zinc-500">{t.project.name}</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-zinc-500">{t.priority}</span>
-                  <span className="text-xs font-medium capitalize text-zinc-700">{t.status}</span>
+                  <span className="text-xs font-medium capitalize text-zinc-700 dark:text-zinc-300">{t.status}</span>
                 </div>
               </Link>
             ))}
@@ -567,7 +567,7 @@ HOME=${agent.workDir} claude login
       {/* ── Delete confirm modal ─────────────────────────────────────────────── */}
       {showDelete && (
         <Modal title="Delete Agent" size="md" onClose={() => setShowDelete(false)}>
-          <p className="text-sm text-zinc-700 mb-4">
+          <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-4">
             Delete <strong>{agent.name}</strong>? Tasks assigned to this agent will be unassigned.
             This cannot be undone.
           </p>

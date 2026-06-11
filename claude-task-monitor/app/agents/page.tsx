@@ -28,7 +28,7 @@ interface Agent {
 const STATUS_BADGE: Record<AgentStatus, string> = {
   idle:    "bg-green-50 text-green-700 border-green-200",
   running: "bg-blue-50 text-blue-700 border-blue-200",
-  offline: "bg-zinc-100 text-zinc-600 border-zinc-200",
+  offline: "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-200 dark:border-zinc-700",
   error:   "bg-red-50 text-red-700 border-red-200",
 };
 
@@ -57,10 +57,10 @@ function UsageBar({ pct, resetAt }: { pct: number | null; resetAt?: string | nul
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center gap-2">
-        <div className="w-20 h-1.5 bg-zinc-200 rounded-full overflow-hidden">
+        <div className="w-20 h-1.5 bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
           <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(pct, 100)}%` }} />
         </div>
-        <span className="text-xs text-zinc-600">{Math.round(pct)}%</span>
+        <span className="text-xs text-zinc-600 dark:text-zinc-400">{Math.round(pct)}%</span>
       </div>
       <span className="text-xs text-zinc-500">{formatResetCountdown(resetAt ?? null)}</span>
     </div>
@@ -87,7 +87,7 @@ export default function AgentsPage() {
   }, {});
 
   return (
-    <div className="p-6 max-w-5xl">
+    <div className="p-4 md:p-6 max-w-5xl">
       <PageHeader
         title="Agents"
         subtitle="Claude CLI instances — each with its own auth and working directory"
@@ -116,30 +116,30 @@ export default function AgentsPage() {
         return (
           <div key={server.id} className="mb-8">
             <div className="flex items-center gap-2 mb-3">
-              <Link href={`/servers/${server.id}`} className="text-sm font-semibold text-zinc-900 hover:underline">
+              <Link href={`/servers/${server.id}`} className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 hover:underline">
                 {server.name}
               </Link>
               <span className="text-xs text-zinc-500">{server.host}</span>
             </div>
 
-            <div className="border border-zinc-200 rounded-lg overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-zinc-50 border-b border-zinc-200">
+            <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg overflow-hidden overflow-x-auto">
+              <table className="w-full text-sm min-w-[500px]">
+                <thead className="bg-zinc-50 dark:bg-zinc-950 border-b border-zinc-200 dark:border-zinc-700">
                   <tr>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600">Agent</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600">Status</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600">Session</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600">Week</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600">Mode</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600">Tasks</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600"></th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600 dark:text-zinc-400">Agent</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600 dark:text-zinc-400">Status</th>
+                    <th className="hidden md:table-cell px-4 py-2 text-left text-xs font-medium text-zinc-600 dark:text-zinc-400">Session</th>
+                    <th className="hidden md:table-cell px-4 py-2 text-left text-xs font-medium text-zinc-600 dark:text-zinc-400">Week</th>
+                    <th className="hidden md:table-cell px-4 py-2 text-left text-xs font-medium text-zinc-600 dark:text-zinc-400">Mode</th>
+                    <th className="hidden md:table-cell px-4 py-2 text-left text-xs font-medium text-zinc-600 dark:text-zinc-400">Tasks</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-zinc-600 dark:text-zinc-400"></th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-100">
+                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                   {serverAgents.map((agent) => (
-                    <tr key={agent.id} className="hover:bg-zinc-50">
+                    <tr key={agent.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800 dark:bg-zinc-950">
                       <td className="px-4 py-3">
-                        <div className="font-medium text-zinc-900">{agent.name}</div>
+                        <div className="font-medium text-zinc-900 dark:text-zinc-100">{agent.name}</div>
                         <div className="text-xs text-zinc-500 font-mono">{agent.tmuxSession}</div>
                       </td>
                       <td className="px-4 py-3">
@@ -154,10 +154,10 @@ export default function AgentsPage() {
                           )}
                         </div>
                       </td>
-                      <td className="px-4 py-3"><UsageBar pct={agent.claudeSessionPct} resetAt={agent.claudeSessionResetsAt} /></td>
-                      <td className="px-4 py-3"><UsageBar pct={agent.claudeWeekPct} resetAt={agent.claudeWeekResetsAt} /></td>
-                      <td className="px-4 py-3 text-xs text-zinc-600">{PERMISSION_LABEL[agent.claudePermissionMode]}</td>
-                      <td className="px-4 py-3 text-xs text-zinc-600">{agent._count.tasks}</td>
+                      <td className="hidden md:table-cell px-4 py-3"><UsageBar pct={agent.claudeSessionPct} resetAt={agent.claudeSessionResetsAt} /></td>
+                      <td className="hidden md:table-cell px-4 py-3"><UsageBar pct={agent.claudeWeekPct} resetAt={agent.claudeWeekResetsAt} /></td>
+                      <td className="hidden md:table-cell px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">{PERMISSION_LABEL[agent.claudePermissionMode]}</td>
+                      <td className="hidden md:table-cell px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">{agent._count.tasks}</td>
                       <td className="px-4 py-3">
                         <Link href={`/agents/${agent.id}`} className="text-xs text-blue-600 hover:underline">
                           Details

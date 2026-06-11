@@ -1,7 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import {
+  FolderKanban,
+  Clock,
+  ArrowUpDown,
+  Play,
+  CheckCircle2,
+  XCircle,
+  Server,
+} from "lucide-react";
 import { StatusBadge } from "@/app/_components/StatusBadge";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
 import { PageHeader, LoadingState } from "@/app/_components/ui";
@@ -54,11 +63,28 @@ interface DashboardData {
   }>;
 }
 
-function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
+function StatCard({
+  label,
+  value,
+  color,
+  icon: Icon,
+  iconBg,
+}: {
+  label: string;
+  value: number;
+  color: string;
+  icon: React.ComponentType<{ className?: string }>;
+  iconBg: string;
+}) {
   return (
-    <div className="bg-white rounded-xl border border-zinc-200 p-5">
-      <p className="text-sm text-zinc-700 font-medium">{label}</p>
-      <p className={`text-3xl font-bold mt-1 tracking-tight ${color}`}>{value}</p>
+    <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 flex items-center gap-4">
+      <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${iconBg}`}>
+        <Icon className={`w-5 h-5 ${color}`} />
+      </div>
+      <div>
+        <p className="text-xs text-zinc-500 font-medium uppercase tracking-wide">{label}</p>
+        <p className={`text-2xl font-bold tracking-tight mt-0.5 ${color}`}>{value}</p>
+      </div>
     </div>
   );
 }
@@ -94,20 +120,20 @@ export default function DashboardPage() {
       <PageHeader title="Dashboard" />
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
-        <StatCard label="Active Projects" value={data.activeProjects} color="text-zinc-900" />
-        <StatCard label="Pending" value={data.pendingTasks} color="text-zinc-700" />
-        <StatCard label="Queued" value={data.queuedTasks} color="text-violet-700" />
-        <StatCard label="Running" value={data.runningTasks} color="text-blue-700" />
-        <StatCard label="Completed Today" value={data.completedToday} color="text-green-700" />
-        <StatCard label="Failed" value={data.failedTasks} color="text-red-700" />
-        <StatCard label="Connected Servers" value={data.servers.connectedServers} color="text-green-700" />
+        <StatCard label="Projects" value={data.activeProjects} color="text-zinc-700 dark:text-zinc-300" icon={FolderKanban} iconBg="bg-zinc-100 dark:bg-zinc-800" />
+        <StatCard label="Pending" value={data.pendingTasks} color="text-zinc-600 dark:text-zinc-400" icon={Clock} iconBg="bg-zinc-100 dark:bg-zinc-800" />
+        <StatCard label="Queued" value={data.queuedTasks} color="text-violet-700" icon={ArrowUpDown} iconBg="bg-violet-50" />
+        <StatCard label="Running" value={data.runningTasks} color="text-blue-700" icon={Play} iconBg="bg-blue-50" />
+        <StatCard label="Completed Today" value={data.completedToday} color="text-green-700" icon={CheckCircle2} iconBg="bg-green-50" />
+        <StatCard label="Failed" value={data.failedTasks} color="text-red-700" icon={XCircle} iconBg="bg-red-50" />
+        <StatCard label="Servers Online" value={data.servers.connectedServers} color="text-green-700" icon={Server} iconBg="bg-green-50" />
       </div>
 
       {todayReport !== undefined && (
-        <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
+        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              <h2 className="font-semibold text-zinc-900">Today&apos;s Report</h2>
+              <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Today&apos;s Report</h2>
               {todayReport?.generatedBy === "auto" && (
                 <span className="text-xs bg-sky-50 text-sky-700 border border-sky-200 px-2 py-0.5 rounded-full font-medium">
                   Auto
@@ -122,33 +148,33 @@ export default function DashboardPage() {
             <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
               <div className="text-center">
                 <p className="text-xl font-bold text-green-700">{todayReport.completedCount}</p>
-                <p className="text-xs text-zinc-600 mt-0.5">Completed</p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Completed</p>
               </div>
               <div className="text-center">
                 <p className="text-xl font-bold text-red-700">{todayReport.failedCount}</p>
-                <p className="text-xs text-zinc-600 mt-0.5">Failed</p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Failed</p>
               </div>
               <div className="text-center">
                 <p className="text-xl font-bold text-blue-700">{todayReport.runningCount}</p>
-                <p className="text-xs text-zinc-600 mt-0.5">Running</p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Running</p>
               </div>
               <div className="text-center">
                 <p className="text-xl font-bold text-violet-700">{todayReport.queuedCount}</p>
-                <p className="text-xs text-zinc-600 mt-0.5">Queued</p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Queued</p>
               </div>
               <div className="text-center">
                 <p className="text-xl font-bold text-amber-700">{todayReport.timedOutCount}</p>
-                <p className="text-xs text-zinc-600 mt-0.5">Timed Out</p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Timed Out</p>
               </div>
               <div className="text-center">
                 <p className="text-xl font-bold text-teal-700">
                   {todayReport.avgExecutionMinutes != null ? `${todayReport.avgExecutionMinutes}m` : "—"}
                 </p>
-                <p className="text-xs text-zinc-600 mt-0.5">Avg Exec</p>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Avg Exec</p>
               </div>
             </div>
           ) : (
-            <p className="text-sm text-zinc-600">
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">
               No report for today yet.{" "}
               <Link href="/reports/daily" className="text-blue-700 hover:underline">
                 Generate one →
@@ -158,9 +184,9 @@ export default function DashboardPage() {
         </section>
       )}
 
-      <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
+      <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold text-zinc-900">Server Status</h2>
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Server Status</h2>
           <Link href="/servers" className="text-xs text-blue-700 hover:text-blue-900 font-medium transition-colors">
             Manage servers →
           </Link>
@@ -168,7 +194,7 @@ export default function DashboardPage() {
 
         {servers.totalServers === 0 ? (
           <div className="flex items-center justify-between">
-            <p className="text-sm text-zinc-600">No servers configured.</p>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">No servers configured.</p>
             <Link href="/servers/new" className="text-sm text-blue-700 hover:text-blue-900 font-medium transition-colors">
               Add AWS EC2 server →
             </Link>
@@ -176,20 +202,20 @@ export default function DashboardPage() {
         ) : (
           <div className="flex items-center gap-6">
             <div className="text-center">
-              <p className="text-2xl font-bold tracking-tight text-zinc-900">{servers.totalServers}</p>
-              <p className="text-xs text-zinc-600 mt-0.5">Total</p>
+              <p className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">{servers.totalServers}</p>
+              <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Total</p>
             </div>
             <div className="text-center">
               <p className="text-2xl font-bold tracking-tight text-green-700">{servers.connectedServers}</p>
-              <p className="text-xs text-zinc-600 mt-0.5">Connected</p>
+              <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Connected</p>
             </div>
             <div className="text-center">
               <p className="text-2xl font-bold tracking-tight text-red-700">{servers.failedServers}</p>
-              <p className="text-xs text-zinc-600 mt-0.5">Failed</p>
+              <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Failed</p>
             </div>
             {servers.lastCheckedServer && (
-              <div className="flex-1 ml-4 pl-4 border-l border-zinc-100">
-                <p className="text-xs text-zinc-600 mb-1 font-medium">Last checked</p>
+              <div className="flex-1 ml-4 pl-4 border-l border-zinc-100 dark:border-zinc-800">
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-1 font-medium">Last checked</p>
                 <div className="flex items-center gap-2">
                   <span
                     className={`w-2 h-2 rounded-full shrink-0 ${
@@ -199,11 +225,11 @@ export default function DashboardPage() {
                   />
                   <Link
                     href={`/servers/${servers.lastCheckedServer.id}`}
-                    className="text-sm font-medium text-zinc-800 hover:text-blue-700 transition-colors"
+                    className="text-sm font-medium text-zinc-800 dark:text-zinc-200 hover:text-blue-700 transition-colors"
                   >
                     {servers.lastCheckedServer.name}
                   </Link>
-                  <span className="text-xs text-zinc-600">
+                  <span className="text-xs text-zinc-600 dark:text-zinc-400">
                     {new Date(servers.lastCheckedServer.lastCheckedAt).toLocaleTimeString()}
                   </span>
                 </div>
@@ -214,10 +240,10 @@ export default function DashboardPage() {
       </section>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <section className="bg-white rounded-xl border border-zinc-200 p-5">
-          <h2 className="font-semibold text-zinc-900 mb-4">High Priority Pending</h2>
+        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5">
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-4">High Priority Pending</h2>
           {data.highPriorityPending.length === 0 ? (
-            <p className="text-sm text-zinc-600">No high priority tasks.</p>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">No high priority tasks.</p>
           ) : (
             <ul className="space-y-3">
               {data.highPriorityPending.map((t) => (
@@ -225,11 +251,11 @@ export default function DashboardPage() {
                   <div className="flex-1 min-w-0">
                     <Link
                       href={`/tasks/${t.id}`}
-                      className="text-sm font-medium text-zinc-900 hover:text-blue-700 truncate block transition-colors"
+                      className="text-sm font-medium text-zinc-900 dark:text-zinc-100 hover:text-blue-700 truncate block transition-colors"
                     >
                       {t.title}
                     </Link>
-                    <p className="text-xs text-zinc-600 mt-0.5">{t.project.name}</p>
+                    <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">{t.project.name}</p>
                   </div>
                   <div className="flex gap-1 shrink-0">
                     <PriorityBadge priority={t.project.priority} />
@@ -241,10 +267,10 @@ export default function DashboardPage() {
           )}
         </section>
 
-        <section className="bg-white rounded-xl border border-zinc-200 p-5">
-          <h2 className="font-semibold text-zinc-900 mb-4">Recently Completed</h2>
+        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5">
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-4">Recently Completed</h2>
           {data.recentlyCompleted.length === 0 ? (
-            <p className="text-sm text-zinc-600">Nothing completed today.</p>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">Nothing completed today.</p>
           ) : (
             <ul className="space-y-3">
               {data.recentlyCompleted.map((t) => (
@@ -252,11 +278,11 @@ export default function DashboardPage() {
                   <div className="flex-1 min-w-0">
                     <Link
                       href={`/tasks/${t.id}`}
-                      className="text-sm font-medium text-zinc-900 hover:text-blue-700 truncate block transition-colors"
+                      className="text-sm font-medium text-zinc-900 dark:text-zinc-100 hover:text-blue-700 truncate block transition-colors"
                     >
                       {t.title}
                     </Link>
-                    <p className="text-xs text-zinc-600 mt-0.5">{t.project.name}</p>
+                    <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">{t.project.name}</p>
                   </div>
                   <StatusBadge status="completed" />
                 </li>

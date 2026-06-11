@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Btn, Modal, ModalActions, FormField, inputCls } from "@/app/_components/ui";
 
 interface DebtItem {
@@ -165,16 +165,16 @@ export function DebtRegister({ projectId }: { projectId: string }) {
   const [taskTitle, setTaskTitle] = useState("");
   const [scanError, setScanError] = useState<string | null>(null);
 
-  function loadItems() {
+  const loadItems = useCallback(() => {
     const params = new URLSearchParams({ projectId });
     if (statusFilter) params.set("status", statusFilter);
     if (severityFilter) params.set("severity", severityFilter);
     fetch(`/api/debt?${params}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((d) => setItems(d));
-  }
+  }, [projectId, statusFilter, severityFilter]);
 
-  useEffect(() => { loadItems(); }, [projectId, statusFilter, severityFilter]);
+  useEffect(() => { loadItems(); }, [loadItems]);
 
   useEffect(() => {
     fetch("/api/servers")

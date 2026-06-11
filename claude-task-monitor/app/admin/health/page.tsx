@@ -48,7 +48,7 @@ function scoreColor(score: number | null) {
 }
 
 function scoreBg(score: number | null) {
-  if (score === null) return "bg-zinc-100";
+  if (score === null) return "bg-zinc-100 dark:bg-zinc-800";
   if (score >= 80) return "bg-emerald-500";
   if (score >= 50) return "bg-amber-400";
   return "bg-red-500";
@@ -57,7 +57,7 @@ function scoreBg(score: number | null) {
 function HealthBar({ score }: { score: number | null }) {
   const pct = score ?? 0;
   return (
-    <div className="w-full bg-zinc-100 rounded-full h-2 mt-1">
+    <div className="w-full bg-zinc-100 dark:bg-zinc-800 rounded-full h-2 mt-1">
       <div
         className={`h-2 rounded-full transition-all ${scoreBg(score)}`}
         style={{ width: `${pct}%` }}
@@ -93,10 +93,10 @@ function WorkerCard({
   latestCheck: HealthEntry | null;
 }) {
   return (
-    <div className="bg-white rounded-xl border border-zinc-200 p-5">
+    <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5">
       <div className="flex items-start justify-between mb-3">
         <div>
-          <p className="font-semibold text-zinc-900">{name}</p>
+          <p className="font-semibold text-zinc-900 dark:text-zinc-100">{name}</p>
           <p className="text-xs text-zinc-500 mt-0.5">{subtitle}</p>
         </div>
         <div className="text-right">
@@ -204,8 +204,8 @@ export default function HealthDashboard() {
           { label: "Healthy (≥80)", value: healthyCount, color: "text-emerald-600" },
           { label: "Degraded / Down", value: totalWorkers - healthyCount, color: "text-red-600" },
         ].map(({ label, value, color }) => (
-          <div key={label} className="bg-white rounded-xl border border-zinc-200 p-4 text-center">
-            <p className={`text-3xl font-bold ${color ?? "text-zinc-900"}`}>{value}</p>
+          <div key={label} className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-4 text-center">
+            <p className={`text-3xl font-bold ${color ?? "text-zinc-900 dark:text-zinc-100"}`}>{value}</p>
             <p className="text-xs text-zinc-500 mt-1">{label}</p>
           </div>
         ))}
@@ -214,7 +214,7 @@ export default function HealthDashboard() {
       {/* Servers */}
       {(data?.servers.length ?? 0) > 0 && (
         <section className="mb-8">
-          <h2 className="font-semibold text-zinc-900 mb-3">Servers ({data!.servers.length})</h2>
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-3">Servers ({data!.servers.length})</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {data!.servers.map((s) => (
               <WorkerCard
@@ -234,7 +234,7 @@ export default function HealthDashboard() {
       {/* Agents */}
       {(data?.agents.length ?? 0) > 0 && (
         <section>
-          <h2 className="font-semibold text-zinc-900 mb-3">Agents ({data!.agents.length})</h2>
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-3">Agents ({data!.agents.length})</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {data!.agents.map((a) => (
               <WorkerCard
@@ -252,8 +252,8 @@ export default function HealthDashboard() {
       )}
 
       {totalWorkers === 0 && (
-        <div className="bg-white rounded-xl border border-zinc-200 p-12 text-center">
-          <p className="text-zinc-600">No servers or agents configured yet.</p>
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-12 text-center">
+          <p className="text-zinc-600 dark:text-zinc-400">No servers or agents configured yet.</p>
         </div>
       )}
     </div>

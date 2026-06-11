@@ -42,7 +42,7 @@ const PERMISSION_MODE_LABEL: Record<ClaudePermissionMode, string> = {
 };
 
 const PERMISSION_MODE_BADGE: Record<ClaudePermissionMode, string> = {
-  read_only:        "bg-zinc-100 text-zinc-700 border-zinc-200",
+  read_only:        "bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700",
   workspace_write:  "bg-blue-50 text-blue-700 border-blue-200",
   full_autonomous:  "bg-amber-50 text-amber-700 border-amber-200",
 };
@@ -107,7 +107,7 @@ const STATUS_DOT: Record<string, string> = {
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  unknown: "text-zinc-700",
+  unknown: "text-zinc-700 dark:text-zinc-300",
   connected: "text-green-700",
   failed: "text-red-700",
 };
@@ -229,7 +229,7 @@ export default function ServerDetailPage() {
     computeCountdown();
     const interval = setInterval(computeCountdown, 1000);
     return () => clearInterval(interval);
-  }, [server?.pausedDueToUsage, server?.claudeSessionResetsAt, server?.claudeWeekResetsAt]);
+  }, [server]);
 
   async function handleResume() {
     setResuming(true);
@@ -484,11 +484,11 @@ export default function ServerDetailPage() {
         <div className="flex items-center gap-3">
           <span className={`w-3 h-3 rounded-full shrink-0 ${STATUS_DOT[server.status]}`} aria-hidden="true" />
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">{server.name}</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">{server.name}</h1>
             <p className={`text-sm font-mono mt-0.5 ${STATUS_LABEL[server.status]}`}>
               {server.username}@{server.host}:{server.port}
             </p>
-            <p className="text-xs text-zinc-600 mt-0.5">Key: {server.sshKeyPath}</p>
+            <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">Key: {server.sshKeyPath}</p>
           </div>
         </div>
         <div className="flex gap-2 shrink-0">
@@ -545,8 +545,8 @@ export default function ServerDetailPage() {
 
       {/* ── Claude Settings ── */}
       <section className="mb-6">
-        <h2 className="font-semibold text-zinc-900 mb-3">Claude Execution Mode</h2>
-        <div className="bg-white rounded-xl border border-zinc-200 p-5">
+        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-3">Claude Execution Mode</h2>
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5">
           <div className="flex items-start justify-between gap-4">
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-1.5">
@@ -558,7 +558,7 @@ export default function ServerDetailPage() {
                   {PERMISSION_MODE_LABEL[server.claudePermissionMode]}
                 </span>
               </div>
-              <p className="text-sm text-zinc-700 mb-3">
+              <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-3">
                 {server.claudePermissionMode === "read_only" &&
                   "Claude can read and analyze files only — no writes or shell execution."}
                 {server.claudePermissionMode === "workspace_write" &&
@@ -567,8 +567,8 @@ export default function ServerDetailPage() {
                   "Claude skips all permission prompts and runs fully unattended."}
               </p>
               <div className="flex items-center gap-2">
-                <span className="text-xs text-zinc-600">Launch command:</span>
-                <code className="text-xs font-mono bg-zinc-100 px-2 py-0.5 rounded text-zinc-800">
+                <span className="text-xs text-zinc-600 dark:text-zinc-400">Launch command:</span>
+                <code className="text-xs font-mono bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded text-zinc-800 dark:text-zinc-200">
                   {PERMISSION_MODE_COMMAND[server.claudePermissionMode]}
                 </code>
               </div>
@@ -582,7 +582,7 @@ export default function ServerDetailPage() {
               >
                 {launching ? "Launching…" : "Launch Claude Session"}
               </Btn>
-              <p className="text-xs text-zinc-600 text-right">
+              <p className="text-xs text-zinc-600 dark:text-zinc-400 text-right">
                 Restarts Claude in the tmux session with the configured mode flags.
               </p>
             </div>
@@ -601,9 +601,9 @@ export default function ServerDetailPage() {
             </div>
           )}
 
-          <div className="mt-4 pt-4 border-t border-zinc-100 flex items-center justify-between">
+          <div className="mt-4 pt-4 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-zinc-800">Recovery</p>
+              <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Recovery</p>
               <p className="text-xs text-zinc-500 mt-0.5">Relaunch Claude if the session is offline. Will not run if there are active tasks.</p>
             </div>
             <Btn
@@ -641,7 +641,7 @@ export default function ServerDetailPage() {
       {/* ── Claude Usage ── */}
       <section className="mb-6">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-semibold text-zinc-900">Claude Usage</h2>
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Claude Usage</h2>
           <div className="flex items-center gap-3">
             {usageFetchedAt && (
               <span className="text-xs text-zinc-500">
@@ -735,7 +735,7 @@ export default function ServerDetailPage() {
 
           {/* Empty / loading state when no meters to show */}
           {(!usageData || (usageData.success && !usageData.parsed.sessionPct && !usageData.parsed.weekPct)) && (
-            <div className="px-4 py-4 text-xs font-mono text-zinc-600 min-h-[56px]">
+            <div className="px-4 py-4 text-xs font-mono text-zinc-600 dark:text-zinc-400 min-h-[56px]">
               {usageLoading
                 ? "Sending /usage to the Claude tmux session…"
                 : !usageData
@@ -759,7 +759,7 @@ export default function ServerDetailPage() {
 
       {/* ── Terminal ── */}
       <section className="mb-8">
-        <h2 className="font-semibold text-zinc-900 mb-3">Terminal</h2>
+        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-3">Terminal</h2>
         <div className="bg-zinc-950 rounded-xl overflow-hidden border border-zinc-800">
           {/* title bar */}
           <div className="flex items-center gap-2 px-4 py-2 bg-zinc-900 border-b border-zinc-800">
@@ -780,7 +780,7 @@ export default function ServerDetailPage() {
           {/* output history */}
           <div className="px-4 py-3 min-h-[120px] max-h-80 overflow-y-auto space-y-3 font-mono text-xs">
             {termHistory.length === 0 && (
-              <p className="text-zinc-600">Type a command below to run it on the server.</p>
+              <p className="text-zinc-600 dark:text-zinc-400">Type a command below to run it on the server.</p>
             )}
             {termHistory.map((entry) => (
               <div key={entry.id}>
@@ -824,7 +824,7 @@ export default function ServerDetailPage() {
               placeholder="enter command…"
               spellCheck={false}
               autoComplete="off"
-              className="flex-1 bg-transparent text-zinc-100 font-mono text-xs placeholder:text-zinc-600 focus:outline-none disabled:opacity-50"
+              className="flex-1 bg-transparent text-zinc-100 font-mono text-xs placeholder:text-zinc-600 dark:text-zinc-400 focus:outline-none disabled:opacity-50"
             />
             <button
               type="submit"
@@ -835,16 +835,16 @@ export default function ServerDetailPage() {
             </button>
           </form>
         </div>
-        <p className="text-xs text-zinc-600 mt-1.5">↑ ↓ to navigate history</p>
+        <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-1.5">↑ ↓ to navigate history</p>
       </section>
 
       {/* ── Environment Checks ── */}
       <div className="space-y-4 mb-8">
-        <h2 className="font-semibold text-zinc-900">Environment Checks</h2>
+        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Environment Checks</h2>
         {CHECK_GROUPS.map((group) => (
-          <div key={group.label} className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-100 bg-zinc-50">
-              <span className="text-sm font-semibold text-zinc-800">{group.label}</span>
+          <div key={group.label} className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950">
+              <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">{group.label}</span>
               <Btn
                 size="sm"
                 variant="primary"
@@ -861,7 +861,7 @@ export default function ServerDetailPage() {
                 return (
                   <div key={cmd} className="px-5 py-3">
                     <div className="flex items-center justify-between">
-                      <code className="text-sm font-mono text-zinc-800 bg-zinc-50 px-2 py-0.5 rounded">
+                      <code className="text-sm font-mono text-zinc-800 dark:text-zinc-200 bg-zinc-50 dark:bg-zinc-950 px-2 py-0.5 rounded">
                         {cmd}
                       </code>
                       <div className="flex items-center gap-2">
@@ -877,7 +877,7 @@ export default function ServerDetailPage() {
                         <button
                           onClick={() => runCommand(cmd)}
                           disabled={running !== null}
-                          className="text-xs text-zinc-700 hover:text-zinc-900 border border-zinc-300 px-2.5 py-1 rounded-md font-medium disabled:opacity-40 transition-colors"
+                          className="text-xs text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:text-zinc-100 border border-zinc-300 dark:border-zinc-600 px-2.5 py-1 rounded-md font-medium disabled:opacity-40 transition-colors"
                         >
                           {isRunning ? "Running…" : "Run"}
                         </button>
@@ -887,7 +887,7 @@ export default function ServerDetailPage() {
                       <pre
                         className={`mt-2 text-xs rounded-lg p-3 overflow-x-auto whitespace-pre-wrap font-mono ${
                           out.status === "success"
-                            ? "bg-zinc-50 text-zinc-800"
+                            ? "bg-zinc-50 dark:bg-zinc-950 text-zinc-800 dark:text-zinc-200"
                             : "bg-red-50 text-red-700"
                         }`}
                       >
@@ -906,23 +906,23 @@ export default function ServerDetailPage() {
 
       {/* ── Command Logs ── lazy-loaded when section enters the viewport ── */}
       <section ref={logsSectionRef}>
-        <h2 className="font-semibold text-zinc-900 mb-3">
+        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-3">
           Command Logs{logsInitialized ? ` (${logs.length}${nextCursor ? "+" : ""})` : ""}
         </h2>
 
         {!logsInitialized ? (
-          <div className="bg-white rounded-xl border border-zinc-200 p-6 text-center">
+          <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-6 text-center">
             <p className="text-sm text-zinc-500">{logsLoading ? "Loading…" : "Scroll down to load logs"}</p>
           </div>
         ) : logs.length === 0 ? (
-          <div className="bg-white rounded-xl border border-zinc-200 p-6 text-center">
-            <p className="text-sm text-zinc-600">No commands run yet.</p>
+          <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-6 text-center">
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">No commands run yet.</p>
           </div>
         ) : (
           <>
             <div className="space-y-2">
               {logs.map((log) => (
-                <div key={log.id} className="bg-white rounded-xl border border-zinc-200 p-4">
+                <div key={log.id} className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-4">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
                       <span
@@ -932,16 +932,16 @@ export default function ServerDetailPage() {
                       >
                         {log.status === "success" ? "✓" : "✗"}
                       </span>
-                      <code className="text-sm font-mono text-zinc-800">{log.command}</code>
+                      <code className="text-sm font-mono text-zinc-800 dark:text-zinc-200">{log.command}</code>
                     </div>
-                    <span className="text-xs text-zinc-600">
+                    <span className="text-xs text-zinc-600 dark:text-zinc-400">
                       {new Date(log.createdAt).toLocaleString()}
                     </span>
                   </div>
                   {(log.output || log.errorMessage) && (
                     <pre
                       className={`text-xs rounded-lg p-2 font-mono overflow-x-auto whitespace-pre-wrap ${
-                        log.status === "success" ? "bg-zinc-50 text-zinc-800" : "bg-red-50 text-red-700"
+                        log.status === "success" ? "bg-zinc-50 dark:bg-zinc-950 text-zinc-800 dark:text-zinc-200" : "bg-red-50 text-red-700"
                       }`}
                     >
                       {log.output || log.errorMessage}

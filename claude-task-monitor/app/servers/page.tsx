@@ -13,7 +13,7 @@ const PERMISSION_MODE_LABEL: Record<ClaudePermissionMode, string> = {
 };
 
 const PERMISSION_MODE_BADGE: Record<ClaudePermissionMode, string> = {
-  read_only:        "bg-zinc-100 text-zinc-700 border-zinc-200",
+  read_only:        "bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700",
   workspace_write:  "bg-blue-50 text-blue-700 border-blue-200",
   full_autonomous:  "bg-amber-50 text-amber-700 border-amber-200",
 };
@@ -56,7 +56,7 @@ function resumeCountdown(sessionResetsAt: string | null, weekResetsAt: string | 
 }
 
 const STATUS_BADGE: Record<string, string> = {
-  unknown: "bg-zinc-100 text-zinc-700 border-zinc-200",
+  unknown: "bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700",
   connected: "bg-green-50 text-green-700 border-green-200",
   failed: "bg-red-50 text-red-700 border-red-200",
 };
@@ -145,7 +145,7 @@ export default function ServersPage() {
           {servers.map((s) => (
             <div
               key={s.id}
-              className="bg-white rounded-xl border border-zinc-200 p-5 flex items-center gap-4 hover:border-zinc-300 transition-colors"
+              className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 flex items-center gap-4 hover:border-zinc-300 dark:border-zinc-600 transition-colors"
             >
               <span
                 className={`shrink-0 w-2.5 h-2.5 rounded-full ${STATUS_DOT[s.status]}`}
@@ -156,7 +156,7 @@ export default function ServersPage() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <Link
                     href={`/servers/${s.id}`}
-                    className="font-semibold text-zinc-900 hover:text-blue-700 transition-colors"
+                    className="font-semibold text-zinc-900 dark:text-zinc-100 hover:text-blue-700 transition-colors"
                   >
                     {s.name}
                   </Link>
@@ -188,26 +188,26 @@ export default function ServersPage() {
                     </span>
                   )}
                 </div>
-                <p className="text-sm text-zinc-700 mt-0.5 font-mono">
+                <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-0.5 font-mono">
                   {s.username}@{s.host}:{s.port}
                 </p>
-                <p className="text-xs text-zinc-600 mt-0.5">
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
                   Key: {s.sshKeyPath}
                   {s.lastCheckedAt && (
-                    <span className="ml-3 text-zinc-600">
+                    <span className="ml-3 text-zinc-600 dark:text-zinc-400">
                       Last checked: {new Date(s.lastCheckedAt).toLocaleString()}
                     </span>
                   )}
                 </p>
                 {s.capacityScore !== null && (
                   <div className="mt-1.5 flex items-center gap-2">
-                    <div className="flex-1 max-w-[160px] h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                    <div className="flex-1 max-w-[160px] h-1.5 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
                       <div
                         className={`h-full rounded-full ${capacityBarColor(s.capacityScore)}`}
                         style={{ width: `${s.capacityScore}%` }}
                       />
                     </div>
-                    <span className="text-xs text-zinc-600">
+                    <span className="text-xs text-zinc-600 dark:text-zinc-400">
                       {Math.round(s.capacityScore)}% capacity · {s.activeTaskCount}/{s.maxConcurrentTasks} tasks
                     </span>
                   </div>
@@ -221,7 +221,7 @@ export default function ServersPage() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
-                <span className="text-xs text-zinc-600 font-medium">{s._count.commandLogs} logs</span>
+                <span className="text-xs text-zinc-600 dark:text-zinc-400 font-medium">{s._count.commandLogs} logs</span>
                 {s.pausedDueToUsage && (
                   <Btn
                     size="sm"
@@ -242,7 +242,7 @@ export default function ServersPage() {
                 </Btn>
                 <Link
                   href={`/servers/${s.id}`}
-                  className="inline-flex items-center text-xs text-zinc-700 border border-zinc-300 px-3 py-1.5 rounded-lg hover:bg-zinc-50 font-medium transition-colors"
+                  className="inline-flex items-center text-xs text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-600 px-3 py-1.5 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800 dark:bg-zinc-950 font-medium transition-colors"
                 >
                   Open
                 </Link>
@@ -260,10 +260,10 @@ export default function ServersPage() {
 
       {confirmDelete && (
         <Modal title="Delete Server" onClose={() => setConfirmDelete(null)}>
-          <p className="text-sm text-zinc-700 mb-1">
+          <p className="text-sm text-zinc-700 dark:text-zinc-300 mb-1">
             Delete server <strong>{confirmDelete.name}</strong>?
           </p>
-          <p className="text-sm text-zinc-600 mb-4">
+          <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-4">
             All command logs will be permanently deleted. Assigned tasks will be unassigned.
             This cannot be undone.
           </p>
