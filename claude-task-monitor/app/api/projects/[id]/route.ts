@@ -1,7 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import type { NextRequest } from "next/server";
-import { recalculateProjectProgress } from "@/lib/project-progress";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -31,7 +30,8 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     const {
       name, description, priority, status,
       autoReviewEnabled, autoScanEnabled, scanFrequencyDays,
-      improvementAutomationLevel, cycleFrequencyDays,
+      improvementAutomationLevel, cycleFrequencyDays, nextImprovementCycleAt,
+      resetImprovementPause,
     } = body;
 
     const project = await prisma.project.update({
@@ -49,6 +49,13 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         }),
         ...(cycleFrequencyDays !== undefined && {
           cycleFrequencyDays: Math.max(1, Number(cycleFrequencyDays)),
+        }),
+        ...(nextImprovementCycleAt !== undefined && {
+          nextImprovementCycleAt: nextImprovementCycleAt === null ? null : new Date(nextImprovementCycleAt),
+        }),
+        ...(resetImprovementPause === true && {
+          autoImprovementPaused: false,
+          scanFailureCount: 0,
         }),
       },
     });
