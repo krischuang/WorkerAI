@@ -4,6 +4,8 @@ import { serverError } from "@/lib/api-error";
 const DEFAULTS: Record<string, string> = {
   stall_threshold_minutes: "30",
   confirm_cycles: "2",
+  webhook_url: "",
+  webhook_secret: "",
 };
 
 export async function GET() {
