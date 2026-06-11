@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import type { NextRequest } from "next/server";
+import { recalculateProjectProgress } from "@/lib/project-progress";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -27,7 +28,11 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
     const body = await request.json();
-    const { name, description, priority, status } = body;
+    const {
+      name, description, priority, status,
+      autoReviewEnabled, autoScanEnabled, scanFrequencyDays,
+      improvementAutomationLevel, cycleFrequencyDays,
+    } = body;
 
     const project = await prisma.project.update({
       where: { id },
@@ -36,6 +41,15 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(description !== undefined && { description }),
         ...(priority !== undefined && { priority }),
         ...(status !== undefined && { status }),
+        ...(autoReviewEnabled !== undefined && { autoReviewEnabled: Boolean(autoReviewEnabled) }),
+        ...(autoScanEnabled !== undefined && { autoScanEnabled: Boolean(autoScanEnabled) }),
+        ...(scanFrequencyDays !== undefined && { scanFrequencyDays: Number(scanFrequencyDays) }),
+        ...(improvementAutomationLevel !== undefined && {
+          improvementAutomationLevel: Math.max(0, Math.min(3, Number(improvementAutomationLevel))),
+        }),
+        ...(cycleFrequencyDays !== undefined && {
+          cycleFrequencyDays: Math.max(1, Number(cycleFrequencyDays)),
+        }),
       },
     });
     return Response.json(project);
