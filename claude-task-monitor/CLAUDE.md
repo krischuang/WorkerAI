@@ -423,6 +423,4 @@ Set in `.env`. `prisma/seed.ts` requires `import "dotenv/config"` at the top bec
 
 ## Known Limitations
 
-- **`ssh2` is incompatible with Turbopack's production build** (`non-ecmascript placeable asset`). The dev server works fine. Production builds are blocked until this upstream issue is resolved.
 - **Usage data is cached** — the task execution gate reads usage from the DB, not from a live SSH check. Refresh usage from the server/agent detail page before running if the cached data is stale (>10 min warning shown).
-- **Rate-limit false-positive on refresh** — if a previous task left a `rate_limit_error` visible in the tmux pane, the pre-flight scan in `fetchClaudeUsageViaTmux` will return `status: "rate_limited"` even though the API is fine. Press Enter in the tmux pane to push past the stale text.
