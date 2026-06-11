@@ -22,10 +22,16 @@ import {
   detectClaudeIdle,
   detectTaskCompletion,
   killTaskTmuxSession,
+  launchClaudeInTmux,
   type ClaudePermissionMode,
 } from "./lib/ssh-claude-tmux";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "./lib/task-dispatch";
-import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS } from "./lib/constants";
+import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS, POST_RESET_RESTART_BUFFER_MS } from "./lib/constants";
+import { resolveTaskTimeout } from "./lib/task-timeout";
+import { runHealthChecks } from "./lib/worker-health";
+import { runAutoRecovery } from "./lib/auto-recovery";
+import { detectZombieTasks } from "./lib/zombie-detection";
+import { evaluateRetry } from "./lib/task-retry";
 import {
   shouldSkipDueToBackoff,
   recordDispatchFailure,
@@ -35,6 +41,22 @@ import {
   clearAgentOffline,
   type BackoffEntry,
 } from "./lib/dispatch-backoff";
+import { upsertScheduledResume, triggerDueResumes, nearestResetsAt } from "./lib/scheduled-resume";
+import { emitAudit } from "./lib/audit";
+import { recalculateProjectProgress, reconcileAllProjects } from "./lib/project-progress";
+import {
+  archiveOldLogs,
+  shouldRunNightlyArchival,
+  completedHowToExitReason,
+  lastNLines,
+} from "./lib/execution-log-archival";
+import { updateAllServerCapacity } from "./lib/server-capacity";
+import { generateDailyReport, todaysReportExists } from "./lib/daily-report-service";
+import { generateWeeklyAnalytics, priorWeekStart, weeklyAnalyticsExists } from "./lib/weekly-analytics-service";
+import { unblockDependents } from "./lib/task-dependency";
+import { processReviewQueue } from "./lib/task-service";
+import { runDueProjectScans } from "./lib/project-scan-service";
+import { advanceImprovementCycles, startDueImprovementCycles } from "./lib/improvement-cycle-service";
 
 const TAG = "[usage-poller]";
 
@@ -44,13 +66,81 @@ const g = globalThis as unknown as {
   _pollerRunning?: boolean;
   _dispatchBackoff?: Map<string, BackoffEntry>;
   _agentOfflineStore?: Map<string, number>;
+  _pollerCycleCount?: number;
+  _lastArchivalDate?: string | null;
+  _lastDailyReportDate?: string | null;
+  _lastWeeklyAnalyticsDate?: string | null;
+  _lastProjectScanDate?: string | null;
+  // zombie-detection pane-line baseline (owned by lib/zombie-detection.ts)
+  _zombiePaneLines?: Map<string, number>;
+  // Server/agent IDs whose Claude CLI session must be restarted before the next
+  // /usage check (populated when a scheduled resume fires after a usage reset).
+  _pendingServerRestarts?: Set<string>;
+  _pendingAgentRestarts?: Set<string>;
 };
 
 if (!g._usagePollerStarted) {
   g._usagePollerStarted = true;
   if (!g._dispatchBackoff) g._dispatchBackoff = new Map();
   if (!g._agentOfflineStore) g._agentOfflineStore = new Map();
+  if (g._pollerCycleCount === undefined) g._pollerCycleCount = 0;
+  if (g._lastArchivalDate === undefined) g._lastArchivalDate = null;
+  if (g._lastDailyReportDate === undefined) g._lastDailyReportDate = null;
+  if (g._lastWeeklyAnalyticsDate === undefined) g._lastWeeklyAnalyticsDate = null;
+  if (g._lastProjectScanDate === undefined) g._lastProjectScanDate = null;
+  if (!g._pendingServerRestarts) g._pendingServerRestarts = new Set();
+  if (!g._pendingAgentRestarts) g._pendingAgentRestarts = new Set();
   startPoller();
+}
+
+async function runProjectScansIfNeeded() {
+  const now = new Date();
+  // Run once per day at or after 2 AM UTC (staggered from analytics/reports)
+  if (now.getUTCHours() < 2) return;
+  const todayKey = now.toISOString().slice(0, 10);
+  if (g._lastProjectScanDate === todayKey) return;
+  g._lastProjectScanDate = todayKey;
+  try {
+    await runDueProjectScans();
+  } catch (err) {
+    console.error(`${TAG} runDueProjectScans threw:`, err);
+  }
+}
+
+async function runWeeklyAnalyticsIfNeeded() {
+  const now = new Date();
+  // Only run on Mondays at or after 1 AM UTC
+  if (now.getUTCDay() !== 1 || now.getUTCHours() < 1) return;
+  const weekKey = now.toISOString().slice(0, 10);
+  if (g._lastWeeklyAnalyticsDate === weekKey) return;
+  try {
+    const weekStart = priorWeekStart(now);
+    const exists = await weeklyAnalyticsExists(weekStart);
+    if (!exists) {
+      await generateWeeklyAnalytics(weekStart);
+      console.log(`${TAG} Weekly analytics generated for week starting ${weekStart.toISOString().slice(0, 10)}`);
+    }
+    g._lastWeeklyAnalyticsDate = weekKey;
+  } catch (err) {
+    console.error(`${TAG} Weekly analytics threw:`, err);
+  }
+}
+
+async function runDailyReportIfNeeded() {
+  const now = new Date();
+  if (now.getUTCHours() < 1) return;
+  const todayUTC = now.toISOString().slice(0, 10);
+  if (g._lastDailyReportDate === todayUTC) return;
+  try {
+    const exists = await todaysReportExists();
+    if (!exists) {
+      await generateDailyReport("auto");
+      console.log(`${TAG} Auto daily report generated for ${todayUTC}`);
+    }
+    g._lastDailyReportDate = todayUTC;
+  } catch (err) {
+    console.error(`${TAG} Auto daily report threw:`, err);
+  }
 }
 
 function startPoller() {
@@ -62,6 +152,29 @@ function startPoller() {
 
     const backoff = g._dispatchBackoff!;
     const agentOfflineStore = g._agentOfflineStore!;
+    const pendingServerRestarts = g._pendingServerRestarts!;
+    const pendingAgentRestarts = g._pendingAgentRestarts!;
+
+    // ── 0. Compute and persist capacity scores for all servers ────────────────
+    try {
+      await updateAllServerCapacity();
+    } catch (err) {
+      console.error(`${TAG} updateAllServerCapacity threw:`, err);
+    }
+
+    // ── 0b. Fire any scheduled resumes whose time has arrived ─────────────────
+    // triggerDueResumes returns resources that need a Claude CLI restart before
+    // the next /usage check — the stale-cache problem means we must restart the
+    // process or /usage will continue reporting the pre-reset percentage.
+    try {
+      const triggered = await triggerDueResumes();
+      for (const { resourceType, resourceId } of triggered) {
+        if (resourceType === "server") pendingServerRestarts.add(resourceId);
+        else if (resourceType === "agent") pendingAgentRestarts.add(resourceId);
+      }
+    } catch (err) {
+      console.error(`${TAG} triggerDueResumes threw:`, err);
+    }
 
     // Servers confirmed offline (tmux session missing) in this cycle.
     const offlineServerIds = new Set<string>();
@@ -77,6 +190,9 @@ function startPoller() {
       username: string;
       sshKeyPath: string;
       tmuxSession: string;
+      claudePermissionMode: string | null;
+      pausedDueToUsage: boolean;
+      autoPauseEnabled: boolean;
     }[] = [];
 
     try {
@@ -89,6 +205,9 @@ function startPoller() {
           username: true,
           sshKeyPath: true,
           tmuxSession: true,
+          claudePermissionMode: true,
+          pausedDueToUsage: true,
+          autoPauseEnabled: true,
         },
       });
     } catch (err) {
@@ -97,14 +216,33 @@ function startPoller() {
 
     await Promise.allSettled(
       servers.map(async (srv) => {
-        const result = await fetchClaudeUsageViaTmux({
-          host: srv.host,
-          port: srv.port,
-          username: srv.username,
-          sshKeyPath: srv.sshKeyPath,
-        }, srv.tmuxSession);
+        const sshCfg = { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath };
+        const needsRestart = pendingServerRestarts.has(srv.id);
+
+        // ── Restart Claude CLI session if required by a scheduled resume ──────
+        // The Claude CLI caches the usage state for the lifetime of the process.
+        // Running /usage in the same session after 100% may return stale data even
+        // after the quota has reset.  We kill and relaunch before fetching.
+        if (needsRestart) {
+          pendingServerRestarts.delete(srv.id);
+          console.log(`${TAG} ${srv.name}: restarting Claude session after usage reset`);
+          const permMode = (srv.claudePermissionMode as ClaudePermissionMode) ?? "workspace_write";
+          const restartResult = await launchClaudeInTmux(sshCfg, permMode, srv.tmuxSession);
+          if (!restartResult.success) {
+            console.warn(`${TAG} ${srv.name}: session restart failed — ${restartResult.error}`);
+          } else {
+            console.log(`${TAG} ${srv.name}: session restarted, waiting for Claude startup`);
+            await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+          }
+        }
+
+        const result = await fetchClaudeUsageViaTmux(sshCfg, srv.tmuxSession);
 
         if (result.success) {
+          const freshSession = result.parsed.sessionPct ?? 0;
+          const freshWeek = result.parsed.weekPct ?? 0;
+          const isUnblocked = freshSession < USAGE_THRESHOLD && freshWeek < USAGE_THRESHOLD;
+
           await prisma.server.update({
             where: { id: srv.id },
             data: {
@@ -117,12 +255,45 @@ function startPoller() {
               claudeWeekResetsAt:    result.parsed.weekResetsAt      ?? null,
               claudeUsageRaw:        result.rawOutput.slice(0, 500),
               claudeUsageFetchedAt:  new Date(),
+              // If usage recovered after a restart, clear the pause immediately so
+              // the worker can accept tasks even if no tasks are currently queued.
+              ...(srv.pausedDueToUsage && isUnblocked ? { pausedDueToUsage: false, pausedAt: null } : {}),
             },
           });
-          console.log(
-            `${TAG} ${srv.name}: session=${result.parsed.sessionPct ?? "?"}% ` +
-              `week=${result.parsed.weekPct ?? "?"}%`
-          );
+
+          if (needsRestart) {
+            if (isUnblocked) {
+              console.log(
+                `${TAG} ${srv.name}: fresh usage fetched (session=${freshSession}% week=${freshWeek}%) — worker resumed`
+              );
+            } else {
+              // Still at limit after a full restart — schedule next attempt at the next reset.
+              console.log(
+                `${TAG} ${srv.name}: still rate-limited after restart ` +
+                `(session=${freshSession}% week=${freshWeek}%) — worker paused until next reset`
+              );
+              if (srv.autoPauseEnabled) {
+                const nextResetsAt = nearestResetsAt(
+                  result.parsed.sessionResetsAt,
+                  result.parsed.weekResetsAt,
+                );
+                if (nextResetsAt) {
+                  const scheduleAt = new Date(nextResetsAt.getTime() + POST_RESET_RESTART_BUFFER_MS);
+                  await upsertScheduledResume("server", srv.id, scheduleAt);
+                  console.log(
+                    `${TAG} ${srv.name}: rescheduled restart for ${scheduleAt.toISOString()}`
+                  );
+                }
+              }
+            }
+          } else {
+            console.log(
+              `${TAG} ${srv.name}: session=${freshSession}% week=${freshWeek}%`
+            );
+            if (srv.pausedDueToUsage && isUnblocked) {
+              console.log(`${TAG} ${srv.name}: usage recovered — worker resumed`);
+            }
+          }
         } else {
           const isTmuxMissing = result.status === "offline" &&
             (result.error ?? "").includes("not found");
@@ -160,6 +331,10 @@ function startPoller() {
       id: string;
       name: string;
       tmuxSession: string;
+      claudePermissionMode: string;
+      workDir: string | null;
+      pausedDueToUsage: boolean;
+      autoPauseEnabled: boolean;
       server: {
         host: string;
         port: number;
@@ -174,6 +349,10 @@ function startPoller() {
           id: true,
           name: true,
           tmuxSession: true,
+          claudePermissionMode: true,
+          workDir: true,
+          pausedDueToUsage: true,
+          autoPauseEnabled: true,
           server: {
             select: { host: true, port: true, username: true, sshKeyPath: true },
           },
@@ -210,10 +389,35 @@ function startPoller() {
           return;
         }
 
+        const needsRestart = pendingAgentRestarts.has(agent.id);
+
+        // ── Restart Claude CLI session if required by a scheduled resume ──────
+        if (needsRestart) {
+          pendingAgentRestarts.delete(agent.id);
+          console.log(`${TAG} Agent ${agent.name}: restarting Claude session after usage reset`);
+          const permMode = (agent.claudePermissionMode as ClaudePermissionMode) ?? "workspace_write";
+          const restartResult = await launchClaudeInTmux(
+            agent.server,
+            permMode,
+            agent.tmuxSession,
+            agent.workDir ?? undefined,
+          );
+          if (!restartResult.success) {
+            console.warn(`${TAG} Agent ${agent.name}: session restart failed — ${restartResult.error}`);
+          } else {
+            console.log(`${TAG} Agent ${agent.name}: session restarted, waiting for Claude startup`);
+            await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+          }
+        }
+
         const result = await fetchClaudeUsageViaTmux(agent.server, agent.tmuxSession);
 
         if (result.success) {
           clearAgentOffline(agent.id, agentOfflineStore);
+          const freshSession = result.parsed.sessionPct ?? 0;
+          const freshWeek = result.parsed.weekPct ?? 0;
+          const isUnblocked = freshSession < USAGE_THRESHOLD && freshWeek < USAGE_THRESHOLD;
+
           await prisma.agent.update({
             where: { id: agent.id },
             data: {
@@ -226,12 +430,42 @@ function startPoller() {
               claudeWeekResetsAt:    result.parsed.weekResetsAt      ?? null,
               claudeUsageRaw:        result.rawOutput.slice(0, 500),
               claudeUsageFetchedAt:  new Date(),
+              ...(agent.pausedDueToUsage && isUnblocked ? { pausedDueToUsage: false, pausedAt: null } : {}),
             },
           });
-          console.log(
-            `${TAG} Agent ${agent.name}: session=${result.parsed.sessionPct ?? "?"}% ` +
-              `week=${result.parsed.weekPct ?? "?"}%`
-          );
+
+          if (needsRestart) {
+            if (isUnblocked) {
+              console.log(
+                `${TAG} Agent ${agent.name}: fresh usage fetched (session=${freshSession}% week=${freshWeek}%) — worker resumed`
+              );
+            } else {
+              console.log(
+                `${TAG} Agent ${agent.name}: still rate-limited after restart ` +
+                `(session=${freshSession}% week=${freshWeek}%) — worker paused until next reset`
+              );
+              if (agent.autoPauseEnabled) {
+                const nextResetsAt = nearestResetsAt(
+                  result.parsed.sessionResetsAt,
+                  result.parsed.weekResetsAt,
+                );
+                if (nextResetsAt) {
+                  const scheduleAt = new Date(nextResetsAt.getTime() + POST_RESET_RESTART_BUFFER_MS);
+                  await upsertScheduledResume("agent", agent.id, scheduleAt);
+                  console.log(
+                    `${TAG} Agent ${agent.name}: rescheduled restart for ${scheduleAt.toISOString()}`
+                  );
+                }
+              }
+            }
+          } else {
+            console.log(
+              `${TAG} Agent ${agent.name}: session=${freshSession}% week=${freshWeek}%`
+            );
+            if (agent.pausedDueToUsage && isUnblocked) {
+              console.log(`${TAG} Agent ${agent.name}: usage recovered — worker resumed`);
+            }
+          }
         } else {
           const isTmuxMissing = result.status === "offline" &&
             (result.error ?? "").includes("not found");
@@ -251,6 +485,7 @@ function startPoller() {
               `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' not found — ` +
               `marked offline, queue advance skipped`
             );
+            emitAudit({ entityType: "agent", entityId: agent.id, eventType: "agent.offline", actorType: "poller", payload: { reason: "tmux_missing", tmuxSession: agent.tmuxSession } }).catch(() => {});
           } else {
             console.warn(
               `${TAG} Agent ${agent.name}: usage unavailable — ${result.status}` +
@@ -272,11 +507,14 @@ function startPoller() {
     // Tasks without a taskTmuxSession (legacy) fall back to server.tmuxSession.
     let runningTasks: {
       id: string;
+      projectId: string;
       serverId: string | null;
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
       taskTmuxSession: string | null;
+      timeoutMinutes: number | null;
       updatedAt: Date;
+      executionLogs: { id: string; startedAt: Date; status: string; finishedAt: Date | null }[];
       server: {
         id: string;
         name: string;
@@ -288,6 +526,7 @@ function startPoller() {
         claudePermissionMode: string | null;
         claudeSessionPct: number | null;
         claudeWeekPct: number | null;
+        defaultTaskTimeoutMinutes: number | null;
       } | null;
     }[] = [];
 
@@ -296,11 +535,19 @@ function startPoller() {
         where: { status: "running", agentId: null },
         select: {
           id: true,
+          projectId: true,
           serverId: true,
           completionNonce: true,
           tmuxOutputOffset: true,
           taskTmuxSession: true,
+          timeoutMinutes: true,
           updatedAt: true,
+          executionLogs: {
+            where: { status: "running", finishedAt: null },
+            orderBy: { startedAt: "desc" },
+            take: 1,
+            select: { id: true, startedAt: true, status: true, finishedAt: true },
+          },
           server: {
             select: {
               id: true,
@@ -313,6 +560,7 @@ function startPoller() {
               claudePermissionMode: true,
               claudeSessionPct: true,
               claudeWeekPct: true,
+              defaultTaskTimeoutMinutes: true,
             },
           },
         },
@@ -338,6 +586,51 @@ function startPoller() {
         if (offlineServerIds.has(serverId)) {
           console.log(`${TAG} ${srv.name}: skipping completion check for task "${task.id}" — server offline`);
           return;
+        }
+
+        // ── Timeout enforcement ──────────────────────────────────────────────
+        const latestRunLog = task.executionLogs[0] ?? null;
+        if (latestRunLog) {
+          const timeoutMin = resolveTaskTimeout(
+            task.timeoutMinutes,
+            srv.defaultTaskTimeoutMinutes,
+            null,
+          );
+          const deadlineMs = latestRunLog.startedAt.getTime() + timeoutMin * 60_000;
+          if (Date.now() > deadlineMs) {
+            const msg = `Execution timeout (${timeoutMin}min)`;
+            const timeoutAt = new Date();
+            console.log(`${TAG} ${srv.name}: task "${task.id}" exceeded ${timeoutMin}min timeout — failing`);
+            try {
+              await prisma.$transaction(async (tx) => {
+                await tx.task.update({ where: { id: task.id }, data: { status: "failed" } });
+                await tx.executionLog.update({
+                  where: { id: latestRunLog.id },
+                  data: {
+                    status: "failed",
+                    finishedAt: timeoutAt,
+                    errorMessage: msg,
+                    exitReason: "timeout",
+                    durationMs: timeoutAt.getTime() - latestRunLog.startedAt.getTime(),
+                  },
+                });
+              });
+            } catch (err) {
+              console.error(`${TAG} Task ${task.id}: failed to record timeout:`, err);
+            }
+            if (task.taskTmuxSession) {
+              const sshCfg = { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath };
+              await killTaskTmuxSession(sshCfg, task.id).catch(() => {});
+            }
+            clearDispatchBackoff(task.id, backoff);
+            console.log(`[TASK_TIMEOUT] taskId="${task.id}" timeoutMin=${timeoutMin}`);
+            emitAudit({ entityType: "task", entityId: task.id, eventType: "task.timeout", actorType: "poller", payload: { timeoutMin, serverId } }).catch(() => {});
+            recalculateProjectProgress(task.projectId).catch(() => {});
+            await evaluateRetry(task.id, "timeout").catch((err) => {
+              console.error(`${TAG} Task ${task.id}: retry evaluation failed:`, err);
+            });
+            return;
+          }
         }
 
         // Use the task's own session; fall back to server session for legacy tasks.
@@ -393,22 +686,54 @@ function startPoller() {
         if (!completedHow) return;
 
         try {
+          const finishedAt = new Date();
+          const paneCapture = completionResult.paneText
+            ? lastNLines(completionResult.paneText, 200)
+            : null;
+          const exitReason = completedHowToExitReason(completedHow);
+
           await prisma.$transaction(async (tx) => {
             const latestLog = await tx.executionLog.findFirst({
               where: { taskId: task.id, status: "running", finishedAt: null },
               orderBy: { createdAt: "desc" },
+              select: { id: true, startedAt: true },
             });
             await tx.task.update({ where: { id: task.id }, data: { status: "completed" } });
             if (latestLog) {
+              const durationMs = finishedAt.getTime() - latestLog.startedAt.getTime();
               await tx.executionLog.update({
                 where: { id: latestLog.id },
-                data: { status: "completed", finishedAt: new Date() },
+                data: {
+                  status: "completed",
+                  finishedAt,
+                  durationMs,
+                  exitReason,
+                  paneCapture,
+                },
               });
             }
           });
 
           clearDispatchBackoff(task.id, backoff);
           console.log(`[TASK_FINISHED] taskId="${task.id}" detectedBy="${completedHow}"`);
+          emitAudit({ entityType: "task", entityId: task.id, eventType: "task.completed", actorType: "poller", payload: { detectedBy: completedHow, serverId } }).catch(() => {});
+          recalculateProjectProgress(task.projectId).catch(() => {});
+          unblockDependents(task.id).catch(() => {});
+
+          // Schedule auto-review if project has autoReviewEnabled
+          prisma.project.findUnique({ where: { id: task.projectId }, select: { autoReviewEnabled: true } })
+            .then((proj) => {
+              if (!proj?.autoReviewEnabled) return;
+              return prisma.task.update({
+                where: { id: task.id },
+                data: {
+                  autoReviewEnabled: true,
+                  reviewStatus: "pending",
+                  reviewScheduledAt: new Date(Date.now() + 5 * 60_000),
+                },
+              });
+            })
+            .catch(() => {});
 
           // Clean up the per-task tmux session now that the task is done.
           if (task.taskTmuxSession) {
@@ -428,10 +753,13 @@ function startPoller() {
     // ── 2b. Detect completion + auto-advance queue (agent tasks) ─────────────
     let runningAgentTasks: {
       id: string;
+      projectId: string;
       agentId: string | null;
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
+      timeoutMinutes: number | null;
       updatedAt: Date;
+      executionLogs: { id: string; startedAt: Date; status: string; finishedAt: Date | null }[];
       agent: {
         id: string;
         name: string;
@@ -439,6 +767,7 @@ function startPoller() {
         claudePermissionMode: string;
         claudeSessionPct: number | null;
         claudeWeekPct: number | null;
+        defaultTaskTimeoutMinutes: number | null;
         server: {
           host: string;
           port: number;
@@ -453,10 +782,18 @@ function startPoller() {
         where: { status: "running", agentId: { not: null } },
         select: {
           id: true,
+          projectId: true,
           agentId: true,
           completionNonce: true,
           tmuxOutputOffset: true,
+          timeoutMinutes: true,
           updatedAt: true,
+          executionLogs: {
+            where: { status: "running", finishedAt: null },
+            orderBy: { startedAt: "desc" },
+            take: 1,
+            select: { id: true, startedAt: true, status: true, finishedAt: true },
+          },
           agent: {
             select: {
               id: true,
@@ -465,6 +802,7 @@ function startPoller() {
               claudePermissionMode: true,
               claudeSessionPct: true,
               claudeWeekPct: true,
+              defaultTaskTimeoutMinutes: true,
               server: {
                 select: { host: true, port: true, username: true, sshKeyPath: true },
               },
@@ -476,20 +814,30 @@ function startPoller() {
       console.error(`${TAG} Failed to load running agent tasks:`, err);
     }
 
+    // Map taskId → projectId for progress recalculation after status changes
+    const agentTaskProjectId = new Map<string, string>();
+    for (const t of runningAgentTasks) agentTaskProjectId.set(t.id, t.projectId);
+
     type AgentInfo = NonNullable<(typeof runningAgentTasks)[number]["agent"]>;
-    const byAgent = new Map<string, {
+    type AgentTaskEntry = {
       agent: AgentInfo;
       taskIds: string[];
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
       startedAt: Date;
-    }>();
+      // Per-task timeout info — keyed by taskId for timeout enforcement
+      taskTimeouts: Map<string, { timeoutMinutes: number | null; logId: string | null; logStartedAt: Date | null }>;
+    };
+    const byAgent = new Map<string, AgentTaskEntry>();
 
     for (const task of runningAgentTasks) {
       if (!task.agentId || !task.agent) continue;
+      const log = task.executionLogs[0] ?? null;
+      const timeoutEntry = { timeoutMinutes: task.timeoutMinutes, logId: log?.id ?? null, logStartedAt: log?.startedAt ?? null };
       const entry = byAgent.get(task.agentId);
       if (entry) {
         entry.taskIds.push(task.id);
+        entry.taskTimeouts.set(task.id, timeoutEntry);
       } else {
         byAgent.set(task.agentId, {
           agent: task.agent,
@@ -497,12 +845,13 @@ function startPoller() {
           completionNonce: task.completionNonce,
           tmuxOutputOffset: task.tmuxOutputOffset,
           startedAt: task.updatedAt,
+          taskTimeouts: new Map([[task.id, timeoutEntry]]),
         });
       }
     }
 
     await Promise.allSettled(
-      [...byAgent.entries()].map(async ([agentId, { agent, taskIds, completionNonce, tmuxOutputOffset, startedAt }]) => {
+      [...byAgent.entries()].map(async ([agentId, { agent, taskIds, completionNonce, tmuxOutputOffset, startedAt, taskTimeouts }]) => {
         if (offlineAgentIds.has(agentId)) {
           console.log(
             `${TAG} Agent ${agent.name}: skipping idle check — offline (tmux session missing)`
@@ -510,7 +859,54 @@ function startPoller() {
           return;
         }
 
-        const firstTaskId = taskIds[0];
+        // ── Per-task timeout enforcement for agent tasks ─────────────────────
+        const timedOutTaskIds: string[] = [];
+        for (const taskId of taskIds) {
+          const info = taskTimeouts.get(taskId);
+          if (!info?.logStartedAt) continue;
+          const timeoutMin = resolveTaskTimeout(info.timeoutMinutes, null, agent.defaultTaskTimeoutMinutes);
+          const deadlineMs = info.logStartedAt.getTime() + timeoutMin * 60_000;
+          if (Date.now() > deadlineMs) {
+            const msg = `Execution timeout (${timeoutMin}min)`;
+            const agentTimeoutAt = new Date();
+            console.log(`${TAG} Agent ${agent.name}: task "${taskId}" exceeded ${timeoutMin}min timeout — failing`);
+            try {
+              await prisma.$transaction(async (tx) => {
+                await tx.task.update({ where: { id: taskId }, data: { status: "failed" } });
+                if (info.logId) {
+                  await tx.executionLog.update({
+                    where: { id: info.logId },
+                    data: {
+                      status: "failed",
+                      finishedAt: agentTimeoutAt,
+                      errorMessage: msg,
+                      exitReason: "timeout",
+                      durationMs: info.logStartedAt
+                        ? agentTimeoutAt.getTime() - info.logStartedAt.getTime()
+                        : null,
+                    },
+                  });
+                }
+              });
+            } catch (err) {
+              console.error(`${TAG} Task ${taskId}: failed to record agent timeout:`, err);
+            }
+            clearDispatchBackoff(taskId, backoff);
+            timedOutTaskIds.push(taskId);
+            console.log(`[TASK_TIMEOUT] taskId="${taskId}" agentId="${agentId}" timeoutMin=${timeoutMin}`);
+            emitAudit({ entityType: "task", entityId: taskId, eventType: "task.timeout", actorType: "poller", payload: { timeoutMin, agentId } }).catch(() => {});
+            const projIdTimeout = agentTaskProjectId.get(taskId);
+            if (projIdTimeout) recalculateProjectProgress(projIdTimeout).catch(() => {});
+            await evaluateRetry(taskId, "timeout").catch((err) => {
+              console.error(`${TAG} Task ${taskId}: retry evaluation failed:`, err);
+            });
+          }
+        }
+        // Remove timed-out tasks from the set to check for completion
+        const remainingTaskIds = taskIds.filter((id) => !timedOutTaskIds.includes(id));
+        if (remainingTaskIds.length === 0) return;
+
+        const firstTaskId = remainingTaskIds[0];
         const completionResult = await detectTaskCompletion(
           agent.server,
           agent.tmuxSession,
@@ -532,6 +928,7 @@ function startPoller() {
             `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' not found during completion check — ` +
             `marking offline, skipping queue advance`
           );
+          emitAudit({ entityType: "agent", entityId: agentId, eventType: "agent.offline", actorType: "poller", payload: { reason: "tmux_missing_completion_check", tmuxSession: agent.tmuxSession } }).catch(() => {});
           return;
         }
 
@@ -553,12 +950,19 @@ function startPoller() {
         }
         if (!completedHow) return;
 
-        for (const taskId of taskIds) {
+        const agentFinishedAt = new Date();
+        const agentPaneCapture = completionResult.paneText
+          ? lastNLines(completionResult.paneText, 200)
+          : null;
+        const agentExitReason = completedHowToExitReason(completedHow);
+
+        for (const taskId of remainingTaskIds) {
           try {
             await prisma.$transaction(async (tx) => {
               const latestLog = await tx.executionLog.findFirst({
                 where: { taskId, status: "running", finishedAt: null },
                 orderBy: { createdAt: "desc" },
+                select: { id: true, startedAt: true },
               });
 
               await tx.task.update({
@@ -567,15 +971,42 @@ function startPoller() {
               });
 
               if (latestLog) {
+                const durationMs = agentFinishedAt.getTime() - latestLog.startedAt.getTime();
                 await tx.executionLog.update({
                   where: { id: latestLog.id },
-                  data: { status: "completed", finishedAt: new Date() },
+                  data: {
+                    status: "completed",
+                    finishedAt: agentFinishedAt,
+                    durationMs,
+                    exitReason: agentExitReason,
+                    paneCapture: agentPaneCapture,
+                  },
                 });
               }
             });
 
             clearDispatchBackoff(taskId, backoff);
             console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${completedHow}"`);
+            emitAudit({ entityType: "task", entityId: taskId, eventType: "task.completed", actorType: "poller", payload: { detectedBy: completedHow, agentId } }).catch(() => {});
+            const projIdCompleted = agentTaskProjectId.get(taskId);
+            if (projIdCompleted) {
+              recalculateProjectProgress(projIdCompleted).catch(() => {});
+              // Schedule auto-review if project has autoReviewEnabled
+              prisma.project.findUnique({ where: { id: projIdCompleted }, select: { autoReviewEnabled: true } })
+                .then((proj) => {
+                  if (!proj?.autoReviewEnabled) return;
+                  return prisma.task.update({
+                    where: { id: taskId },
+                    data: {
+                      autoReviewEnabled: true,
+                      reviewStatus: "pending",
+                      reviewScheduledAt: new Date(Date.now() + 5 * 60_000),
+                    },
+                  });
+                })
+                .catch(() => {});
+            }
+            unblockDependents(taskId).catch(() => {});
           } catch (err) {
             console.error(`${TAG} Task ${taskId}: failed to mark agent task completed:`, err);
           }
@@ -604,7 +1035,12 @@ function startPoller() {
         }
 
         const nextTask = await prisma.task.findFirst({
-          where: { agentId, status: "queued" },
+          where: {
+            agentId,
+            status: "queued",
+            blockedByCount: 0,
+            OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
+          },
           orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
           include: { project: { select: { name: true } } },
         });
@@ -666,6 +1102,10 @@ function startPoller() {
       claudePermissionMode: string;
       claudeSessionPct: number | null;
       claudeWeekPct: number | null;
+      claudeSessionResetsAt: Date | null;
+      claudeWeekResetsAt: Date | null;
+      autoPauseEnabled: boolean;
+      pausedDueToUsage: boolean;
     }[] = [];
 
     try {
@@ -684,6 +1124,10 @@ function startPoller() {
           claudePermissionMode: true,
           claudeSessionPct: true,
           claudeWeekPct: true,
+          claudeSessionResetsAt: true,
+          claudeWeekResetsAt: true,
+          autoPauseEnabled: true,
+          pausedDueToUsage: true,
         },
       });
     } catch (err) {
@@ -696,14 +1140,59 @@ function startPoller() {
         const weekPct = srv.claudeWeekPct ?? 0;
 
         if (sessionPct >= USAGE_THRESHOLD || weekPct >= USAGE_THRESHOLD) {
-          console.log(
-            `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping`
-          );
+          if (srv.pausedDueToUsage) {
+            // Already paused — suppress per-cycle noise, resume will fire at scheduled time.
+            return;
+          }
+          if (srv.autoPauseEnabled) {
+            const resetAt = nearestResetsAt(srv.claudeSessionResetsAt, srv.claudeWeekResetsAt);
+            if (resetAt) {
+              // Schedule restart + re-check POST_RESET_RESTART_BUFFER_MS after the quota
+              // resets, so the fresh Claude CLI session reflects the actual new quota.
+              const scheduleAt = new Date(resetAt.getTime() + POST_RESET_RESTART_BUFFER_MS);
+              await upsertScheduledResume("server", srv.id, scheduleAt);
+              try {
+                await prisma.server.update({
+                  where: { id: srv.id },
+                  data: { pausedDueToUsage: true, pausedAt: new Date() },
+                });
+              } catch { /* non-fatal */ }
+              console.log(
+                `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%) — ` +
+                `worker paused until ${resetAt.toISOString()}, restart scheduled at ${scheduleAt.toISOString()}`
+              );
+            } else {
+              console.log(
+                `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), no reset time known`
+              );
+            }
+          } else {
+            console.log(
+              `${TAG} ${srv.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping`
+            );
+          }
           return;
         }
 
+        // Usage back below threshold — clear any stale pause flag.
+        if (srv.pausedDueToUsage) {
+          try {
+            await prisma.server.update({
+              where: { id: srv.id },
+              data: { pausedDueToUsage: false, pausedAt: null },
+            });
+            console.log(`${TAG} ${srv.name}: usage back below threshold — auto-unpaused`);
+          } catch { /* non-fatal */ }
+        }
+
         const nextTask = await prisma.task.findFirst({
-          where: { serverId: srv.id, status: "queued", agentId: null },
+          where: {
+            serverId: srv.id,
+            status: "queued",
+            agentId: null,
+            blockedByCount: 0,
+            OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
+          },
           orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
           include: { project: { select: { name: true } } },
         });
@@ -754,6 +1243,10 @@ function startPoller() {
       claudePermissionMode: string;
       claudeSessionPct: number | null;
       claudeWeekPct: number | null;
+      claudeSessionResetsAt: Date | null;
+      claudeWeekResetsAt: Date | null;
+      autoPauseEnabled: boolean;
+      pausedDueToUsage: boolean;
       server: {
         host: string;
         port: number;
@@ -778,6 +1271,10 @@ function startPoller() {
           claudePermissionMode: true,
           claudeSessionPct: true,
           claudeWeekPct: true,
+          claudeSessionResetsAt: true,
+          claudeWeekResetsAt: true,
+          autoPauseEnabled: true,
+          pausedDueToUsage: true,
           server: {
             select: { host: true, port: true, username: true, sshKeyPath: true },
           },
@@ -793,10 +1290,47 @@ function startPoller() {
         const weekPct = agent.claudeWeekPct ?? 0;
 
         if (sessionPct >= USAGE_THRESHOLD || weekPct >= USAGE_THRESHOLD) {
-          console.log(
-            `${TAG} Agent ${agent.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping`
-          );
+          if (agent.pausedDueToUsage) {
+            // Already paused — suppress per-cycle noise.
+            return;
+          }
+          if (agent.autoPauseEnabled) {
+            const resetAt = nearestResetsAt(agent.claudeSessionResetsAt, agent.claudeWeekResetsAt);
+            if (resetAt) {
+              const scheduleAt = new Date(resetAt.getTime() + POST_RESET_RESTART_BUFFER_MS);
+              await upsertScheduledResume("agent", agent.id, scheduleAt);
+              try {
+                await prisma.agent.update({
+                  where: { id: agent.id },
+                  data: { pausedDueToUsage: true, pausedAt: new Date() },
+                });
+              } catch { /* non-fatal */ }
+              console.log(
+                `${TAG} Agent ${agent.name}: usage at limit (session=${sessionPct}% week=${weekPct}%) — ` +
+                `worker paused until ${resetAt.toISOString()}, restart scheduled at ${scheduleAt.toISOString()}`
+              );
+            } else {
+              console.log(
+                `${TAG} Agent ${agent.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), no reset time known`
+              );
+            }
+          } else {
+            console.log(
+              `${TAG} Agent ${agent.name}: usage at limit (session=${sessionPct}% week=${weekPct}%), skipping`
+            );
+          }
           return;
+        }
+
+        // Usage back below threshold — clear any stale pause flag.
+        if (agent.pausedDueToUsage) {
+          try {
+            await prisma.agent.update({
+              where: { id: agent.id },
+              data: { pausedDueToUsage: false, pausedAt: null },
+            });
+            console.log(`${TAG} Agent ${agent.name}: usage back below threshold — auto-unpaused`);
+          } catch { /* non-fatal */ }
         }
 
         const idleResult = await detectClaudeIdle(agent.server, agent.tmuxSession);
@@ -814,6 +1348,7 @@ function startPoller() {
             `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' not found — ` +
             `marked offline, skipping queued task`
           );
+          emitAudit({ entityType: "agent", entityId: agent.id, eventType: "agent.offline", actorType: "poller", payload: { reason: "tmux_missing_queue_check", tmuxSession: agent.tmuxSession } }).catch(() => {});
           return;
         }
 
@@ -831,7 +1366,11 @@ function startPoller() {
         }
 
         const nextTask = await prisma.task.findFirst({
-          where: { agentId: agent.id, status: "queued" },
+          where: {
+            agentId: agent.id,
+            status: "queued",
+            OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
+          },
           orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
           include: { project: { select: { name: true } } },
         });
@@ -879,6 +1418,80 @@ function startPoller() {
           );
       });
     });
+
+    // ── 5. Zombie task detection (every cycle) ──────────────────────────────
+    try {
+      await detectZombieTasks();
+    } catch (err) {
+      console.error(`${TAG} Zombie detection threw:`, err);
+    }
+
+    // ── 6. Worker health checks + auto-recovery (every 5 cycles ≈ 5 min) ───
+    g._pollerCycleCount = (g._pollerCycleCount ?? 0) + 1;
+    if (g._pollerCycleCount % 5 === 0) {
+      console.log(`${TAG} Running worker health checks (cycle ${g._pollerCycleCount})`);
+      try {
+        await runHealthChecks();
+      } catch (err) {
+        console.error(`${TAG} Health check cycle threw:`, err);
+      }
+      // Auto-recovery runs after health checks so consecutiveFailures are fresh.
+      try {
+        await runAutoRecovery();
+      } catch (err) {
+        console.error(`${TAG} Auto-recovery sweep threw:`, err);
+      }
+    }
+
+    // ── 7. Project progress reconciliation (every 10 cycles ≈ 10 min) ────────
+    if (g._pollerCycleCount % 10 === 0) {
+      try {
+        await reconcileAllProjects();
+      } catch (err) {
+        console.error(`${TAG} Project progress reconciliation threw:`, err);
+      }
+    }
+
+    // ── 8. Nightly log archival (1 AM UTC, once per day) ─────────────────────
+    if (shouldRunNightlyArchival(g._lastArchivalDate ?? null)) {
+      try {
+        const { archived } = await archiveOldLogs();
+        g._lastArchivalDate = new Date().toISOString().slice(0, 10);
+        if (archived > 0) {
+          console.log(`${TAG} Nightly archival complete — ${archived} logs archived`);
+        }
+      } catch (err) {
+        console.error(`${TAG} Nightly log archival threw:`, err);
+      }
+    }
+
+    // ── 9. Auto daily report (1 AM UTC, once per day) ────────────────────────
+    await runDailyReportIfNeeded();
+
+    // ── 10. Weekly analytics (Monday 1 AM UTC, once per week) ────────────────
+    await runWeeklyAnalyticsIfNeeded();
+
+    // ── 11. Auto-review queue (every cycle, max 3 reviews) ───────────────────
+    try {
+      await processReviewQueue(3);
+    } catch (err) {
+      console.error(`${TAG} processReviewQueue threw:`, err);
+    }
+
+    // ── 12. Project improvement scans (daily at 2 AM UTC, frequency-gated) ───
+    await runProjectScansIfNeeded();
+
+    // ── 13. Continuous improvement engine (advance cycles + start due cycles) ─
+    try {
+      await advanceImprovementCycles();
+    } catch (err) {
+      console.error(`${TAG} advanceImprovementCycles threw:`, err);
+    }
+    try {
+      await startDueImprovementCycles();
+    } catch (err) {
+      console.error(`${TAG} startDueImprovementCycles threw:`, err);
+    }
 
     console.log(`${TAG} poll end`);
   }

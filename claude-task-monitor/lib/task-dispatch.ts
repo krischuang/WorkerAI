@@ -8,6 +8,7 @@ import {
   type ClaudePermissionMode,
 } from "@/lib/ssh-claude-tmux";
 import { withServerDispatchLock } from "@/lib/dispatch-lock";
+import { emitAudit } from "@/lib/audit";
 
 export type AgentDispatchOutcome =
   | { ok: true }
@@ -85,6 +86,10 @@ export async function tryDispatchTaskToServer(opts: {
     // Callback-form transaction gives the adapter a single connection for
     // both writes, preventing "client already executing a query" pg warnings.
     await prisma.$transaction(async (tx) => {
+      const taskData = await tx.task.findUnique({
+        where: { id: opts.taskId },
+        select: { retryCount: true },
+      });
       await tx.task.update({
         where: { id: opts.taskId },
         data: {
@@ -100,6 +105,7 @@ export async function tryDispatchTaskToServer(opts: {
           status: "running",
           startedAt: new Date(),
           logText: opts.logText,
+          retryNumber: taskData?.retryCount ?? 0,
         },
       });
     });
@@ -107,6 +113,13 @@ export async function tryDispatchTaskToServer(opts: {
     console.log(
       `[TASK_STARTED] taskId="${opts.taskId}" title="${opts.task.title}" serverId="${opts.serverId}" session="${sessionName}"`,
     );
+    await emitAudit({
+      entityType: "task",
+      entityId: opts.taskId,
+      eventType: "task.dispatched",
+      actorType: "poller",
+      payload: { serverId: opts.serverId, session: sessionName },
+    });
     return { ok: true };
   });
 }
@@ -171,6 +184,10 @@ export async function tryDispatchTaskToAgent(opts: {
     }
 
     await prisma.$transaction(async (tx) => {
+      const taskData = await tx.task.findUnique({
+        where: { id: opts.taskId },
+        select: { retryCount: true },
+      });
       await tx.task.update({
         where: { id: opts.taskId },
         data: {
@@ -186,6 +203,7 @@ export async function tryDispatchTaskToAgent(opts: {
           status: "running",
           startedAt: new Date(),
           logText: opts.logText,
+          retryNumber: taskData?.retryCount ?? 0,
         },
       });
     });
@@ -193,6 +211,13 @@ export async function tryDispatchTaskToAgent(opts: {
     console.log(
       `[TASK_STARTED] taskId="${opts.taskId}" title="${opts.task.title}" agentId="${opts.agentId}"`,
     );
+    await emitAudit({
+      entityType: "task",
+      entityId: opts.taskId,
+      eventType: "task.dispatched",
+      actorType: "poller",
+      payload: { agentId: opts.agentId, session: opts.tmuxSession },
+    });
     return { ok: true };
   });
 }
