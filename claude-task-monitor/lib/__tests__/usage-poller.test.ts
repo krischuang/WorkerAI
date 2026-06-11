@@ -135,8 +135,6 @@ describe("concurrent poll prevention", () => {
   it("skips a new tick while the previous one is still running", async () => {
     // Simulate the globalThis-based lock used in instrumentation.node.ts.
     const g = globalThis as { _pollerRunning?: boolean };
-    const TAG = "[test-poller]";
-
     async function tick(runCheck: () => Promise<void>): Promise<boolean> {
       if (g._pollerRunning) return false; // skipped
       g._pollerRunning = true;
@@ -293,6 +291,7 @@ describe("fetchClaudeUsageViaTmux — agent-specific tmux session", () => {
 
     mockExecSSH
       .mockResolvedValueOnce({ stdout: "yes", stderr: "", exitCode: 0 })  // has-session
+      .mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 })      // blank Enter (preflight scroll)
       .mockResolvedValueOnce({ stdout: ">", stderr: "", exitCode: 0 })     // pre-flight capture-pane
       .mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 })      // send /usage + sleep
       .mockResolvedValueOnce({ stdout: usagePane, stderr: "", exitCode: 0 }) // capture-pane after /usage
@@ -437,6 +436,7 @@ describe("fetchClaudeUsageViaTmux — multiple agents with different sessions", 
     // claude-agent-1: session exists and returns usage data
     mockExecSSH
       .mockResolvedValueOnce({ stdout: "yes", stderr: "", exitCode: 0 })  // has-session
+      .mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 })     // blank Enter (preflight scroll)
       .mockResolvedValueOnce({ stdout: ">", stderr: "", exitCode: 0 })    // pre-flight
       .mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 })     // send /usage
       .mockResolvedValueOnce({ stdout: usagePane, stderr: "", exitCode: 0 }) // capture

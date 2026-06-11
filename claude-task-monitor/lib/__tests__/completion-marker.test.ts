@@ -154,7 +154,6 @@ describe("detectTaskCompletion — marker inside prompt must not complete task",
 
   it("does not complete when valid block is before outputOffset", async () => {
     // Simulate: 5 pre-dispatch lines + prompt with valid block + no Claude output yet
-    const promptBlock = makeBlock(TASK_ID, "completed", NONCE);
     const preLines = ["line1", "line2", "line3", "line4", "line5"];
     const promptLines = [
       "You are an automated task executor.",
