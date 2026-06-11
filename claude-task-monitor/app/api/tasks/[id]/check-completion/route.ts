@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { detectClaudeIdle, killTaskTmuxSession } from "@/lib/ssh-claude-tmux";
 import { serverError } from "@/lib/api-error";
 import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
+import { unblockDependents } from "@/lib/task-dependency";
 
 export const maxDuration = 15;
 
@@ -92,6 +93,7 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
       await killTaskTmuxSession(sshConfig, id);
     }
 
+    unblockDependents(id).catch(() => {});
     return NextResponse.json({ completed: true });
   } catch (err) {
     return serverError("tasks/[id]/check-completion POST", err);

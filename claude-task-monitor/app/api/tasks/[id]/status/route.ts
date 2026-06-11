@@ -4,6 +4,7 @@ import { validateStatusUpdate } from "@/lib/task-validation";
 import { validateTransition } from "@/lib/task-transitions";
 import type { NextRequest } from "next/server";
 import type { $Enums } from "@/app/generated/prisma/client";
+import { recalculateProjectProgress } from "@/lib/project-progress";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -34,6 +35,9 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       where: { id },
       data: { status: status as $Enums.TaskStatus },
     });
+    if (task.projectId) {
+      recalculateProjectProgress(task.projectId).catch(() => {});
+    }
     return Response.json(task);
   } catch (err) {
     return serverError("tasks/[id]/status PUT", err);
