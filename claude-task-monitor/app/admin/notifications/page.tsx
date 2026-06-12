@@ -6,12 +6,47 @@ import { PageHeader, Btn, FormField, inputCls } from "@/app/_components/ui";
 interface Config {
   webhook_url: string;
   webhook_secret: string;
+  smtp_host: string;
+  smtp_port: string;
+  smtp_user: string;
+  smtp_from: string;
+  alert_email_to: string;
+}
+
+interface WebhookDelivery {
+  timestamp: string;
+  status: string;
+}
+
+interface WebhookFailure {
+  timestamp: string;
+  eventType: string;
+  statusCode: number | null;
+  error: string;
+}
+
+interface WebhookStatus {
+  configured: boolean;
+  lastDelivery: WebhookDelivery | null;
+  lastFailure: WebhookFailure | null;
 }
 
 type TestStatus = "idle" | "sending" | "ok" | "error";
+type EmailTestStatus = "idle" | "sending" | "ok" | "error";
+
+function formatTs(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
 
 export default function NotificationsPage() {
-  const [config, setConfig] = useState<Config>({ webhook_url: "", webhook_secret: "" });
+  const [config, setConfig] = useState<Config>({
+    webhook_url: "", webhook_secret: "",
+    smtp_host: "", smtp_port: "587", smtp_user: "", smtp_from: "", alert_email_to: "",
+  });
+  const [smtpPass, setSmtpPass] = useState("");
+  const [emailTestStatus, setEmailTestStatus] = useState<EmailTestStatus>("idle");
+  const [emailTestDetail, setEmailTestDetail] = useState<string | null>(null);
+  const [webhookStatus, setWebhookStatus] = useState<WebhookStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -20,17 +55,26 @@ export default function NotificationsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const loadConfig = useCallback(() => {
-    fetch("/api/admin/config")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data) {
-          setConfig({
-            webhook_url: data.webhook_url ?? "",
-            webhook_secret: data.webhook_secret ?? "",
-          });
-        }
-        setLoading(false);
-      });
+    Promise.all([
+      fetch("/api/admin/config").then((r) => (r.ok ? r.json() : null)),
+      fetch("/api/admin/webhook-status").then((r) => (r.ok ? r.json() : null)),
+    ]).then(([configData, statusData]) => {
+      if (configData) {
+        setConfig({
+          webhook_url: configData.webhook_url ?? "",
+          webhook_secret: configData.webhook_secret ?? "",
+          smtp_host: configData.smtp_host ?? "",
+          smtp_port: configData.smtp_port ?? "587",
+          smtp_user: configData.smtp_user ?? "",
+          smtp_from: configData.smtp_from ?? "",
+          alert_email_to: configData.alert_email_to ?? "",
+        });
+      }
+      if (statusData) {
+        setWebhookStatus(statusData as WebhookStatus);
+      }
+      setLoading(false);
+    });
   }, []);
 
   useEffect(() => { loadConfig(); }, [loadConfig]);
@@ -39,13 +83,22 @@ export default function NotificationsPage() {
     setSaving(true);
     setError(null);
     setSaved(false);
+    const body: Record<string, string> = {
+      webhook_url: config.webhook_url.trim(),
+      webhook_secret: config.webhook_secret.trim(),
+      smtp_host: config.smtp_host.trim(),
+      smtp_port: config.smtp_port.trim() || "587",
+      smtp_user: config.smtp_user.trim(),
+      smtp_from: config.smtp_from.trim(),
+      alert_email_to: config.alert_email_to.trim(),
+    };
+    // Only send smtp_pass if the user typed something (empty = don't overwrite stored value)
+    if (smtpPass.trim()) body.smtp_pass = smtpPass.trim();
+
     const res = await fetch("/api/admin/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        webhook_url: config.webhook_url.trim(),
-        webhook_secret: config.webhook_secret.trim(),
-      }),
+      body: JSON.stringify(body),
     });
     setSaving(false);
     if (res.ok) {
@@ -69,7 +122,28 @@ export default function NotificationsPage() {
       setTestStatus("error");
       setTestDetail(body.error ?? `HTTP ${res.status}`);
     }
-    setTimeout(() => setTestStatus("idle"), 6000);
+    setTimeout(() => {
+      setTestStatus("idle");
+      // Refresh status after test
+      fetch("/api/admin/webhook-status")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => { if (data) setWebhookStatus(data as WebhookStatus); });
+    }, 6000);
+  }
+
+  async function handleTestEmail() {
+    setEmailTestStatus("sending");
+    setEmailTestDetail(null);
+    const res = await fetch("/api/admin/test-email", { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) {
+      setEmailTestStatus("ok");
+      setEmailTestDetail(`Test email sent to ${config.alert_email_to}`);
+    } else {
+      setEmailTestStatus("error");
+      setEmailTestDetail((body as { error?: string }).error ?? `HTTP ${res.status}`);
+    }
+    setTimeout(() => setEmailTestStatus("idle"), 8000);
   }
 
   if (loading) {
@@ -151,6 +225,169 @@ export default function NotificationsPage() {
             >
               {testStatus === "ok" ? "✓ " : "✗ "}
               {testDetail}
+            </p>
+          )}
+        </div>
+
+        {/* Delivery status */}
+        {webhookStatus && (
+          <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl p-6">
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-4">Delivery Status</h2>
+
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-600 dark:text-zinc-400 w-28 shrink-0">Configured</span>
+                <span
+                  className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                    webhookStatus.configured
+                      ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                      : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                  }`}
+                >
+                  {webhookStatus.configured ? "Yes" : "No"}
+                </span>
+              </div>
+
+              <div className="flex items-start gap-2">
+                <span className="text-sm text-zinc-600 dark:text-zinc-400 w-28 shrink-0">Last delivery</span>
+                {webhookStatus.lastDelivery ? (
+                  <div>
+                    <span className="text-sm text-zinc-900 dark:text-zinc-100">
+                      {formatTs(webhookStatus.lastDelivery.timestamp)}
+                    </span>
+                    <span className="ml-2 text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                      {webhookStatus.lastDelivery.status}
+                    </span>
+                  </div>
+                ) : (
+                  <span className="text-sm text-zinc-500 dark:text-zinc-500">No deliveries yet</span>
+                )}
+              </div>
+
+              <div className="flex items-start gap-2">
+                <span className="text-sm text-zinc-600 dark:text-zinc-400 w-28 shrink-0">Last failure</span>
+                {webhookStatus.lastFailure ? (
+                  <div className="space-y-1">
+                    <div>
+                      <span className="text-sm text-zinc-900 dark:text-zinc-100">
+                        {formatTs(webhookStatus.lastFailure.timestamp)}
+                      </span>
+                      <span className="ml-2 text-xs text-zinc-600 dark:text-zinc-400">
+                        {webhookStatus.lastFailure.eventType}
+                      </span>
+                    </div>
+                    <p className="text-xs text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded px-2 py-1">
+                      {webhookStatus.lastFailure.statusCode != null
+                        ? `HTTP ${webhookStatus.lastFailure.statusCode} — `
+                        : ""}
+                      {webhookStatus.lastFailure.error}
+                    </p>
+                  </div>
+                ) : (
+                  <span className="text-sm text-zinc-500 dark:text-zinc-500">No failures recorded</span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SMTP Email */}
+        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl p-6">
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">Email Alerts (SMTP)</h2>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
+            Send email alerts for task failures, stalled tasks, and unhealthy workers. Gate on smtp_host being set.
+          </p>
+
+          <div className="space-y-4">
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2">
+                <FormField label="SMTP Host" hint="e.g. smtp.gmail.com · leave blank to disable email alerts">
+                  <input
+                    type="text"
+                    value={config.smtp_host}
+                    onChange={(e) => setConfig((c) => ({ ...c, smtp_host: e.target.value }))}
+                    placeholder="smtp.example.com"
+                    className={inputCls}
+                  />
+                </FormField>
+              </div>
+              <FormField label="Port">
+                <input
+                  type="number"
+                  value={config.smtp_port}
+                  onChange={(e) => setConfig((c) => ({ ...c, smtp_port: e.target.value }))}
+                  placeholder="587"
+                  className={inputCls}
+                />
+              </FormField>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="SMTP Username">
+                <input
+                  type="text"
+                  value={config.smtp_user}
+                  onChange={(e) => setConfig((c) => ({ ...c, smtp_user: e.target.value }))}
+                  placeholder="alerts@example.com"
+                  className={inputCls}
+                  autoComplete="off"
+                />
+              </FormField>
+              <FormField label="SMTP Password" hint="Leave blank to keep existing password">
+                <input
+                  type="password"
+                  value={smtpPass}
+                  onChange={(e) => setSmtpPass(e.target.value)}
+                  placeholder="••••••••"
+                  className={inputCls}
+                  autoComplete="new-password"
+                />
+              </FormField>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="From Address" hint="Defaults to SMTP Username if blank">
+                <input
+                  type="email"
+                  value={config.smtp_from}
+                  onChange={(e) => setConfig((c) => ({ ...c, smtp_from: e.target.value }))}
+                  placeholder="alerts@example.com"
+                  className={inputCls}
+                />
+              </FormField>
+              <FormField label="Alert Recipient (To)" hint="Where alerts are sent">
+                <input
+                  type="email"
+                  value={config.alert_email_to}
+                  onChange={(e) => setConfig((c) => ({ ...c, alert_email_to: e.target.value }))}
+                  placeholder="oncall@example.com"
+                  className={inputCls}
+                />
+              </FormField>
+            </div>
+          </div>
+
+          <div className="mt-5 flex items-center gap-3">
+            <Btn
+              variant="secondary"
+              onClick={handleTestEmail}
+              disabled={!config.smtp_host.trim() || !config.alert_email_to.trim() || emailTestStatus === "sending"}
+            >
+              {emailTestStatus === "sending" ? "Sending…" : "Send test email"}
+            </Btn>
+            <span className="text-xs text-zinc-500">Save settings first, then test</span>
+          </div>
+
+          {(emailTestStatus === "ok" || emailTestStatus === "error") && emailTestDetail && (
+            <p
+              className={`mt-3 text-sm px-3 py-2 rounded-lg border ${
+                emailTestStatus === "ok"
+                  ? "text-green-700 bg-green-50 border-green-200"
+                  : "text-red-700 bg-red-50 border-red-200"
+              }`}
+            >
+              {emailTestStatus === "ok" ? "✓ " : "✗ "}
+              {emailTestDetail}
             </p>
           )}
         </div>

@@ -15,6 +15,7 @@
 
 import { createHmac } from "crypto";
 import { prisma } from "@/lib/prisma";
+import { sendAlertEmail } from "@/lib/email";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,7 @@ export async function getWebhookConfig(): Promise<WebhookConfig | null> {
 // ─── Payload ──────────────────────────────────────────────────────────────────
 
 export interface NotificationPayload {
-  event: "task.completed" | "task.failed";
+  event: "task.completed" | "task.failed" | "task.stalled";
   taskId: string;
   title: string;
   status: "completed" | "failed";
@@ -51,11 +52,30 @@ export interface NotificationPayload {
   errorMessage: string | null;
   durationMs: number | null;
   timestamp: string;
+  stallDetectedAt?: string | null;
+  lastProgressAt?: string | null;
+  timeStuckMinutes?: number | null;
+}
+
+/**
+ * Pure helper: converts raw stall timestamps into ISO strings for the payload.
+ * Exported for unit testing.
+ */
+export function buildStalledFields(stallData: {
+  stallDetectedAt: Date | null;
+  lastProgressAt: Date | null;
+  timeStuckMinutes: number;
+}): { stallDetectedAt: string | null; lastProgressAt: string | null; timeStuckMinutes: number } {
+  return {
+    stallDetectedAt: stallData.stallDetectedAt?.toISOString() ?? null,
+    lastProgressAt: stallData.lastProgressAt?.toISOString() ?? null,
+    timeStuckMinutes: stallData.timeStuckMinutes,
+  };
 }
 
 async function buildPayload(
   taskId: string,
-  event: "task.completed" | "task.failed",
+  event: "task.completed" | "task.failed" | "task.stalled",
 ): Promise<NotificationPayload | null> {
   const task = await prisma.task.findUnique({
     where: { id: taskId },
@@ -97,18 +117,35 @@ async function buildPayload(
 // ─── Format helpers ───────────────────────────────────────────────────────────
 
 function formatDiscord(p: NotificationPayload): object {
-  const isCompleted = p.status === "completed";
-  const color = isCompleted ? 0x22c55e : 0xef4444; // green : red
-  const emoji = isCompleted ? "✅" : "❌";
-  const duration = p.durationMs != null
-    ? ` · ${Math.round(p.durationMs / 1000)}s`
-    : "";
+  const isStalled   = p.event === "task.stalled";
+  const isCompleted = !isStalled && p.status === "completed";
+
+  const color = isStalled ? 0xf59e0b : isCompleted ? 0x22c55e : 0xef4444; // amber : green : red
+  const emoji = isStalled ? "⚠️" : isCompleted ? "✅" : "❌";
+  const label = isStalled ? "Stalled" : isCompleted ? "Completed" : "Failed";
+
   const project = p.projectName ? ` · ${p.projectName}` : "";
+
+  const stallFields = isStalled
+    ? [
+        ...(p.timeStuckMinutes != null
+          ? [{ name: "Stuck for", value: `${p.timeStuckMinutes}m`, inline: true }]
+          : []),
+        ...(p.stallDetectedAt
+          ? [{ name: "Stall detected", value: new Date(p.stallDetectedAt).toISOString(), inline: true }]
+          : []),
+      ]
+    : [];
+
+  const durationField =
+    !isStalled && p.durationMs != null
+      ? [{ name: "Duration", value: `${Math.round(p.durationMs / 1000)}s`, inline: true }]
+      : [];
 
   return {
     embeds: [
       {
-        title: `${emoji} Task ${isCompleted ? "Completed" : "Failed"}`,
+        title: `${emoji} Task ${label}`,
         description: p.title,
         color,
         fields: [
@@ -116,7 +153,8 @@ function formatDiscord(p: NotificationPayload): object {
             ? [{ name: "Error", value: p.errorMessage.slice(0, 1024), inline: false }]
             : []),
           { name: "Project", value: p.projectName ?? "(none)", inline: true },
-          ...(duration ? [{ name: "Duration", value: duration.slice(3), inline: true }] : []),
+          ...stallFields,
+          ...durationField,
         ],
         footer: { text: `taskId: ${p.taskId}${project}` },
         timestamp: p.timestamp,
@@ -126,11 +164,20 @@ function formatDiscord(p: NotificationPayload): object {
 }
 
 function formatSlack(p: NotificationPayload): object {
-  const isCompleted = p.status === "completed";
-  const emoji = isCompleted ? ":white_check_mark:" : ":x:";
-  const duration = p.durationMs != null
-    ? `\n*Duration:* ${Math.round(p.durationMs / 1000)}s`
-    : "";
+  const isStalled   = p.event === "task.stalled";
+  const isCompleted = !isStalled && p.status === "completed";
+
+  const emoji = isStalled ? ":warning:" : isCompleted ? ":white_check_mark:" : ":x:";
+  const label = isStalled ? "Stalled" : isCompleted ? "Completed" : "Failed";
+
+  const duration =
+    !isStalled && p.durationMs != null
+      ? `\n*Duration:* ${Math.round(p.durationMs / 1000)}s`
+      : "";
+  const stuckLine =
+    isStalled && p.timeStuckMinutes != null
+      ? `\n*Stuck for:* ${p.timeStuckMinutes}m`
+      : "";
 
   return {
     blocks: [
@@ -138,7 +185,7 @@ function formatSlack(p: NotificationPayload): object {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `${emoji} *Task ${isCompleted ? "Completed" : "Failed"}*\n${p.title}${duration}`,
+          text: `${emoji} *Task ${label}*\n${p.title}${duration}${stuckLine}`,
         },
       },
       {
@@ -178,6 +225,74 @@ function signPayload(body: string, secret: string, tsMs: number): string {
     .digest("hex");
 }
 
+// ─── Retry delivery ───────────────────────────────────────────────────────────
+
+const RETRY_DELAYS_MS = [2_000, 8_000, 20_000];
+const MAX_ATTEMPTS = 3;
+
+async function fireWebhook(
+  cfg: WebhookConfig,
+  body: string,
+  headers: Record<string, string>,
+  eventType: string,
+): Promise<void> {
+  let lastError: string | undefined;
+  let lastStatusCode: number | undefined;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt - 1]));
+    }
+
+    try {
+      const res = await fetch(cfg.url, {
+        method: "POST",
+        headers,
+        body,
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (res.ok) {
+        const deliveryRecord = JSON.stringify({ timestamp: new Date().toISOString(), status: "ok" });
+        await prisma.systemConfig.upsert({
+          where: { key: "webhook_last_delivery" },
+          create: { key: "webhook_last_delivery", value: deliveryRecord },
+          update: { value: deliveryRecord },
+        });
+        return;
+      }
+
+      lastStatusCode = res.status;
+      lastError = `HTTP ${res.status}`;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      lastStatusCode = undefined;
+    }
+  }
+
+  const failureRecord = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    eventType,
+    statusCode: lastStatusCode ?? null,
+    error: lastError ?? "Unknown error",
+  });
+  console.error(`[notification] Webhook delivery failed after ${MAX_ATTEMPTS} attempts for ${eventType}: ${lastError}`);
+  await Promise.all([
+    prisma.systemConfig.upsert({
+      where: { key: "webhook_last_failure" },
+      create: { key: "webhook_last_failure", value: failureRecord },
+      update: { value: failureRecord },
+    }),
+    // Increment cumulative failure counter for the /api/metrics endpoint.
+    prisma.$executeRaw`
+      INSERT INTO "SystemConfig" (id, key, value, "createdAt", "updatedAt")
+      VALUES (gen_random_uuid()::text, 'webhook_delivery_failures_total', '1', now(), now())
+      ON CONFLICT (key) DO UPDATE
+        SET value = (COALESCE("SystemConfig".value::bigint, 0) + 1)::text, "updatedAt" = now()
+    `,
+  ]);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -188,38 +303,320 @@ export async function emitNotification(
   taskId: string,
   event: "task.completed" | "task.failed",
 ): Promise<void> {
+  const payload = await buildPayload(taskId, event).catch(() => null);
+
+  // Webhook delivery
+  try {
+    const cfg = await getWebhookConfig();
+    if (cfg && payload) {
+      const body = formatBody(cfg.url, payload);
+      const tsMs = Date.now();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "User-Agent": "WorkerAI-Webhook/1.0",
+        "X-Webhook-Event": event,
+        "X-Webhook-Timestamp": String(tsMs),
+      };
+      if (cfg.secret) {
+        headers["X-Webhook-Signature"] = `sha256=${signPayload(body, cfg.secret, tsMs)}`;
+      }
+      await fireWebhook(cfg, body, headers, event);
+    }
+  } catch (err) {
+    console.warn("[notification] Webhook delivery error:", err);
+  }
+
+  // Email delivery — only for task.failed
+  if (event === "task.failed" && payload) {
+    sendAlertEmail({
+      subject: `[WorkerAI] Task failed: ${payload.title}`,
+      text: [
+        `Task "${payload.title}" failed.`,
+        payload.projectName ? `Project: ${payload.projectName}` : "",
+        payload.errorMessage ? `Error: ${payload.errorMessage}` : "",
+        `Task ID: ${payload.taskId}`,
+        `Time: ${payload.timestamp}`,
+      ].filter(Boolean).join("\n"),
+      html: `<p><strong>Task failed:</strong> ${payload.title}</p>
+${payload.projectName ? `<p>Project: ${payload.projectName}</p>` : ""}
+${payload.errorMessage ? `<p style="color:#dc2626">Error: ${payload.errorMessage}</p>` : ""}
+<p style="color:#6b7280;font-size:12px">Task ID: ${payload.taskId} · ${payload.timestamp}</p>`,
+    }).catch(() => {});
+  }
+}
+
+// ─── Worker unhealthy ─────────────────────────────────────────────────────────
+
+export interface WorkerUnhealthyPayload {
+  event: "worker.unhealthy";
+  resourceType: "server" | "agent";
+  resourceId: string;
+  name: string;
+  consecutiveFailures: number;
+  lastErrorMessage: string | null;
+  timestamp: string;
+}
+
+function formatDiscordWorkerUnhealthy(p: WorkerUnhealthyPayload): object {
+  return {
+    embeds: [
+      {
+        title: `🔴 Worker Unhealthy: ${p.name}`,
+        color: 0xef4444,
+        fields: [
+          { name: "Type", value: p.resourceType === "server" ? "Server" : "Agent", inline: true },
+          { name: "Consecutive Failures", value: String(p.consecutiveFailures), inline: true },
+          ...(p.lastErrorMessage
+            ? [{ name: "Last Error", value: p.lastErrorMessage.slice(0, 1024), inline: false }]
+            : []),
+        ],
+        footer: { text: `${p.resourceType}Id: ${p.resourceId}` },
+        timestamp: p.timestamp,
+      },
+    ],
+  };
+}
+
+function formatSlackWorkerUnhealthy(p: WorkerUnhealthyPayload): object {
+  return {
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `:red_circle: *Worker Unhealthy: ${p.name}*\n*Type:* ${p.resourceType} · *Failures:* ${p.consecutiveFailures}`,
+        },
+      },
+      ...(p.lastErrorMessage
+        ? [
+            {
+              type: "context",
+              elements: [
+                {
+                  type: "mrkdwn",
+                  text: `Error: ${p.lastErrorMessage.slice(0, 200)}`,
+                },
+              ],
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
+/**
+ * Fire-and-forget worker-unhealthy webhook alert.
+ * Call with `.catch(() => {})` — errors are logged but never propagate.
+ */
+export async function emitWorkerUnhealthyNotification(
+  payload: Omit<WorkerUnhealthyPayload, "event" | "timestamp">,
+): Promise<void> {
+  const full: WorkerUnhealthyPayload = {
+    ...payload,
+    event: "worker.unhealthy",
+    timestamp: new Date().toISOString(),
+  };
+
+  // Webhook delivery
+  try {
+    const cfg = await getWebhookConfig();
+    if (cfg) {
+      let body: string;
+      if (cfg.url.includes("discord.com/api/webhooks")) {
+        body = JSON.stringify(formatDiscordWorkerUnhealthy(full));
+      } else if (cfg.url.includes("hooks.slack.com") || cfg.url.includes("slack.com/services")) {
+        body = JSON.stringify(formatSlackWorkerUnhealthy(full));
+      } else {
+        body = JSON.stringify(full);
+      }
+      const tsMs = Date.now();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "User-Agent": "WorkerAI-Webhook/1.0",
+        "X-Webhook-Event": "worker.unhealthy",
+        "X-Webhook-Timestamp": String(tsMs),
+      };
+      if (cfg.secret) {
+        headers["X-Webhook-Signature"] = `sha256=${signPayload(body, cfg.secret, tsMs)}`;
+      }
+      await fireWebhook(cfg, body, headers, "worker.unhealthy");
+    }
+  } catch (err) {
+    console.warn("[notification] Worker-unhealthy webhook error:", err);
+  }
+
+  // Email delivery
+  sendAlertEmail({
+    subject: `[WorkerAI] Worker unhealthy: ${full.name}`,
+    text: [
+      `Worker "${full.name}" is unhealthy.`,
+      `Type: ${full.resourceType}`,
+      `Consecutive failures: ${full.consecutiveFailures}`,
+      full.lastErrorMessage ? `Last error: ${full.lastErrorMessage}` : "",
+      `Time: ${full.timestamp}`,
+    ].filter(Boolean).join("\n"),
+    html: `<p><strong>Worker unhealthy:</strong> ${full.name}</p>
+<p>Type: ${full.resourceType} · Consecutive failures: ${full.consecutiveFailures}</p>
+${full.lastErrorMessage ? `<p style="color:#dc2626">Error: ${full.lastErrorMessage}</p>` : ""}
+<p style="color:#6b7280;font-size:12px">${full.resourceType}Id: ${full.resourceId} · ${full.timestamp}</p>`,
+  }).catch(() => {});
+}
+
+/**
+ * Fire-and-forget stalled-task webhook notification.
+ * Emits a "task.stalled" event with extra stall diagnostics alongside the
+ * standard task fields.  Call with `.catch(() => {})`.
+ */
+export async function emitStalledNotification(
+  taskId: string,
+  stallData: {
+    stallDetectedAt: Date | null;
+    lastProgressAt: Date | null;
+    timeStuckMinutes: number;
+  },
+): Promise<void> {
+  const base = await buildPayload(taskId, "task.failed").catch(() => null);
+  const payload: NotificationPayload | null = base
+    ? { ...base, event: "task.stalled", ...buildStalledFields(stallData) }
+    : null;
+
+  // Webhook delivery
+  try {
+    const cfg = await getWebhookConfig();
+    if (cfg && payload) {
+      const body = formatBody(cfg.url, payload);
+      const tsMs = Date.now();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "User-Agent": "WorkerAI-Webhook/1.0",
+        "X-Webhook-Event": "task.stalled",
+        "X-Webhook-Timestamp": String(tsMs),
+      };
+      if (cfg.secret) {
+        headers["X-Webhook-Signature"] = `sha256=${signPayload(body, cfg.secret, tsMs)}`;
+      }
+      await fireWebhook(cfg, body, headers, "task.stalled");
+    }
+  } catch (err) {
+    console.warn("[notification] Stalled webhook delivery error:", err);
+  }
+
+  // Email delivery
+  if (payload) {
+    sendAlertEmail({
+      subject: `[WorkerAI] Task stalled: ${payload.title}`,
+      text: [
+        `Task "${payload.title}" appears to be stalled.`,
+        payload.projectName ? `Project: ${payload.projectName}` : "",
+        `Stuck for: ${stallData.timeStuckMinutes} minutes`,
+        stallData.stallDetectedAt ? `Stall detected at: ${stallData.stallDetectedAt.toISOString()}` : "",
+        payload.errorMessage ? `Last error: ${payload.errorMessage}` : "",
+        `Task ID: ${payload.taskId}`,
+      ].filter(Boolean).join("\n"),
+      html: `<p><strong>Task stalled:</strong> ${payload.title}</p>
+${payload.projectName ? `<p>Project: ${payload.projectName}</p>` : ""}
+<p style="color:#d97706">Stuck for ${stallData.timeStuckMinutes} minutes</p>
+${payload.errorMessage ? `<p style="color:#dc2626">Last error: ${payload.errorMessage}</p>` : ""}
+<p style="color:#6b7280;font-size:12px">Task ID: ${payload.taskId} · ${payload.timestamp}</p>`,
+    }).catch(() => {});
+  }
+}
+
+// ─── Worker disk full ─────────────────────────────────────────────────────────
+
+export interface WorkerDiskFullPayload {
+  event: "worker.disk_full";
+  resourceType: "server" | "agent";
+  resourceId: string;
+  name: string;
+  diskUsedBytes: bigint;
+  diskTotalBytes: bigint;
+  utilisationPct: number;
+  timestamp: string;
+}
+
+function formatDiscordDiskFull(p: WorkerDiskFullPayload): object {
+  const pct = Math.round(p.utilisationPct * 100);
+  const usedGb = (Number(p.diskUsedBytes) / 1_073_741_824).toFixed(1);
+  const totalGb = (Number(p.diskTotalBytes) / 1_073_741_824).toFixed(1);
+  return {
+    embeds: [
+      {
+        title: `🔴 Disk Almost Full: ${p.name}`,
+        color: 0xef4444,
+        fields: [
+          { name: "Type", value: p.resourceType === "server" ? "Server" : "Agent", inline: true },
+          { name: "Utilisation", value: `${pct}%`, inline: true },
+          { name: "Used / Total", value: `${usedGb} GB / ${totalGb} GB`, inline: true },
+        ],
+        footer: { text: `${p.resourceType}Id: ${p.resourceId}` },
+        timestamp: p.timestamp,
+      },
+    ],
+  };
+}
+
+function formatSlackDiskFull(p: WorkerDiskFullPayload): object {
+  const pct = Math.round(p.utilisationPct * 100);
+  const usedGb = (Number(p.diskUsedBytes) / 1_073_741_824).toFixed(1);
+  const totalGb = (Number(p.diskTotalBytes) / 1_073_741_824).toFixed(1);
+  return {
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `:red_circle: *Disk Almost Full: ${p.name}*\n*Type:* ${p.resourceType} · *Utilisation:* ${pct}% · *Used:* ${usedGb} GB / ${totalGb} GB`,
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * Fire-and-forget disk-full webhook alert.
+ * Fires when disk utilisation exceeds 90%. Call with `.catch(() => {})`.
+ */
+export async function emitDiskFullNotification(
+  payload: Omit<WorkerDiskFullPayload, "event" | "timestamp" | "utilisationPct">,
+): Promise<void> {
   try {
     const cfg = await getWebhookConfig();
     if (!cfg) return;
 
-    const payload = await buildPayload(taskId, event);
-    if (!payload) return;
+    const utilisationPct = Number(payload.diskTotalBytes) > 0
+      ? Number(payload.diskUsedBytes) / Number(payload.diskTotalBytes)
+      : 0;
 
-    const body = formatBody(cfg.url, payload);
+    const full: WorkerDiskFullPayload = {
+      ...payload,
+      event: "worker.disk_full",
+      utilisationPct,
+      timestamp: new Date().toISOString(),
+    };
+
+    let body: string;
+    if (cfg.url.includes("discord.com/api/webhooks")) {
+      body = JSON.stringify(formatDiscordDiskFull(full));
+    } else if (cfg.url.includes("hooks.slack.com") || cfg.url.includes("slack.com/services")) {
+      body = JSON.stringify(formatSlackDiskFull(full));
+    } else {
+      body = JSON.stringify(full, (_, v) => typeof v === "bigint" ? v.toString() : v);
+    }
+
     const tsMs = Date.now();
-
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "User-Agent": "WorkerAI-Webhook/1.0",
-      "X-Webhook-Event": event,
+      "X-Webhook-Event": "worker.disk_full",
       "X-Webhook-Timestamp": String(tsMs),
     };
-
     if (cfg.secret) {
       headers["X-Webhook-Signature"] = `sha256=${signPayload(body, cfg.secret, tsMs)}`;
     }
 
-    const res = await fetch(cfg.url, {
-      method: "POST",
-      headers,
-      body,
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!res.ok) {
-      console.warn(`[notification] Webhook POST to ${cfg.url} failed: HTTP ${res.status}`);
-    }
+    await fireWebhook(cfg, body, headers, "worker.disk_full");
   } catch (err) {
-    console.warn("[notification] Webhook delivery error:", err);
+    console.warn("[notification] Disk-full webhook error:", err);
   }
 }
