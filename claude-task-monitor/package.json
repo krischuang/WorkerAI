@@ -22,7 +22,8 @@
     "test:e2e": "playwright test",
     "test:e2e:ci": "playwright test --reporter=list --retries=1",
     "test:e2e:ui": "playwright test --ui",
-    "test:e2e:debug": "playwright test --debug"
+    "test:e2e:debug": "playwright test --debug",
+    "docs:generate": "npx tsx scripts/generate-openapi.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -30,12 +31,16 @@
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "bcryptjs": "^3.0.3",
     "concurrently": "^10.0.3",
     "lucide-react": "^1.17.0",
     "next": "15.5.6",
+    "nodemailer": "^8.0.11",
     "pg": "^8.21.0",
     "prisma": "^7.8.0",
     "react": "19.2.4",
