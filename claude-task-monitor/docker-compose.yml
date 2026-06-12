@@ -28,6 +28,14 @@ services:
       DB_HOST: db
       DB_PORT: "5432"
       DB_USER: postgres
+      # The container runs as root (home = /root).  SSH keys mounted at /root/.ssh
+      # are automatically accepted by validateSshKeyPath.  If your keys live
+      # elsewhere, also set SSH_KEY_ALLOWED_PATHS in your .env.
+      SSH_KEY_ALLOWED_PATHS: ${SSH_KEY_ALLOWED_PATHS:-/root/.ssh}
+    volumes:
+      # Mount the host SSH key directory so the app can reach remote workers.
+      # Override SSH_KEY_DIR in your shell or .env to point at a different path.
+      - ${SSH_KEY_DIR:-/root/.ssh}:/root/.ssh:ro
     ports:
       - "3000:3000"
       - "3099:3099"
