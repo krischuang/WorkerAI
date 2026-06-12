@@ -26,13 +26,29 @@ export function lastNLines(text: string, n: number): string {
 }
 
 /**
- * Nightly archival of execution logs older than 90 days.
+ * Nightly archival of execution logs older than the configured retention period.
  *
+ * Retention is read from SystemConfig key "execution_log_retention_days" (default: 90).
  * Sets archivedAt, nulls out logText and paneCapture (large fields),
  * preserving outputSummary, errorMessage, durationMs, exitReason.
  */
 export async function archiveOldLogs(): Promise<{ archived: number }> {
-  const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  // Read retention period from config; fall back to 90 days.
+  let retentionDays = 90;
+  try {
+    const cfg = await prisma.systemConfig.findUnique({
+      where: { key: "execution_log_retention_days" },
+      select: { value: true },
+    });
+    if (cfg) {
+      const parsed = parseInt(cfg.value, 10);
+      if (!isNaN(parsed) && parsed > 0) retentionDays = parsed;
+    }
+  } catch {
+    // Non-fatal — continue with default.
+  }
+
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
   try {
     const { count } = await prisma.executionLog.updateMany({
@@ -46,9 +62,7 @@ export async function archiveOldLogs(): Promise<{ archived: number }> {
         paneCapture: null,
       },
     });
-    if (count > 0) {
-      console.log(`${TAG} Archived ${count} execution logs (older than 90 days)`);
-    }
+    console.log(`${TAG} Archived ${count} execution logs (retention: ${retentionDays} days, cutoff: ${cutoff.toISOString().slice(0, 10)})`);
     return { archived: count };
   } catch (err) {
     console.error(`${TAG} archiveOldLogs failed:`, err);
