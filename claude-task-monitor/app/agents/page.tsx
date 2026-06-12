@@ -22,6 +22,8 @@ interface Agent {
   claudeUsageFetchedAt: string | null;
   server: { id: string; name: string; host: string };
   _count: { tasks: number };
+  maxConcurrentTasks: number;
+  runningTaskCount: number;
   pausedDueToUsage: boolean;
 }
 
@@ -157,7 +159,11 @@ export default function AgentsPage() {
                       <td className="hidden md:table-cell px-4 py-3"><UsageBar pct={agent.claudeSessionPct} resetAt={agent.claudeSessionResetsAt} /></td>
                       <td className="hidden md:table-cell px-4 py-3"><UsageBar pct={agent.claudeWeekPct} resetAt={agent.claudeWeekResetsAt} /></td>
                       <td className="hidden md:table-cell px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">{PERMISSION_LABEL[agent.claudePermissionMode]}</td>
-                      <td className="hidden md:table-cell px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">{agent._count.tasks}</td>
+                      <td className="hidden md:table-cell px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">
+                        <span title={`${agent._count.tasks} total tasks assigned`}>
+                          {agent.runningTaskCount}/{agent.maxConcurrentTasks ?? 1} running
+                        </span>
+                      </td>
                       <td className="px-4 py-3">
                         <Link href={`/agents/${agent.id}`} className="text-xs text-blue-600 hover:underline">
                           Details

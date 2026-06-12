@@ -40,6 +40,7 @@ interface Agent {
   updatedAt: string;
   server: { id: string; name: string; host: string; username: string; port: number };
   _count: { tasks: number };
+  maxConcurrentTasks: number;
   pausedDueToUsage: boolean;
   pausedAt: string | null;
   autoPauseEnabled: boolean;
@@ -137,6 +138,7 @@ export default function AgentDetailPage() {
   const [editWorkDir, setEditWorkDir] = useState("");
   const [editTmuxSession, setEditTmuxSession] = useState("");
   const [editMode, setEditMode] = useState<ClaudePermissionMode>("workspace_write");
+  const [editMaxConcurrentTasks, setEditMaxConcurrentTasks] = useState(1);
   const [saving, setSaving] = useState(false);
 
   // Delete confirm
@@ -160,6 +162,7 @@ export default function AgentDetailPage() {
         setEditWorkDir(data.workDir);
         setEditTmuxSession(data.tmuxSession);
         setEditMode(data.claudePermissionMode);
+        setEditMaxConcurrentTasks(data.maxConcurrentTasks ?? 1);
         setLoading(false);
       });
   }
@@ -264,6 +267,7 @@ export default function AgentDetailPage() {
         workDir: editWorkDir,
         tmuxSession: editTmuxSession,
         claudePermissionMode: editMode,
+        maxConcurrentTasks: editMaxConcurrentTasks,
       }),
     });
     setSaving(false);
@@ -350,8 +354,10 @@ export default function AgentDetailPage() {
           <p className="text-sm text-zinc-900 dark:text-zinc-100">{PERMISSION_LABEL[agent.claudePermissionMode]}</p>
         </div>
         <div className="bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 p-3">
-          <p className="text-xs text-zinc-500 font-medium mb-0.5">Tasks assigned</p>
-          <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{agent._count.tasks}</p>
+          <p className="text-xs text-zinc-500 font-medium mb-0.5">Concurrent capacity</p>
+          <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+            {tasks.filter((t) => t.status === "running").length}/{agent.maxConcurrentTasks ?? 1} tasks
+          </p>
         </div>
       </div>
 
@@ -555,6 +561,19 @@ HOME=${agent.workDir} claude login
                   <option key={m.value} value={m.value}>{m.label}</option>
                 ))}
               </select>
+            </FormField>
+            <FormField
+              label="Max concurrent tasks"
+              hint="How many tasks this agent runs in parallel (1–5). Each gets its own isolated tmux session."
+            >
+              <input
+                type="number"
+                min={1}
+                max={5}
+                value={editMaxConcurrentTasks}
+                onChange={(e) => setEditMaxConcurrentTasks(Math.min(5, Math.max(1, Number(e.target.value))))}
+                className={`${inputCls} w-24`}
+              />
             </FormField>
             <ModalActions>
               <Btn type="button" variant="secondary" onClick={() => setShowEdit(false)}>Cancel</Btn>
