@@ -4,7 +4,7 @@ import type { NextRequest } from "next/server";
 
 export interface SearchResult {
   id: string;
-  type: "task" | "project" | "agent" | "server";
+  type: "task" | "project" | "agent" | "server" | "log";
   title: string;
   excerpt: string;
   url: string;
@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
       return Response.json({ query: q, results: [] } satisfies SearchResponse);
     }
 
-    const [tasks, projects, agents, servers] = await Promise.all([
+    const [tasks, projects, agents, servers, logs] = await Promise.all([
       prisma.task.findMany({
         where: {
           status: { not: "archived" },
@@ -89,6 +89,31 @@ export async function GET(request: NextRequest) {
         take: PER_TYPE,
         orderBy: { name: "asc" },
       }),
+      // Search execution log output (outputSummary) and error messages
+      prisma.executionLog.findMany({
+        where: {
+          OR: [
+            { outputSummary: { contains: q, mode: "insensitive" } },
+            { errorMessage:  { contains: q, mode: "insensitive" } },
+          ],
+        },
+        select: {
+          id: true,
+          outputSummary: true,
+          errorMessage: true,
+          status: true,
+          startedAt: true,
+          task: {
+            select: {
+              id: true,
+              title: true,
+              project: { select: { name: true } },
+            },
+          },
+        },
+        take: PER_TYPE,
+        orderBy: { startedAt: "desc" },
+      }),
     ]);
 
     const results: SearchResult[] = [
@@ -123,6 +148,14 @@ export async function GET(request: NextRequest) {
         excerpt: s.host,
         url:     `/servers/${s.id}`,
         meta:    s.status ?? "",
+      })),
+      ...logs.map((l) => ({
+        id:      l.id,
+        type:    "log" as const,
+        title:   l.task.title,
+        excerpt: snip(l.outputSummary, q) || snip(l.errorMessage, q),
+        url:     `/tasks/${l.task.id}`,
+        meta:    `${l.status} · ${l.task.project.name} · ${new Date(l.startedAt).toLocaleDateString()}`,
       })),
     ];
 

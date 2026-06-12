@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Search, ClipboardList, FolderKanban, Bot, Server, X } from "lucide-react";
+import { Search, ClipboardList, FolderKanban, Bot, Server, X, FileText } from "lucide-react";
 
-type EntityType = "task" | "project" | "agent" | "server";
+type EntityType = "task" | "project" | "agent" | "server" | "log";
 
 type SearchResult = {
   id: string;
@@ -25,9 +25,10 @@ const typeConfig: Record<EntityType, { label: string; chip: string; icon: React.
   project: { label: "Project", chip: "bg-violet-100 text-violet-700", icon: FolderKanban },
   agent:   { label: "Agent",   chip: "bg-green-100 text-green-700",  icon: Bot },
   server:  { label: "Server",  chip: "bg-amber-100 text-amber-700",  icon: Server },
+  log:     { label: "Log",     chip: "bg-zinc-100 text-zinc-700",    icon: FileText },
 };
 
-const ORDER: EntityType[] = ["project", "task", "agent", "server"];
+const ORDER: EntityType[] = ["project", "task", "log", "agent", "server"];
 
 export function GlobalSearch() {
   const [query, setQuery] = useState("");
