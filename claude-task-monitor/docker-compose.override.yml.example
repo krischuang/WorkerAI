@@ -16,4 +16,7 @@ services:
     volumes:
       - .:/app
       - /app/node_modules
+      # Mount host SSH keys so the dev container can reach remote workers.
+      # Adjust the host-side path if your keys are elsewhere.
+      - ${SSH_KEY_DIR:-/root/.ssh}:/root/.ssh:ro
     command: ["sh", "-c", "npm run dev"]

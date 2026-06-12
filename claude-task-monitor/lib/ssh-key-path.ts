@@ -54,7 +54,20 @@ export function validateSshKeyPath(raw: unknown): SshKeyPathResult {
     if (parts[1] !== "home" || !parts[2] || parts.length < 4) return false;
     try { return fs.statSync(path.join("/home", parts[2])).isDirectory(); } catch { return false; }
   })();
-  if (!isUnderCurrentHome && !isUnderSystemHomes) {
+
+  // SSH_KEY_ALLOWED_PATHS: comma-separated absolute path prefixes for keys that
+  // live outside standard home directories (e.g. /root/.ssh when the app runs
+  // as a non-root user, or a custom mount point in Docker).
+  const isUnderAllowedPath = (process.env.SSH_KEY_ALLOWED_PATHS ?? "")
+    .split(",")
+    .map((p) => path.normalize(p.trim()))
+    .filter((p) => p.length > 1 && path.isAbsolute(p))
+    .some((prefix) => {
+      const prefixWithSep = prefix.endsWith(path.sep) ? prefix : prefix + path.sep;
+      return resolved === prefix || resolved.startsWith(prefixWithSep);
+    });
+
+  if (!isUnderCurrentHome && !isUnderSystemHomes && !isUnderAllowedPath) {
     return {
       ok: false,
       error: `sshKeyPath must be within a home directory (${home})`,
