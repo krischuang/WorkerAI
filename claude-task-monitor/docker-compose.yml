@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_dev
+      POSTGRES_DB: claude_task_monitor
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d claude_task_monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Override DATABASE_URL so the app connects to the 'db' service, not localhost.
+      DATABASE_URL: postgresql://postgres:postgres_dev@db:5432/claude_task_monitor?schema=public
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: postgres
+    ports:
+      - "3000:3000"
+      - "3099:3099"
+    entrypoint: ["sh", "/app/scripts/docker-entrypoint.sh"]
+    command: ["sh", "-c", "npm start & npm run ws & wait"]
+
+volumes:
+  db_data:
