@@ -1,0 +1,19 @@
+# Hot-reload development override.
+#
+# Copy this file to docker-compose.override.yml to enable live-reload in the
+# 'app' container.  Docker Compose automatically merges the override with
+# docker-compose.yml when both files exist in the same directory.
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   docker compose up --build
+#
+# Changes to source files on your host machine are reflected immediately inside
+# the container because the repo root is mounted at /app.  node_modules is kept
+# in an anonymous volume so the host copy does not shadow the container's build.
+
+services:
+  app:
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: ["sh", "-c", "npm run dev"]
