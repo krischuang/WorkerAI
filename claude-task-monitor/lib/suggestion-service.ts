@@ -270,3 +270,88 @@ export async function rejectSuggestion(
 
   return { ok: true };
 }
+
+export async function bulkApproveSuggestions(
+  projectId: string,
+  ids: string[],
+): Promise<{ ok: true; taskIds: string[]; skipped: number } | { ok: false; error: string }> {
+  if (ids.length === 0) return { ok: false, error: "No ids provided" };
+
+  const suggestions = await prisma.taskSuggestion.findMany({
+    where: { id: { in: ids }, projectId, status: "pending_review" },
+  });
+
+  const skipped = ids.length - suggestions.length;
+
+  if (suggestions.length === 0) {
+    return { ok: true, taskIds: [], skipped };
+  }
+
+  const taskIds = await prisma.$transaction(async (tx) => {
+    const created: string[] = [];
+    for (const s of suggestions) {
+      const t = await tx.task.create({
+        data: {
+          projectId: s.projectId,
+          title: s.title,
+          description: s.description,
+          priority: s.priority,
+          taskType: s.taskType,
+          estimatedCostLevel: s.estimatedCostLevel,
+          status: "pending",
+        },
+      });
+      await tx.taskSuggestion.update({
+        where: { id: s.id },
+        data: { status: "converted", convertedTaskId: t.id, reviewedAt: new Date() },
+      });
+      created.push(t.id);
+    }
+    return created;
+  });
+
+  await emitAudit({
+    entityType: "project",
+    entityId: projectId,
+    eventType: "suggestions.bulk_approved",
+    actorType: "user",
+    payload: { ids, taskIds, count: taskIds.length },
+  });
+
+  return { ok: true, taskIds, skipped };
+}
+
+export async function bulkRejectSuggestions(
+  projectId: string,
+  ids: string[],
+): Promise<{ ok: true; rejected: number; skipped: number } | { ok: false; error: string }> {
+  if (ids.length === 0) return { ok: false, error: "No ids provided" };
+
+  const suggestions = await prisma.taskSuggestion.findMany({
+    where: { id: { in: ids }, projectId, status: "pending_review" },
+  });
+
+  const skipped = ids.length - suggestions.length;
+  const rejectable = suggestions.map((s) => s.id);
+
+  if (rejectable.length === 0) {
+    return { ok: true, rejected: 0, skipped };
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.taskSuggestion.updateMany({
+      where: { id: { in: rejectable } },
+      data: { status: "rejected", reviewedAt: new Date() },
+    });
+  });
+
+  await emitAudit({
+    entityType: "project",
+    entityId: projectId,
+    eventType: "suggestions.bulk_rejected",
+    actorType: "user",
+    payload: { ids, count: rejectable.length },
+  });
+
+  return { ok: true, rejected: rejectable.length, skipped };
+}
