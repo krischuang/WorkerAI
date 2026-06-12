@@ -8,7 +8,47 @@ A task management platform for tracking AI-assisted work across projects, powere
 
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-## Getting Started
+## Quick Start (Docker — one command)
+
+> Requires [Docker](https://docs.docker.com/get-docker/) with the Compose plugin.
+
+```bash
+# 1. Copy the example env file and set AUTH_SECRET (everything else has safe defaults)
+cp .env.example .env
+# Edit .env: set AUTH_SECRET to a random string
+
+# 2. Start the database and app in one command
+docker compose up --build
+```
+
+The app will be available at <http://localhost:3000> once the database is ready and migrations have run automatically.
+
+**Ports**
+
+| Port | Service |
+|---|---|
+| 3000 | Next.js web UI |
+| 3099 | WebSocket SSH terminal server |
+
+**Hot-reload development**
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+docker compose up --build
+```
+
+With the override in place, your local source files are mounted into the container and `npm run dev` is used instead of the production build, so changes are reflected immediately.
+
+**Stop everything**
+
+```bash
+docker compose down          # stop containers (keep db volume)
+docker compose down -v       # stop and delete the db volume
+```
+
+---
+
+## Manual Setup (without Docker)
 
 First, run the development server:
 
