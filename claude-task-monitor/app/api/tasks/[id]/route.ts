@@ -4,7 +4,7 @@ import { serverError } from "@/lib/api-error";
 import { validateTaskUpdate } from "@/lib/task-validation";
 import type { NextRequest } from "next/server";
 import { USAGE_THRESHOLD } from "@/lib/constants";
-import { resolveTaskTimeout, computeTimeoutExpiresAt } from "@/lib/task-timeout";
+import { resolveTaskTimeout, computeTimeoutExpiresAt, TASK_TYPE_TIMEOUT_KEYS, type TaskTypeKey } from "@/lib/task-timeout";
 import { emitAudit } from "@/lib/audit";
 import { recalculateProjectProgress } from "@/lib/project-progress";
 
@@ -59,10 +59,16 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     const latestRunningLog = task.executionLogs.find(
       (l) => l.status === "running" && !l.finishedAt
     );
+    const taskTypeKey = TASK_TYPE_TIMEOUT_KEYS[task.taskType as TaskTypeKey];
+    const taskTypeRow = taskTypeKey
+      ? await prisma.systemConfig.findUnique({ where: { key: taskTypeKey }, select: { value: true } })
+      : null;
+    const taskTypeDefault = taskTypeRow ? (parseInt(taskTypeRow.value, 10) || null) : null;
     const timeoutMin = resolveTaskTimeout(
       task.timeoutMinutes,
       task.server?.defaultTaskTimeoutMinutes ?? null,
       task.agent?.defaultTaskTimeoutMinutes ?? null,
+      taskTypeDefault,
     );
     const timeoutExpiresAt = latestRunningLog
       ? computeTimeoutExpiresAt(latestRunningLog.startedAt, timeoutMin)
@@ -167,8 +173,12 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
                 agentId: agent.id,
                 sshConfig: { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
                 tmuxSession: agent.tmuxSession,
+                workDir: agent.workDir,
+                permissionMode: agent.claudePermissionMode as import("@/lib/ssh-claude-tmux").ClaudePermissionMode,
+                maxConcurrentTasks: agent.maxConcurrentTasks ?? 1,
                 task: { title: task.title, description: task.description, projectName: task.project?.name },
                 logText: `Auto-sent to agent "${agent.name}" (${agent.tmuxSession}) on server "${s.name}"`,
+                usageSnapshotPct: agent.claudeSessionPct,
               });
               if (outcome.ok) {
                 await prisma.agent.update({ where: { id: agent.id }, data: { status: "running" } });

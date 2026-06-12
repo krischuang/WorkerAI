@@ -30,7 +30,7 @@ export async function GET(request: Request) {
       project: { select: { name: true, priority: true } },
       _count: { select: { executionLogs: true } },
       executionLogs: {
-        select: { startedAt: true, finishedAt: true, actualCostUsd: true },
+        select: { startedAt: true, finishedAt: true, actualCostUsd: true, status: true },
         orderBy: { startedAt: "desc" as const },
         take: 1,
       },
@@ -83,6 +83,9 @@ export async function POST(request: Request) {
       taskType,
       timeoutMinutes,
       maxRetries,
+      // When true, callers opt out of priority inheritance and always get P3.
+      // Useful for seed scripts or bulk imports that supply their own values.
+      skipPriorityInherit,
     } = body;
 
     const validationErr = validateTaskCreate(body);
@@ -90,12 +93,25 @@ export async function POST(request: Request) {
       return Response.json({ error: validationErr.message }, { status: 400 });
     }
 
+    // Priority inheritance: if the caller omitted priority (and did not set
+    // skipPriorityInherit=true), inherit it from the parent project so that
+    // tasks created under a P1 project don't silently default to P3.
+    let resolvedPriority = priority;
+    if (!resolvedPriority && !skipPriorityInherit) {
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { priority: true },
+      });
+      if (project) resolvedPriority = project.priority;
+    }
+    resolvedPriority ??= "P3";
+
     const task = await prisma.task.create({
       data: {
         projectId,
         title,
         description,
-        priority: priority ?? "P3",
+        priority: resolvedPriority,
         status: status ?? "pending",
         estimatedCostLevel: estimatedCostLevel ?? "medium",
         taskType: taskType ?? "coding",
