@@ -127,26 +127,38 @@ export async function tryDispatchTaskToServer(opts: {
 }
 
 /**
- * Atomically dispatch a task to a specific agent's Claude tmux session.
- * Locks on agentId so each agent handles one task at a time independently.
+ * Atomically dispatch a task to a specific agent.
  *
- * Agents already have per-agent tmux sessions, so no per-task session is
- * created here.  The agent's configured tmuxSession is used directly.
+ * When maxConcurrentTasks > 1 (or when workDir/permissionMode are provided),
+ * creates an isolated per-task tmux session (claude_<taskId>) with HOME set to
+ * the agent's workDir — matching the pattern used by server-direct tasks.
+ * When maxConcurrentTasks = 1 and no workDir, uses the agent's shared tmuxSession
+ * for backward compatibility with existing single-task agents.
  *
- * Returns tmux_missing if the agent has no tmuxSession configured or if the
- * session does not exist on the server — callers should mark the agent offline.
+ * Locks on agentId so running-count checks are serialised.
+ *
+ * Returns tmux_missing if the session does not exist or cannot be created.
  */
 export async function tryDispatchTaskToAgent(opts: {
   taskId: string;
   agentId: string;
   sshConfig: SSHConfig;
   tmuxSession: string;
+  /** Agent HOME directory — required for per-task isolated sessions. */
+  workDir?: string;
+  /** Claude permission mode — required for per-task isolated sessions. */
+  permissionMode?: ClaudePermissionMode;
+  /** How many tasks this agent may run concurrently. Defaults to 1. */
+  maxConcurrentTasks?: number;
   task: { title: string; description?: string | null; projectName?: string | null };
   logText: string;
   usageSnapshotPct?: number | null;
 }): Promise<AgentDispatchOutcome> {
-  // Validate before acquiring the lock — no SSH needed for this check.
-  if (!opts.tmuxSession || !opts.tmuxSession.trim()) {
+  const maxConcurrent = opts.maxConcurrentTasks ?? 1;
+  const usePerTaskSession = maxConcurrent > 1 || !!(opts.workDir && opts.permissionMode);
+
+  // For legacy single-task mode (no workDir), validate the shared session name.
+  if (!usePerTaskSession && (!opts.tmuxSession || !opts.tmuxSession.trim())) {
     return {
       ok: false,
       reason: "tmux_missing" as const,
@@ -158,7 +170,7 @@ export async function tryDispatchTaskToAgent(opts: {
     const runningCount = await prisma.task.count({
       where: { agentId: opts.agentId, status: "running" },
     });
-    if (runningCount > 0) return { ok: false, reason: "already_running" as const };
+    if (runningCount >= maxConcurrent) return { ok: false, reason: "already_running" as const };
 
     const current = await prisma.task.findUnique({
       where: { id: opts.taskId },
@@ -168,19 +180,41 @@ export async function tryDispatchTaskToAgent(opts: {
       return { ok: false, reason: "task_not_dispatchable" as const };
     }
 
+    let sessionName: string;
+
+    if (usePerTaskSession) {
+      // Create an isolated per-task tmux session with the agent's HOME directory.
+      const launchResult = await createAndLaunchTaskSession(
+        opts.sshConfig,
+        opts.taskId,
+        (opts.permissionMode ?? "workspace_write") as ClaudePermissionMode,
+        opts.workDir,
+      );
+      if (!launchResult.success) {
+        return { ok: false, reason: "ssh_failed" as const, detail: launchResult.error };
+      }
+      sessionName = launchResult.sessionName;
+    } else {
+      sessionName = opts.tmuxSession;
+    }
+
     const nonce = crypto.randomUUID();
     const sendResult = await sendTaskToTmux(
       opts.sshConfig,
       { ...opts.task, taskId: opts.taskId, nonce },
-      opts.tmuxSession,
+      sessionName,
     );
     if (!sendResult.success) {
+      if (usePerTaskSession) {
+        await killTaskTmuxSession(opts.sshConfig, opts.taskId).catch(() => {});
+      }
       if (sendResult.error?.includes("not found")) {
-        // Session is missing — mark agent offline so the poller stops retrying.
-        await prisma.agent.update({
-          where: { id: opts.agentId },
-          data: { status: "offline" },
-        }).catch(() => {});
+        if (!usePerTaskSession) {
+          await prisma.agent.update({
+            where: { id: opts.agentId },
+            data: { status: "offline" },
+          }).catch(() => {});
+        }
         return { ok: false, reason: "tmux_missing" as const, detail: sendResult.error };
       }
       return { ok: false, reason: "ssh_failed" as const, detail: sendResult.error };
@@ -197,6 +231,7 @@ export async function tryDispatchTaskToAgent(opts: {
           status: "running",
           completionNonce: nonce,
           tmuxOutputOffset: sendResult.outputOffset ?? null,
+          ...(usePerTaskSession && { taskTmuxSession: sessionName }),
         },
       });
       await tx.agent.update({ where: { id: opts.agentId }, data: { status: "running" } });
@@ -213,14 +248,14 @@ export async function tryDispatchTaskToAgent(opts: {
     });
 
     console.log(
-      `[TASK_STARTED] taskId="${opts.taskId}" title="${opts.task.title}" agentId="${opts.agentId}"`,
+      `[TASK_STARTED] taskId="${opts.taskId}" title="${opts.task.title}" agentId="${opts.agentId}" session="${sessionName}"`,
     );
     await emitAudit({
       entityType: "task",
       entityId: opts.taskId,
       eventType: "task.dispatched",
       actorType: "poller",
-      payload: { agentId: opts.agentId, session: opts.tmuxSession },
+      payload: { agentId: opts.agentId, session: sessionName },
     });
     return { ok: true };
   });

@@ -174,10 +174,12 @@ export async function dispatchTask(taskId: string): Promise<DispatchResult> {
 
 export type ReviewResult =
   | { ok: true; verdict: "done"; newStatus: "archived" }
-  | { ok: true; verdict: "incomplete"; newStatus: "pending" }
+  | { ok: true; verdict: "incomplete"; newStatus: "pending" | "completed" }
   | { ok: true; verdict: null } // timed out — no verdict from Claude
   | { ok: false; reason: "not_found" | "not_completed" | "no_server" | "server_busy" }
   | { ok: false; reason: "ssh_failed"; detail?: string };
+
+const MAX_REVIEW_ATTEMPTS = 3;
 
 const REVIEW_POLL_INTERVAL_MS = 10_000;
 const REVIEW_POLL_TIMEOUT_MS  = 50_000;
@@ -314,17 +316,43 @@ export async function reviewTask(taskId: string): Promise<ReviewResult> {
     return { ok: true, verdict: "done", newStatus: "archived" };
   }
   if (verdict === "incomplete") {
+    const newAttempts = task.reviewAttempts + 1;
+    if (newAttempts >= MAX_REVIEW_ATTEMPTS) {
+      // Cap reached — stop looping; leave task as completed but mark review failed.
+      await prisma.task.update({
+        where: { id: taskId },
+        data: {
+          reviewStatus: "failed",
+          reviewAttempts: newAttempts,
+          reviewCompletedAt: completedAt,
+          ...(notes && { reviewVerdictNotes: notes }),
+          // status intentionally not changed — task remains "completed"
+          // retryCount intentionally not touched
+        },
+      });
+      await emitAudit({
+        entityType: "task",
+        entityId: taskId,
+        eventType: "task.review.max_attempts_reached",
+        actorType: "system",
+        payload: { attempts: newAttempts },
+      });
+      return { ok: true, verdict: "incomplete", newStatus: "completed" };
+    }
+
     await prisma.task.update({
       where: { id: taskId },
       data: {
         status: "pending",
         resultSummary: null,
         reviewStatus: "incomplete",
+        reviewAttempts: newAttempts,
         reviewCompletedAt: completedAt,
         ...(notes && { reviewVerdictNotes: notes }),
+        // retryCount intentionally not touched
       },
     });
-    await emitAudit({ entityType: "task", entityId: taskId, eventType: "task.review.incomplete", actorType: "system" });
+    await emitAudit({ entityType: "task", entityId: taskId, eventType: "task.review.incomplete", actorType: "system", payload: { attempt: newAttempts } });
     return { ok: true, verdict: "incomplete", newStatus: "pending" };
   }
 

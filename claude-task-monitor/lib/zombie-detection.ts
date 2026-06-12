@@ -18,7 +18,7 @@
 import { prisma } from "@/lib/prisma";
 import { execSSH } from "@/lib/ssh";
 import { killTaskTmuxSession } from "@/lib/ssh-claude-tmux";
-import { emitNotification } from "@/lib/notification";
+import { emitNotification, emitStalledNotification } from "@/lib/notification";
 
 const TAG = "[zombie]";
 
@@ -188,6 +188,12 @@ export async function detectZombieTasks(): Promise<void> {
       console.log(`${TAG} task "${task.id}": confirmed zombie (${stallMin}min stall) — failing`);
 
       await forceFailTask(task.id, errorMessage);
+
+      emitStalledNotification(task.id, {
+        stallDetectedAt: task.stallDetectedAt,
+        lastProgressAt: task.lastProgressAt ?? startedAt,
+        timeStuckMinutes: stallMin,
+      }).catch(() => {});
 
       // Kill the per-task tmux session if present.
       if (task.taskTmuxSession) {

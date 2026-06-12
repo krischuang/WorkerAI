@@ -176,7 +176,14 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
     return;
   }
 
-  const keyPath = resolveKeyPath(sshKeyPath);
+  let keyPath: string;
+  try {
+    keyPath = resolveKeyPath(sshKeyPath);
+  } catch (e) {
+    send({ type: "error", message: e instanceof Error ? e.message : "Invalid SSH key path" });
+    ws.close();
+    return;
+  }
   let privateKey: Buffer;
   try {
     privateKey = fs.readFileSync(keyPath);
