@@ -28,7 +28,7 @@ import {
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "./lib/task-dispatch";
 import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS, POST_RESET_RESTART_BUFFER_MS, estimateCostUsd } from "./lib/constants";
 import { parseTokenCounts } from "./lib/usage-parser";
-import { resolveTaskTimeout } from "./lib/task-timeout";
+import { resolveTaskTimeout, TASK_TYPE_TIMEOUT_KEYS, type TaskTypeKey } from "./lib/task-timeout";
 import { runHealthChecks } from "./lib/worker-health";
 import { runAutoRecovery } from "./lib/auto-recovery";
 import { detectZombieTasks } from "./lib/zombie-detection";
@@ -62,6 +62,7 @@ import { runDueProjectScans } from "./lib/project-scan-service";
 import { advanceImprovementCycles, startDueImprovementCycles } from "./lib/improvement-cycle-service";
 import { emitNotification } from "./lib/notification";
 import { scrubPaneCapture } from "./lib/pane-scrubber";
+import { runDueScheduledTasks } from "./lib/scheduled-task-service";
 
 const TAG = "[usage-poller]";
 
@@ -69,6 +70,7 @@ const TAG = "[usage-poller]";
 const g = globalThis as unknown as {
   _usagePollerStarted?: boolean;
   _pollerRunning?: boolean;
+  _shutdownRequested?: boolean;
   _dispatchBackoff?: Map<string, BackoffEntry>;
   _agentOfflineStore?: Map<string, number>;
   _pollerCycleCount?: number;
@@ -99,6 +101,7 @@ if (!g._usagePollerStarted) {
   if (g._lastProjectScanDate === undefined) g._lastProjectScanDate = null;
   if (!g._pendingServerRestarts) g._pendingServerRestarts = new Set();
   if (!g._pendingAgentRestarts) g._pendingAgentRestarts = new Set();
+  if (g._shutdownRequested === undefined) g._shutdownRequested = false;
   startPoller();
 }
 
@@ -218,6 +221,27 @@ function startPoller() {
     const agentOfflineStore = g._agentOfflineStore!;
     const pendingServerRestarts = g._pendingServerRestarts!;
     const pendingAgentRestarts = g._pendingAgentRestarts!;
+
+    // ── 0. Fetch per-taskType timeout defaults from SystemConfig ──────────────
+    const taskTypeTimeoutMinutes: Partial<Record<TaskTypeKey, number>> = {};
+    try {
+      const timeoutKeys = Object.values(TASK_TYPE_TIMEOUT_KEYS);
+      const timeoutRows = await prisma.systemConfig.findMany({
+        where: { key: { in: timeoutKeys } },
+        select: { key: true, value: true },
+      });
+      for (const row of timeoutRows) {
+        const typeEntry = Object.entries(TASK_TYPE_TIMEOUT_KEYS).find(([, v]) => v === row.key);
+        if (typeEntry) {
+          const parsed = parseInt(row.value, 10);
+          if (!isNaN(parsed) && parsed > 0) {
+            taskTypeTimeoutMinutes[typeEntry[0] as TaskTypeKey] = parsed;
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`${TAG} Failed to load per-taskType timeout config:`, err);
+    }
 
     // ── 0. Compute and persist capacity scores for all servers ────────────────
     try {
@@ -571,6 +595,7 @@ function startPoller() {
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
       taskTmuxSession: string | null;
+      taskType: string;
       timeoutMinutes: number | null;
       updatedAt: Date;
       disablePaneCapture: boolean;
@@ -601,6 +626,7 @@ function startPoller() {
           completionNonce: true,
           tmuxOutputOffset: true,
           taskTmuxSession: true,
+          taskType: true,
           timeoutMinutes: true,
           updatedAt: true,
           disablePaneCapture: true,
@@ -658,6 +684,7 @@ function startPoller() {
             task.timeoutMinutes,
             srv.defaultTaskTimeoutMinutes,
             null,
+            taskTypeTimeoutMinutes[task.taskType as TaskTypeKey],
           );
           const deadlineMs = latestRunLog.startedAt.getTime() + timeoutMin * 60_000;
           if (Date.now() > deadlineMs) {
@@ -827,6 +854,8 @@ function startPoller() {
       agentId: string | null;
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
+      taskTmuxSession: string | null;
+      taskType: string;
       timeoutMinutes: number | null;
       updatedAt: Date;
       disablePaneCapture: boolean;
@@ -835,11 +864,13 @@ function startPoller() {
         id: string;
         name: string;
         tmuxSession: string;
+        workDir: string;
         claudePermissionMode: string;
         claudeSessionPct: number | null;
         claudeWeekPct: number | null;
         claudeUsageRaw: string | null;
         defaultTaskTimeoutMinutes: number | null;
+        maxConcurrentTasks: number;
         server: {
           host: string;
           port: number;
@@ -858,6 +889,8 @@ function startPoller() {
           agentId: true,
           completionNonce: true,
           tmuxOutputOffset: true,
+          taskTmuxSession: true,
+          taskType: true,
           timeoutMinutes: true,
           updatedAt: true,
           disablePaneCapture: true,
@@ -872,11 +905,13 @@ function startPoller() {
               id: true,
               name: true,
               tmuxSession: true,
+              workDir: true,
               claudePermissionMode: true,
               claudeSessionPct: true,
               claudeWeekPct: true,
               claudeUsageRaw: true,
               defaultTaskTimeoutMinutes: true,
+              maxConcurrentTasks: true,
               server: {
                 select: { host: true, port: true, username: true, sshKeyPath: true },
               },
@@ -893,6 +928,17 @@ function startPoller() {
     for (const t of runningAgentTasks) agentTaskProjectId.set(t.id, t.projectId);
 
     type AgentInfo = NonNullable<(typeof runningAgentTasks)[number]["agent"]>;
+    type TaskTimeoutInfo = {
+      timeoutMinutes: number | null;
+      taskType: string;
+      logId: string | null;
+      logStartedAt: Date | null;
+      // Per-task session fields (set when task uses an isolated tmux session)
+      completionNonce: string | null;
+      tmuxOutputOffset: number | null;
+      taskTmuxSession: string | null;
+      taskStartedAt: Date;
+    };
     type AgentTaskEntry = {
       agent: AgentInfo;
       taskIds: string[];
@@ -900,15 +946,23 @@ function startPoller() {
       tmuxOutputOffset: number | null;
       startedAt: Date;
       disablePaneCapture: boolean;
-      // Per-task timeout info — keyed by taskId for timeout enforcement
-      taskTimeouts: Map<string, { timeoutMinutes: number | null; logId: string | null; logStartedAt: Date | null }>;
+      taskTimeouts: Map<string, TaskTimeoutInfo>;
     };
     const byAgent = new Map<string, AgentTaskEntry>();
 
     for (const task of runningAgentTasks) {
       if (!task.agentId || !task.agent) continue;
       const log = task.executionLogs[0] ?? null;
-      const timeoutEntry = { timeoutMinutes: task.timeoutMinutes, logId: log?.id ?? null, logStartedAt: log?.startedAt ?? null };
+      const timeoutEntry: TaskTimeoutInfo = {
+        timeoutMinutes: task.timeoutMinutes,
+        taskType: task.taskType,
+        logId: log?.id ?? null,
+        logStartedAt: log?.startedAt ?? null,
+        completionNonce: task.completionNonce,
+        tmuxOutputOffset: task.tmuxOutputOffset,
+        taskTmuxSession: task.taskTmuxSession,
+        taskStartedAt: task.updatedAt,
+      };
       const entry = byAgent.get(task.agentId);
       if (entry) {
         entry.taskIds.push(task.id);
@@ -941,7 +995,7 @@ function startPoller() {
         for (const taskId of taskIds) {
           const info = taskTimeouts.get(taskId);
           if (!info?.logStartedAt) continue;
-          const timeoutMin = resolveTaskTimeout(info.timeoutMinutes, null, agent.defaultTaskTimeoutMinutes);
+          const timeoutMin = resolveTaskTimeout(info.timeoutMinutes, null, agent.defaultTaskTimeoutMinutes, taskTypeTimeoutMinutes[info.taskType as TaskTypeKey]);
           const deadlineMs = info.logStartedAt.getTime() + timeoutMin * 60_000;
           if (Date.now() > deadlineMs) {
             const msg = `Execution timeout (${timeoutMin}min)`;
@@ -982,131 +1036,231 @@ function startPoller() {
         }
         // Remove timed-out tasks from the set to check for completion
         const remainingTaskIds = taskIds.filter((id) => !timedOutTaskIds.includes(id));
-        if (remainingTaskIds.length === 0) return;
 
-        const firstTaskId = remainingTaskIds[0];
-        const completionResult = await detectTaskCompletion(
-          agent.server,
-          agent.tmuxSession,
-          firstTaskId,
-          completionNonce ?? undefined,
-          tmuxOutputOffset ?? undefined,
-        );
-
-        if (completionResult.tmuxMissing) {
-          offlineAgentIds.add(agentId);
-          recordAgentOffline(agentId, agentOfflineStore);
-          try {
-            await prisma.agent.update({
-              where: { id: agentId },
-              data: { status: "offline" },
-            });
-          } catch { /* non-fatal */ }
-          console.log(
-            `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' not found during completion check — ` +
-            `marking offline, skipping queue advance`
-          );
-          emitAudit({ entityType: "agent", entityId: agentId, eventType: "agent.offline", actorType: "poller", payload: { reason: "tmux_missing_completion_check", tmuxSession: agent.tmuxSession } }).catch(() => {});
-          return;
-        }
-
-        // Determine how (or whether) the task completed.
-        let completedHow: string | null = null;
-        if (completionResult.markerFound) {
-          completedHow = "completion marker";
-        } else if (completionResult.isIdle && !completionNonce) {
-          completedHow = "idle prompt (no nonce)";
-        } else if (completionResult.isIdle) {
-          const runMs = Date.now() - startedAt.getTime();
-          if (runMs >= IDLE_FALLBACK_MIN_MS) {
-            completedHow = `idle fallback (no marker after ${Math.round(runMs / 60_000)}m)`;
-            console.log(
-              `${TAG} Agent ${agent.name}: task "${firstTaskId}" idle without nonce marker — ` +
-              `using idle fallback after ${Math.round(runMs / 60_000)}m`
-            );
+        // Kill per-task sessions for timed-out tasks
+        for (const taskId of timedOutTaskIds) {
+          const info = taskTimeouts.get(taskId);
+          if (info?.taskTmuxSession) {
+            await killTaskTmuxSession(agent.server, taskId).catch(() => {});
           }
         }
-        if (!completedHow) return;
 
-        const agentFinishedAt = new Date();
-        const agentPaneCapture = (!agentGroupDisablePaneCapture && completionResult.paneText)
-          ? scrubPaneCapture(lastNLines(completionResult.paneText, 200))
-          : null;
-        const agentExitReason = completedHowToExitReason(completedHow);
+        if (remainingTaskIds.length === 0) {
+          // All tasks timed out — fall through to queue advance below.
+        } else {
+          // Separate tasks that use per-task sessions from legacy shared-session tasks.
+          const perTaskRemaining = remainingTaskIds.filter((id) => !!taskTimeouts.get(id)?.taskTmuxSession);
+          const legacyRemaining  = remainingTaskIds.filter((id) => !taskTimeouts.get(id)?.taskTmuxSession);
 
-        const agentCostData = computeCostFromRaw(agent.claudeUsageRaw ?? null);
+          const agentCostData = computeCostFromRaw(agent.claudeUsageRaw ?? null);
+          const completedTaskIds: string[] = [];
 
-        for (const taskId of remainingTaskIds) {
-          try {
-            await prisma.$transaction(async (tx) => {
-              const latestLog = await tx.executionLog.findFirst({
-                where: { taskId, status: "running", finishedAt: null },
-                orderBy: { createdAt: "desc" },
-                select: { id: true, startedAt: true },
-              });
+          // ── Per-task session completion (one detection call per task) ──────
+          for (const taskId of perTaskRemaining) {
+            const info = taskTimeouts.get(taskId)!;
+            const perSession = info.taskTmuxSession!;
 
-              await tx.task.update({
-                where: { id: taskId },
-                data: { status: "completed" },
-              });
+            const perResult = await detectTaskCompletion(
+              agent.server,
+              perSession,
+              taskId,
+              info.completionNonce ?? undefined,
+              info.tmuxOutputOffset ?? undefined,
+            );
 
-              if (latestLog) {
-                const durationMs = agentFinishedAt.getTime() - latestLog.startedAt.getTime();
-                await tx.executionLog.update({
-                  where: { id: latestLog.id },
-                  data: {
-                    status: "completed",
-                    finishedAt: agentFinishedAt,
-                    durationMs,
-                    exitReason: agentExitReason,
-                    paneCapture: agentPaneCapture,
-                    tokenCount: agentCostData.tokenCount,
-                    actualCostUsd: agentCostData.actualCostUsd,
-                  },
-                });
+            if (perResult.tmuxMissing) {
+              console.log(
+                `${TAG} Agent ${agent.name}: per-task session '${perSession}' not found — marking task completed`
+              );
+            }
+
+            let perHow: string | null = null;
+            if (perResult.markerFound) {
+              perHow = "completion marker";
+            } else if (perResult.tmuxMissing) {
+              perHow = "session gone";
+            } else if (perResult.isIdle && !info.completionNonce) {
+              perHow = "idle prompt (no nonce)";
+            } else if (perResult.isIdle) {
+              const runMs = Date.now() - info.taskStartedAt.getTime();
+              if (runMs >= IDLE_FALLBACK_MIN_MS) {
+                perHow = `idle fallback (no marker after ${Math.round(runMs / 60_000)}m)`;
+                console.log(
+                  `${TAG} Agent ${agent.name}: task "${taskId}" idle without nonce marker — ` +
+                  `using idle fallback after ${Math.round(runMs / 60_000)}m`
+                );
               }
-            });
+            }
 
-            clearDispatchBackoff(taskId, backoff);
-            console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${completedHow}"`);
-            emitAudit({ entityType: "task", entityId: taskId, eventType: "task.completed", actorType: "poller", payload: { detectedBy: completedHow, agentId } }).catch(() => {});
-            emitNotification(taskId, "task.completed").catch(() => {});
-            const projIdCompleted = agentTaskProjectId.get(taskId);
-            if (projIdCompleted) {
-              recalculateProjectProgress(projIdCompleted).catch(() => {});
-              // Schedule auto-review if project has autoReviewEnabled
-              prisma.project.findUnique({ where: { id: projIdCompleted }, select: { autoReviewEnabled: true } })
-                .then((proj) => {
-                  if (!proj?.autoReviewEnabled) return;
-                  return prisma.task.update({
-                    where: { id: taskId },
+            if (!perHow) continue;
+
+            const perFinishedAt = new Date();
+            const perPaneCapture = (!agentGroupDisablePaneCapture && perResult.paneText)
+              ? scrubPaneCapture(lastNLines(perResult.paneText, 200))
+              : null;
+            const perExitReason = completedHowToExitReason(perHow);
+
+            try {
+              await prisma.$transaction(async (tx) => {
+                const latestLog = await tx.executionLog.findFirst({
+                  where: { taskId, status: "running", finishedAt: null },
+                  orderBy: { createdAt: "desc" },
+                  select: { id: true, startedAt: true },
+                });
+                await tx.task.update({ where: { id: taskId }, data: { status: "completed" } });
+                if (latestLog) {
+                  await tx.executionLog.update({
+                    where: { id: latestLog.id },
                     data: {
-                      autoReviewEnabled: true,
-                      reviewStatus: "pending",
-                      reviewScheduledAt: new Date(Date.now() + 5 * 60_000),
+                      status: "completed",
+                      finishedAt: perFinishedAt,
+                      durationMs: perFinishedAt.getTime() - latestLog.startedAt.getTime(),
+                      exitReason: perExitReason,
+                      paneCapture: perPaneCapture,
+                      tokenCount: agentCostData.tokenCount,
+                      actualCostUsd: agentCostData.actualCostUsd,
                     },
                   });
-                })
-                .catch(() => {});
+                }
+              });
+              clearDispatchBackoff(taskId, backoff);
+              completedTaskIds.push(taskId);
+              console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${perHow}"`);
+              emitAudit({ entityType: "task", entityId: taskId, eventType: "task.completed", actorType: "poller", payload: { detectedBy: perHow, agentId } }).catch(() => {});
+              emitNotification(taskId, "task.completed").catch(() => {});
+              const projId = agentTaskProjectId.get(taskId);
+              if (projId) {
+                recalculateProjectProgress(projId).catch(() => {});
+                prisma.project.findUnique({ where: { id: projId }, select: { autoReviewEnabled: true } })
+                  .then((proj) => {
+                    if (!proj?.autoReviewEnabled) return;
+                    return prisma.task.update({
+                      where: { id: taskId },
+                      data: { autoReviewEnabled: true, reviewStatus: "pending", reviewScheduledAt: new Date(Date.now() + 5 * 60_000) },
+                    });
+                  }).catch(() => {});
+              }
+              unblockDependents(taskId).catch(() => {});
+              await killTaskTmuxSession(agent.server, taskId).catch(() => {});
+            } catch (err) {
+              console.error(`${TAG} Task ${taskId}: failed to mark agent task completed:`, err);
             }
-            unblockDependents(taskId).catch(() => {});
+          }
+
+          // ── Legacy shared-session completion ───────────────────────────────
+          if (legacyRemaining.length > 0) {
+            const firstTaskId = legacyRemaining[0];
+            const firstInfo = taskTimeouts.get(firstTaskId);
+
+            const legacyResult = await detectTaskCompletion(
+              agent.server,
+              agent.tmuxSession,
+              firstTaskId,
+              firstInfo?.completionNonce ?? completionNonce ?? undefined,
+              firstInfo?.tmuxOutputOffset ?? tmuxOutputOffset ?? undefined,
+            );
+
+            if (legacyResult.tmuxMissing) {
+              offlineAgentIds.add(agentId);
+              recordAgentOffline(agentId, agentOfflineStore);
+              try {
+                await prisma.agent.update({ where: { id: agentId }, data: { status: "offline" } });
+              } catch { /* non-fatal */ }
+              console.log(
+                `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' not found during completion check — ` +
+                `marking offline, skipping queue advance`
+              );
+              emitAudit({ entityType: "agent", entityId: agentId, eventType: "agent.offline", actorType: "poller", payload: { reason: "tmux_missing_completion_check", tmuxSession: agent.tmuxSession } }).catch(() => {});
+              return;
+            }
+
+            let legacyHow: string | null = null;
+            if (legacyResult.markerFound) {
+              legacyHow = "completion marker";
+            } else if (legacyResult.isIdle && !completionNonce) {
+              legacyHow = "idle prompt (no nonce)";
+            } else if (legacyResult.isIdle) {
+              const runMs = Date.now() - startedAt.getTime();
+              if (runMs >= IDLE_FALLBACK_MIN_MS) {
+                legacyHow = `idle fallback (no marker after ${Math.round(runMs / 60_000)}m)`;
+                console.log(
+                  `${TAG} Agent ${agent.name}: task "${firstTaskId}" idle without nonce marker — ` +
+                  `using idle fallback after ${Math.round(runMs / 60_000)}m`
+                );
+              }
+            }
+
+            if (legacyHow) {
+              const legacyFinishedAt = new Date();
+              const legacyPaneCapture = (!agentGroupDisablePaneCapture && legacyResult.paneText)
+                ? scrubPaneCapture(lastNLines(legacyResult.paneText, 200))
+                : null;
+              const legacyExitReason = completedHowToExitReason(legacyHow);
+
+              for (const taskId of legacyRemaining) {
+                try {
+                  await prisma.$transaction(async (tx) => {
+                    const latestLog = await tx.executionLog.findFirst({
+                      where: { taskId, status: "running", finishedAt: null },
+                      orderBy: { createdAt: "desc" },
+                      select: { id: true, startedAt: true },
+                    });
+                    await tx.task.update({ where: { id: taskId }, data: { status: "completed" } });
+                    if (latestLog) {
+                      await tx.executionLog.update({
+                        where: { id: latestLog.id },
+                        data: {
+                          status: "completed",
+                          finishedAt: legacyFinishedAt,
+                          durationMs: legacyFinishedAt.getTime() - latestLog.startedAt.getTime(),
+                          exitReason: legacyExitReason,
+                          paneCapture: legacyPaneCapture,
+                          tokenCount: agentCostData.tokenCount,
+                          actualCostUsd: agentCostData.actualCostUsd,
+                        },
+                      });
+                    }
+                  });
+                  clearDispatchBackoff(taskId, backoff);
+                  completedTaskIds.push(taskId);
+                  console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${legacyHow}"`);
+                  emitAudit({ entityType: "task", entityId: taskId, eventType: "task.completed", actorType: "poller", payload: { detectedBy: legacyHow, agentId } }).catch(() => {});
+                  emitNotification(taskId, "task.completed").catch(() => {});
+                  const projId = agentTaskProjectId.get(taskId);
+                  if (projId) {
+                    recalculateProjectProgress(projId).catch(() => {});
+                    prisma.project.findUnique({ where: { id: projId }, select: { autoReviewEnabled: true } })
+                      .then((proj) => {
+                        if (!proj?.autoReviewEnabled) return;
+                        return prisma.task.update({
+                          where: { id: taskId },
+                          data: { autoReviewEnabled: true, reviewStatus: "pending", reviewScheduledAt: new Date(Date.now() + 5 * 60_000) },
+                        });
+                      }).catch(() => {});
+                  }
+                  unblockDependents(taskId).catch(() => {});
+                } catch (err) {
+                  console.error(`${TAG} Task ${taskId}: failed to mark agent task completed:`, err);
+                }
+              }
+            }
+          }
+
+          if (completedTaskIds.length === 0) return;
+        }
+
+        // Release agent if no tasks remain running.
+        const nowRunningCount = await prisma.task.count({ where: { agentId, status: "running" } });
+        if (nowRunningCount === 0) {
+          try {
+            await prisma.agent.update({ where: { id: agentId }, data: { status: "idle" } });
+            console.log(`[AGENT_RELEASED] agentId="${agentId}" name="${agent.name}"`);
           } catch (err) {
-            console.error(`${TAG} Task ${taskId}: failed to mark agent task completed:`, err);
+            console.error(`${TAG} Agent ${agent.name}: failed to set idle:`, err);
           }
         }
 
-        // Release agent: mark idle before attempting queue advance.
-        try {
-          await prisma.agent.update({
-            where: { id: agentId },
-            data: { status: "idle" },
-          });
-          console.log(`[AGENT_RELEASED] agentId="${agentId}" name="${agent.name}"`);
-        } catch (err) {
-          console.error(`${TAG} Agent ${agent.name}: failed to set idle:`, err);
-        }
-
-        // Auto-advance this agent's queue after completions.
+        // Auto-advance: fill up to maxConcurrentTasks after completions.
         const sessionPct = agent.claudeSessionPct ?? 0;
         const weekPct = agent.claudeWeekPct ?? 0;
 
@@ -1117,52 +1271,56 @@ function startPoller() {
           return;
         }
 
-        const nextTask = await prisma.task.findFirst({
-          where: {
+        const maxConcurrent = agent.maxConcurrentTasks ?? 1;
+        let stillRunning = nowRunningCount;
+        while (stillRunning < maxConcurrent) {
+          const nextTask = await prisma.task.findFirst({
+            where: {
+              agentId,
+              status: "queued",
+              blockedByCount: 0,
+              OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
+            },
+            orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+            include: { project: { select: { name: true } } },
+          });
+
+          if (!nextTask) break;
+
+          if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
+            console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`);
+            break;
+          }
+
+          const outcome = await tryDispatchTaskToAgent({
+            taskId: nextTask.id,
             agentId,
-            status: "queued",
-            blockedByCount: 0,
-            OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
-          },
-          orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-          include: { project: { select: { name: true } } },
-        });
+            sshConfig: agent.server,
+            tmuxSession: agent.tmuxSession,
+            workDir: agent.workDir,
+            permissionMode: agent.claudePermissionMode as import("@/lib/ssh-claude-tmux").ClaudePermissionMode,
+            maxConcurrentTasks: maxConcurrent,
+            task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
+            logText: `Auto-started from queue on agent "${agent.name}" — mode: ${agent.claudePermissionMode}`,
+            usageSnapshotPct: agent.claudeSessionPct,
+          });
 
-        if (!nextTask) return;
-
-        if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
-          console.log(
-            `${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`
-          );
-          return;
-        }
-
-        const outcome = await tryDispatchTaskToAgent({
-          taskId: nextTask.id,
-          agentId,
-          sshConfig: agent.server,
-          tmuxSession: agent.tmuxSession,
-          task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
-          logText: `Auto-started from queue on agent "${agent.name}" — mode: ${agent.claudePermissionMode}`,
-          usageSnapshotPct: agent.claudeSessionPct,
-        });
-
-        if (outcome.ok) {
-          clearDispatchBackoff(nextTask.id, backoff);
-          console.log(
-            `[NEXT_TASK_DISPATCHED] taskId="${nextTask.id}" title="${nextTask.title}" agentId="${agentId}"`,
-          );
-        } else if (outcome.reason === "ssh_failed") {
-          recordDispatchFailure(nextTask.id, backoff);
-          console.warn(
-            `${TAG} Agent ${agent.name}: queue advance failed for task ${nextTask.id}: ${outcome.detail} — backoff applied`
-          );
-        } else if (outcome.reason === "tmux_missing") {
-          offlineAgentIds.add(agentId);
-          recordAgentOffline(agentId, agentOfflineStore);
-          console.warn(
-            `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' missing during dispatch — marked offline`
-          );
+          if (outcome.ok) {
+            clearDispatchBackoff(nextTask.id, backoff);
+            stillRunning++;
+            console.log(`[NEXT_TASK_DISPATCHED] taskId="${nextTask.id}" title="${nextTask.title}" agentId="${agentId}"`);
+          } else if (outcome.reason === "ssh_failed") {
+            recordDispatchFailure(nextTask.id, backoff);
+            console.warn(`${TAG} Agent ${agent.name}: queue advance failed for task ${nextTask.id}: ${outcome.detail} — backoff applied`);
+            break;
+          } else if (outcome.reason === "tmux_missing") {
+            offlineAgentIds.add(agentId);
+            recordAgentOffline(agentId, agentOfflineStore);
+            console.warn(`${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' missing during dispatch — marked offline`);
+            break;
+          } else {
+            break;
+          }
         }
       })
     ).then((results) => {
@@ -1171,6 +1329,13 @@ function startPoller() {
           console.error(`${TAG} Agent completion check for ${agent.name} threw:`, results[i].reason);
       });
     });
+
+    // ── 2b-ext. Cron-scheduled tasks — spawn new pending Tasks from due ScheduledTask records ──
+    try {
+      await runDueScheduledTasks();
+    } catch (err) {
+      console.error(`${TAG} runDueScheduledTasks threw:`, err);
+    }
 
     // ── 2c. Scheduled task dispatch — auto-queue pending tasks whose scheduledFor has passed ──
     try {
@@ -1347,6 +1512,7 @@ function startPoller() {
       id: string;
       name: string;
       tmuxSession: string;
+      workDir: string;
       claudePermissionMode: string;
       claudeSessionPct: number | null;
       claudeWeekPct: number | null;
@@ -1354,6 +1520,7 @@ function startPoller() {
       claudeWeekResetsAt: Date | null;
       autoPauseEnabled: boolean;
       pausedDueToUsage: boolean;
+      maxConcurrentTasks: number;
       server: {
         host: string;
         port: number;
@@ -1375,6 +1542,7 @@ function startPoller() {
           id: true,
           name: true,
           tmuxSession: true,
+          workDir: true,
           claudePermissionMode: true,
           claudeSessionPct: true,
           claudeWeekPct: true,
@@ -1382,6 +1550,7 @@ function startPoller() {
           claudeWeekResetsAt: true,
           autoPauseEnabled: true,
           pausedDueToUsage: true,
+          maxConcurrentTasks: true,
           server: {
             select: { host: true, port: true, username: true, sshKeyPath: true },
           },
@@ -1472,49 +1641,61 @@ function startPoller() {
           return;
         }
 
-        const nextTask = await prisma.task.findFirst({
-          where: {
+        const agentMax = agent.maxConcurrentTasks ?? 1;
+        let dispatched = 0;
+        while (dispatched < agentMax) {
+          const nextTask = await prisma.task.findFirst({
+            where: {
+              agentId: agent.id,
+              status: "queued",
+              OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
+            },
+            orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+            include: { project: { select: { name: true } } },
+          });
+
+          if (!nextTask) break;
+
+          if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
+            console.log(
+              `${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`
+            );
+            break;
+          }
+
+          const outcome = await tryDispatchTaskToAgent({
+            taskId: nextTask.id,
             agentId: agent.id,
-            status: "queued",
-            OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
-          },
-          orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-          include: { project: { select: { name: true } } },
-        });
+            sshConfig: agent.server,
+            tmuxSession: agent.tmuxSession,
+            workDir: agent.workDir,
+            permissionMode: agent.claudePermissionMode as import("@/lib/ssh-claude-tmux").ClaudePermissionMode,
+            maxConcurrentTasks: agentMax,
+            task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
+            logText: `Auto-started from queue on agent "${agent.name}" — mode: ${agent.claudePermissionMode}`,
+            usageSnapshotPct: agent.claudeSessionPct,
+          });
 
-        if (!nextTask) return;
-
-        if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
-          console.log(
-            `${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`
-          );
-          return;
-        }
-
-        const outcome = await tryDispatchTaskToAgent({
-          taskId: nextTask.id,
-          agentId: agent.id,
-          sshConfig: agent.server,
-          tmuxSession: agent.tmuxSession,
-          task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
-          logText: `Auto-started from queue on agent "${agent.name}" — mode: ${agent.claudePermissionMode}`,
-          usageSnapshotPct: agent.claudeSessionPct,
-        });
-
-        if (outcome.ok) {
-          clearDispatchBackoff(nextTask.id, backoff);
-          console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): dispatched from idle-agent queue`);
-        } else if (outcome.reason === "ssh_failed") {
-          recordDispatchFailure(nextTask.id, backoff);
-          console.warn(
-            `${TAG} Agent ${agent.name}: failed to start queued task ${nextTask.id}: ${outcome.detail} — backoff applied`
-          );
-        } else if (outcome.reason === "tmux_missing") {
-          offlineAgentIds.add(agent.id);
-          recordAgentOffline(agent.id, agentOfflineStore);
-          console.warn(
-            `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' missing during dispatch — marked offline`
-          );
+          if (outcome.ok) {
+            clearDispatchBackoff(nextTask.id, backoff);
+            dispatched++;
+            console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): dispatched from idle-agent queue (${dispatched}/${agentMax})`);
+          } else if (outcome.reason === "ssh_failed") {
+            recordDispatchFailure(nextTask.id, backoff);
+            console.warn(
+              `${TAG} Agent ${agent.name}: failed to start queued task ${nextTask.id}: ${outcome.detail} — backoff applied`
+            );
+            break;
+          } else if (outcome.reason === "tmux_missing") {
+            offlineAgentIds.add(agent.id);
+            recordAgentOffline(agent.id, agentOfflineStore);
+            console.warn(
+              `${TAG} Agent ${agent.name}: tmux session '${agent.tmuxSession}' missing during dispatch — marked offline`
+            );
+            break;
+          } else {
+            break;
+          }
         }
       })
     ).then((results) => {
@@ -1607,6 +1788,18 @@ function startPoller() {
       console.error(`${TAG} startDueImprovementCycles threw:`, err);
     }
 
+    // Persist heartbeat so the health endpoint can detect a stalled poller.
+    try {
+      const heartbeat = new Date().toISOString();
+      await prisma.systemConfig.upsert({
+        where: { key: "poller_last_heartbeat_at" },
+        create: { key: "poller_last_heartbeat_at", value: heartbeat },
+        update: { value: heartbeat },
+      });
+    } catch (err) {
+      console.error(`${TAG} Failed to write poller heartbeat:`, err);
+    }
+
     console.log(`${TAG} poll end`);
   }
 
@@ -1614,6 +1807,10 @@ function startPoller() {
   // Use globalThis so the running flag survives Next.js HMR module re-evaluation.
 
   async function tick() {
+    if (g._shutdownRequested) {
+      console.log(`${TAG} Shutdown requested — skipping poll tick`);
+      return;
+    }
     if (g._pollerRunning) {
       console.log(`${TAG} Previous poll still running — skipping this tick`);
       return;
@@ -1627,6 +1824,24 @@ function startPoller() {
       g._pollerRunning = false;
     }
   }
+
+  // ── Graceful shutdown on SIGTERM ────────────────────────────────────────────
+  // Prevents mid-cycle DB writes (partial task status, orphaned ExecutionLog
+  // records) when Docker/k8s stops the process.
+  process.on("SIGTERM", async () => {
+    g._shutdownRequested = true;
+    if (g._pollerRunning) {
+      console.log(`${TAG} Poller: SIGTERM received, waiting for current cycle to finish...`);
+      const deadline = Date.now() + 30_000;
+      while (g._pollerRunning && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+      }
+    } else {
+      console.log(`${TAG} Poller: SIGTERM received, no cycle in progress`);
+    }
+    console.log(`${TAG} Poller: shutdown complete`);
+    process.exit(0);
+  });
 
   // First check 15 s after server start (DB pool warm-up), then every 60 s.
   setTimeout(() => tick(), 15_000);
