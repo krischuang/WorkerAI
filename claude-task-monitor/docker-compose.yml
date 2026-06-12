@@ -28,14 +28,14 @@ services:
       DB_HOST: db
       DB_PORT: "5432"
       DB_USER: postgres
-      # The container runs as root (home = /root).  SSH keys mounted at /root/.ssh
-      # are automatically accepted by validateSshKeyPath.  If your keys live
-      # elsewhere, also set SSH_KEY_ALLOWED_PATHS in your .env.
-      SSH_KEY_ALLOWED_PATHS: ${SSH_KEY_ALLOWED_PATHS:-/root/.ssh}
+      # If SSH keys live outside any home directory, list their parent dirs here.
+      # Usually not needed when keys are under /home/<user>/.ssh.
+      SSH_KEY_ALLOWED_PATHS: ${SSH_KEY_ALLOWED_PATHS:-}
     volumes:
-      # Mount the host SSH key directory so the app can reach remote workers.
-      # Override SSH_KEY_DIR in your shell or .env to point at a different path.
-      - ${SSH_KEY_DIR:-/root/.ssh}:/root/.ssh:ro
+      # Mount the host SSH key directory at the same path inside the container so
+      # stored sshKeyPath values (e.g. /home/ec2-user/.ssh/WorkerAI.pem) resolve
+      # correctly.  Override SSH_KEY_DIR in your shell or .env if needed.
+      - ${SSH_KEY_DIR:-/home/ec2-user/.ssh}:/home/ec2-user/.ssh:ro
     ports:
       - "3000:3000"
       - "3099:3099"
