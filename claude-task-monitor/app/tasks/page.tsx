@@ -38,9 +38,14 @@ interface Task {
   estimatedCostLevel: string;
   createdAt: string;
   scheduledFor: string | null;
+  retryCount: number;
+  maxRetries: number;
+  blockedByCount: number;
+  progressPercent: number | null;
+  progressMessage: string | null;
   project: { name: string; priority: string };
   _count: { executionLogs: number };
-  executionLogs: { startedAt: string; finishedAt: string | null; actualCostUsd: number | null }[];
+  executionLogs: { startedAt: string; finishedAt: string | null; actualCostUsd: number | null; status: string }[];
 }
 
 interface ServerOption {
@@ -76,6 +81,27 @@ function formatScheduled(iso: string): string {
     ...(sameYear ? {} : { year: "numeric" }),
     hour: "numeric", minute: "2-digit",
   });
+}
+
+function ElapsedTimer({ startedAt }: { startedAt: string }) {
+  const [elapsed, setElapsed] = useState(() =>
+    Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000),
+  );
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  return (
+    <span className="text-xs font-mono text-blue-600">
+      {mins}m {String(secs).padStart(2, "0")}s
+    </span>
+  );
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -131,7 +157,14 @@ function TasksPageInner() {
   const [exportFormat,       setExportFormat]       = useState<"csv" | "json">("csv");
   const [exportStatus,       setExportStatus]       = useState("all");
   const [exportProject,      setExportProject]      = useState("all");
+  const [showImportModal,    setShowImportModal]    = useState(false);
+  const [importProjectId,    setImportProjectId]    = useState("");
+  const [importFile,         setImportFile]         = useState<File | null>(null);
+  const [importing,          setImporting]          = useState(false);
+  const [importResult,       setImportResult]       = useState<{ created: number; skipped: number; errors: { row: number; message: string }[] } | null>(null);
   const [refreshKey,         setRefreshKey]         = useState(0);
+  const [retryingId,         setRetryingId]         = useState<string | null>(null);
+  const [retryErrors,        setRetryErrors]        = useState<Record<string, string>>({});
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
@@ -306,7 +339,13 @@ function TasksPageInner() {
   }
 
   function openForm() {
-    setForm({ ...defaultForm, projectId: projects[0]?.id ?? "" });
+    const firstProject = projects[0];
+    setForm({
+      ...defaultForm,
+      projectId: firstProject?.id ?? "",
+      // Pre-populate priority from the project so new tasks inherit it by default.
+      priority: firstProject?.priority ?? "P3",
+    });
     setShowForm(true);
   }
 
@@ -333,6 +372,24 @@ function TasksPageInner() {
     loadTasks();
   }
 
+  async function handleRetry(taskId: string) {
+    setRetryingId(taskId);
+    setRetryErrors((prev) => { const next = { ...prev }; delete next[taskId]; return next; });
+    // Optimistic update — show queued immediately
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: "queued" } : t));
+
+    const res = await fetch(`/api/tasks/${taskId}/retry`, { method: "POST" });
+    setRetryingId(null);
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const msg = (data as { error?: string }).error ?? "Retry failed";
+      // Roll back optimistic update and surface the error inline
+      setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: "failed" } : t));
+      setRetryErrors((prev) => ({ ...prev, [taskId]: msg.includes("maxRetries") || msg.toLowerCase().includes("max") ? "Max retries reached" : msg }));
+    }
+  }
+
   function openExportModal() {
     setExportStatus(statusFilter);
     setExportProject(projectFilter);
@@ -348,6 +405,34 @@ function TasksPageInner() {
     a.download = "";
     a.click();
     setShowExportModal(false);
+  }
+
+  function openImportModal() {
+    setImportProjectId(
+      projectFilter !== "all" ? projectFilter : projects[0]?.id ?? "",
+    );
+    setImportFile(null);
+    setImportResult(null);
+    setShowImportModal(true);
+  }
+
+  async function handleImport() {
+    if (!importFile || !importProjectId) return;
+    setImporting(true);
+    const fd = new FormData();
+    fd.append("file", importFile);
+    const res = await fetch(`/api/tasks/import?projectId=${encodeURIComponent(importProjectId)}`, {
+      method: "POST",
+      body: fd,
+    });
+    const data = await res.json();
+    setImporting(false);
+    if (!res.ok) {
+      setImportResult({ created: 0, skipped: 0, errors: [{ row: 0, message: data.error ?? "Unknown error" }] });
+    } else {
+      setImportResult(data);
+      if (data.created > 0) loadTasks();
+    }
   }
 
   // ── Derived selection state ─────────────────────────────────────────────────
@@ -371,6 +456,9 @@ function TasksPageInner() {
             )}
             <Btn variant="secondary" onClick={openExportModal} disabled={total === 0}>
               Export
+            </Btn>
+            <Btn variant="secondary" onClick={openImportModal} disabled={projects.length === 0}>
+              Import CSV
             </Btn>
             <Btn
               variant="secondary"
@@ -517,12 +605,59 @@ function TasksPageInner() {
                         )}
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <PriorityBadge priority={task.priority} />
-                      <StatusBadge status={task.status} />
+                    <div className="flex flex-col items-end gap-0.5 shrink-0">
+                      <div className="flex items-center gap-2">
+                        <PriorityBadge priority={task.priority} />
+                        <StatusBadge status={task.status} />
+                      </div>
+                      {task.status === "running" && task.executionLogs[0]?.status === "running" && (
+                        <ElapsedTimer startedAt={task.executionLogs[0].startedAt} />
+                      )}
+                      {task.blockedByCount > 0 && (
+                        <p className="text-xs text-amber-600 font-medium">
+                          Waiting on {task.blockedByCount}{" "}
+                          {task.blockedByCount === 1 ? "dependency" : "dependencies"}
+                        </p>
+                      )}
                     </div>
                   </div>
+                  {task.status === "running" && task.progressPercent != null && (
+                    <div className="mt-2">
+                      <div className="h-1 w-full bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                          style={{ width: `${task.progressPercent}%` }}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between mt-0.5">
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
+                          {task.progressMessage || "In progress…"}
+                        </p>
+                        <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400 ml-2 shrink-0">
+                          {task.progressPercent}%
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </button>
+
+                {/* Retry button — only for failed tasks where retry limit not exhausted */}
+                {task.status === "failed" && (task.maxRetries === 0 || task.retryCount < task.maxRetries) && (
+                  <div className="shrink-0 flex flex-col items-end gap-1" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      disabled={retryingId === task.id}
+                      onClick={() => handleRetry(task.id)}
+                      className="text-xs font-medium text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 border border-zinc-300 dark:border-zinc-600 hover:border-zinc-500 rounded-lg px-2.5 py-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {retryingId === task.id ? "…" : "Retry"}
+                    </button>
+                    {retryErrors[task.id] && (
+                      <p className="text-xs text-red-600 dark:text-red-400 max-w-[120px] text-right leading-tight">
+                        {retryErrors[task.id]}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -663,7 +798,10 @@ function TasksPageInner() {
               <select
                 required
                 value={form.projectId}
-                onChange={(e) => setForm({ ...form, projectId: e.target.value })}
+                onChange={(e) => {
+                  const proj = projects.find((p) => p.id === e.target.value);
+                  setForm({ ...form, projectId: e.target.value, priority: proj?.priority ?? form.priority });
+                }}
                 className={inputCls}
               >
                 {projects.map((p) => (
@@ -747,6 +885,85 @@ function TasksPageInner() {
           onClose={() => { setShowTemplateModal(false); setTemplateProjectId(""); }}
           onCreated={() => { setShowTemplateModal(false); setTemplateProjectId(""); loadTasks(); }}
         />
+      )}
+
+      {/* ── Import CSV modal ──────────────────────────────────────────────── */}
+      {showImportModal && !importResult && (
+        <Modal title="Import Tasks from CSV" onClose={() => setShowImportModal(false)}>
+          <div className="space-y-4">
+            {projects.length > 1 && (
+              <FormField label="Target Project" required>
+                <select
+                  value={importProjectId}
+                  onChange={(e) => setImportProjectId(e.target.value)}
+                  className={inputCls}
+                >
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>[{p.priority}] {p.name}</option>
+                  ))}
+                </select>
+              </FormField>
+            )}
+
+            <FormField label="CSV File" required>
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                onChange={(e) => setImportFile(e.target.files?.[0] ?? null)}
+                className={inputCls}
+              />
+            </FormField>
+
+            <p className="text-xs text-zinc-500">
+              Required column: <span className="font-mono">title</span>.
+              Optional: <span className="font-mono">description, priority, taskType, estimatedCostLevel, timeoutMinutes</span>.
+              Unknown columns are ignored. Matches the CSV export format.
+            </p>
+          </div>
+
+          <ModalActions>
+            <Btn variant="secondary" onClick={() => setShowImportModal(false)}>Cancel</Btn>
+            <Btn
+              variant="primary"
+              onClick={handleImport}
+              disabled={!importFile || !importProjectId || importing}
+            >
+              {importing ? "Importing…" : "Import"}
+            </Btn>
+          </ModalActions>
+        </Modal>
+      )}
+
+      {/* ── Import result modal ────────────────────────────────────────────── */}
+      {showImportModal && importResult && (
+        <Modal title="Import Complete" onClose={() => setShowImportModal(false)}>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-center">
+                <p className="text-2xl font-bold text-emerald-700">{importResult.created}</p>
+                <p className="text-xs text-emerald-600 mt-0.5">Tasks created</p>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center">
+                <p className="text-2xl font-bold text-amber-700">{importResult.skipped}</p>
+                <p className="text-xs text-amber-600 mt-0.5">Rows skipped</p>
+              </div>
+            </div>
+
+            {importResult.errors.length > 0 && (
+              <div className="max-h-48 overflow-y-auto border border-red-200 rounded-lg bg-red-50 p-3 space-y-1">
+                {importResult.errors.map((e, i) => (
+                  <p key={i} className="text-xs text-red-700">
+                    <span className="font-semibold">Row {e.row}:</span> {e.message}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <ModalActions>
+            <Btn variant="primary" onClick={() => setShowImportModal(false)}>Done</Btn>
+          </ModalActions>
+        </Modal>
       )}
 
       {/* ── Export modal ──────────────────────────────────────────────────── */}

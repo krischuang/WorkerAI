@@ -1,6 +1,9 @@
+import { access, constants as fsConstants } from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { validateSshKeyPath } from "@/lib/ssh-key-path";
 import { serverError } from "@/lib/api-error";
+import { logAdminAction } from "@/lib/admin-audit-log";
+import type { NextRequest } from "next/server";
 
 export async function GET() {
   try {
@@ -28,7 +31,7 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { name, host, username, port, sshKeyPath, claudePermissionMode } = body;
@@ -45,6 +48,15 @@ export async function POST(request: Request) {
       return Response.json({ error: keyValidation.error }, { status: 400 });
     }
 
+    try {
+      await access(keyValidation.resolved, fsConstants.R_OK);
+    } catch {
+      return Response.json(
+        { error: `SSH key file not found or not readable: ${keyValidation.resolved}` },
+        { status: 400 }
+      );
+    }
+
     const server = await prisma.server.create({
       data: {
         name,
@@ -54,6 +66,12 @@ export async function POST(request: Request) {
         sshKeyPath: keyValidation.resolved,
         ...(claudePermissionMode !== undefined && { claudePermissionMode }),
       },
+    });
+    await logAdminAction(request, {
+      action: "server.created",
+      targetType: "Server",
+      targetId: server.id,
+      payload: { name, host, username },
     });
     return Response.json(server, { status: 201 });
   } catch (err) {
