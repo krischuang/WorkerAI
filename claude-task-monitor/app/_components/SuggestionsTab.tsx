@@ -147,9 +147,11 @@ export function SuggestionsTab({ projectId }: { projectId: string }) {
 
   async function bulkApprove() {
     setBulkWorking(true);
-    await Promise.all([...selectedIds].map((id) =>
-      fetch(`/api/suggestions/${id}/approve`, { method: "POST" })
-    ));
+    await fetch(`/api/projects/${projectId}/suggestions/bulk-approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [...selectedIds] }),
+    });
     setSelectedIds(new Set());
     setBulkWorking(false);
     load();
@@ -157,9 +159,11 @@ export function SuggestionsTab({ projectId }: { projectId: string }) {
 
   async function bulkReject() {
     setBulkWorking(true);
-    await Promise.all([...selectedIds].map((id) =>
-      fetch(`/api/suggestions/${id}/reject`, { method: "POST" })
-    ));
+    await fetch(`/api/projects/${projectId}/suggestions/bulk-reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [...selectedIds] }),
+    });
     setSelectedIds(new Set());
     setBulkWorking(false);
     load();
@@ -185,14 +189,13 @@ export function SuggestionsTab({ projectId }: { projectId: string }) {
         <div className="flex items-center gap-2">
           {selectedIds.size > 0 && (
             <>
-              <span className="text-xs text-zinc-600">{selectedIds.size} selected</span>
               <Btn variant="secondary" disabled={bulkWorking} onClick={bulkApprove}>
-                Approve All
+                {bulkWorking ? "Approving…" : `Approve selected (${selectedIds.size})`}
               </Btn>
               <Btn variant="danger" disabled={bulkWorking} onClick={bulkReject}>
-                Reject All
+                {bulkWorking ? "Rejecting…" : `Reject selected (${selectedIds.size})`}
               </Btn>
-              <Btn variant="ghost" onClick={clearSelection}>Clear</Btn>
+              <Btn variant="ghost" disabled={bulkWorking} onClick={clearSelection}>Clear</Btn>
             </>
           )}
           <Btn variant="secondary" disabled={generating} onClick={generate}>
