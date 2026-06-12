@@ -50,6 +50,7 @@ enum ReviewStatus {
   done
   incomplete
   skipped
+  failed
 }
 
 model Project {
@@ -60,7 +61,8 @@ model Project {
   status      ProjectStatus @default(active)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
-  tasks       Task[]
+  tasks           Task[]
+  scheduledTasks  ScheduledTask[]
 
   // Auto-review: queue completed tasks for Claude quality review
   autoReviewEnabled     Boolean   @default(false)
@@ -133,6 +135,9 @@ model Task {
   blockedByCount     Int            @default(0)
   // Opt out of tmux pane capture for tasks that process sensitive workloads
   disablePaneCapture Boolean        @default(false)
+  // Incremental progress reported by the agent during execution (0-100 %)
+  progressPercent    Int?
+  progressMessage    String?
   // Auto-review fields — populated when project.autoReviewEnabled is true
   autoReviewEnabled  Boolean        @default(false)
   reviewStatus       ReviewStatus?
@@ -140,6 +145,7 @@ model Task {
   reviewStartedAt    DateTime?
   reviewCompletedAt  DateTime?
   reviewVerdictNotes String?
+  reviewAttempts     Int            @default(0)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   executionLogs      ExecutionLog[]
@@ -236,10 +242,17 @@ model Agent {
   // Default timeout (minutes) for tasks running on this agent. Overridden per-task.
   defaultTaskTimeoutMinutes Int?
 
+  // Max tasks this agent can run concurrently (each in its own per-task tmux session).
+  maxConcurrentTasks Int @default(1)
+
   // Health monitoring
   healthScore          Int?
   consecutiveFailures  Int       @default(0)
   lastHealthCheckAt    DateTime?
+
+  // Disk usage — updated each health check via df -k <workDir>
+  diskUsedBytes        BigInt?
+  diskTotalBytes       BigInt?
 
   // Auto-recovery
   autoRecovery         Boolean   @default(false)
@@ -328,6 +341,10 @@ model Server {
   healthScore          Int?
   consecutiveFailures  Int       @default(0)
   lastHealthCheckAt    DateTime?
+
+  // Disk usage — updated each health check via df -k on the server root filesystem
+  diskUsedBytes        BigInt?
+  diskTotalBytes       BigInt?
 
   // Auto-recovery
   autoRecovery         Boolean   @default(false)
@@ -694,4 +711,42 @@ model AuditEvent {
 
   @@index([entityType, entityId, createdAt])
   @@index([eventType, createdAt])
+}
+
+// Recurring task template. Each cycle the poller spawns a new pending Task
+// when nextRunAt <= now() and enabled = true.
+model ScheduledTask {
+  id                 String    @id @default(cuid())
+  projectId          String
+  project            Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title              String
+  description        String?
+  cronSchedule       String    // 5-field cron expression, e.g. "0 3 * * *"
+  priority           Priority  @default(P3)
+  taskType           TaskType  @default(coding)
+  estimatedCostLevel CostLevel @default(medium)
+  timeoutMinutes     Int?
+  maxRetries         Int       @default(0)
+  enabled            Boolean   @default(true)
+  lastRunAt          DateTime?
+  nextRunAt          DateTime? // pre-computed by service; null until first compute
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([projectId])
+  @@index([nextRunAt, enabled])
+}
+
+// Admin-panel action audit log — tracks every mutating action taken via admin UI/API.
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  actor      String   @default("admin") // IP address or "admin"
+  action     String   // e.g. "config.updated", "archival.triggered", "suggestion.approved"
+  targetType String?  // "SystemConfig" | "Server" | "Agent" | "Suggestion" | etc.
+  targetId   String?  // entity ID or key name
+  payload    Json     @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@index([targetType, targetId])
 }
