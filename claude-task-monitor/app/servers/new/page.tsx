@@ -9,6 +9,7 @@ export default function NewServerPage() {
   const router = useRouter();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sshKeyError, setSshKeyError] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
     host: "",
@@ -21,6 +22,7 @@ export default function NewServerPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setSshKeyError(null);
     setSaving(true);
 
     const res = await fetch("/api/servers", {
@@ -31,7 +33,12 @@ export default function NewServerPage() {
 
     if (!res.ok) {
       const data = await res.json();
-      setError(data.error ?? "Failed to save server");
+      const msg: string = data.error ?? "Failed to save server";
+      if (msg.startsWith("SSH key file not found or not readable")) {
+        setSshKeyError(msg);
+      } else {
+        setError(msg);
+      }
       setSaving(false);
       return;
     }
@@ -112,10 +119,13 @@ export default function NewServerPage() {
           <input
             required
             value={form.sshKeyPath}
-            onChange={(e) => setForm({ ...form, sshKeyPath: e.target.value })}
+            onChange={(e) => { setSshKeyError(null); setForm({ ...form, sshKeyPath: e.target.value }); }}
             placeholder="~/.ssh/my-aws-key.pem"
-            className={`${inputCls} font-mono`}
+            className={`${inputCls} font-mono${sshKeyError ? " border-red-400 focus:border-red-500" : ""}`}
           />
+          {sshKeyError && (
+            <p className="text-xs text-red-600 mt-1">{sshKeyError}</p>
+          )}
         </FormField>
 
         <FormField

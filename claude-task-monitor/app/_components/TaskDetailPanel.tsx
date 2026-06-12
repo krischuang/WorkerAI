@@ -89,6 +89,11 @@ interface Task {
   scheduledFor: string | null;
   createdAt: string;
   updatedAt: string;
+  reviewStatus: string | null;
+  reviewAttempts: number;
+  reviewVerdictNotes: string | null;
+  progressPercent: number | null;
+  progressMessage: string | null;
   project: { id: string; name: string; priority: string };
   server: ServerUsage | null;
   agent: AgentUsage | null;
@@ -228,9 +233,10 @@ const EVENT_LABEL: Record<string, string> = {
   "task.failed":            "Marked failed",
   "task.timeout":           "Execution timed out",
   "task.retried":           "Retried",
-  "task.review.sent":       "Review sent",
-  "task.review.done":       "Review: done",
-  "task.review.incomplete": "Review: incomplete",
+  "task.review.sent":              "Review sent",
+  "task.review.done":              "Review: done",
+  "task.review.incomplete":        "Review: incomplete",
+  "task.review.max_attempts_reached": "Review: max attempts reached",
 };
 
 const EVENT_DOT: Record<string, string> = {
@@ -241,9 +247,10 @@ const EVENT_DOT: Record<string, string> = {
   "task.failed":            "bg-red-500",
   "task.timeout":           "bg-red-400",
   "task.retried":           "bg-amber-400",
-  "task.review.sent":       "bg-sky-400",
-  "task.review.done":       "bg-emerald-500",
-  "task.review.incomplete": "bg-amber-500",
+  "task.review.sent":              "bg-sky-400",
+  "task.review.done":              "bg-emerald-500",
+  "task.review.incomplete":        "bg-amber-500",
+  "task.review.max_attempts_reached": "bg-red-500",
 };
 
 function AuditTimeline({ taskId }: { taskId: string }) {
@@ -362,6 +369,9 @@ export function TaskDetailPanel({
   const [summaryForm, setSummaryForm] = useState({ resultSummary: "", nextAction: "" });
   const [scheduleInput, setScheduleInput] = useState("");
   const [savingSchedule, setSavingSchedule] = useState(false);
+
+  const [cloning, setCloning] = useState(false);
+  const [cloneResult, setCloneResult] = useState<{ id: string; title: string } | null>(null);
 
   const retryTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadAttemptRef   = useRef(0);
@@ -525,6 +535,17 @@ export function TaskDetailPanel({
     loadTask();
   }
 
+  async function handleClone() {
+    setCloning(true);
+    setCloneResult(null);
+    const res = await fetch(`/api/tasks/${id}/clone`, { method: "POST" });
+    setCloning(false);
+    if (res.ok) {
+      const data: { id: string; title: string } = await res.json();
+      setCloneResult(data);
+    }
+  }
+
   async function handleRun() {
     setRunState("sending");
     setRunError(null);
@@ -677,6 +698,14 @@ export function TaskDetailPanel({
               Offline
             </span>
           )}
+          <Btn
+            variant="ghost"
+            size="sm"
+            onClick={handleClone}
+            disabled={cloning}
+          >
+            {cloning ? "Duplicating…" : "Duplicate"}
+          </Btn>
           {task.status === "completed" && (
             <Btn
               variant="secondary"
@@ -703,6 +732,49 @@ export function TaskDetailPanel({
       {reviewState === "error" && reviewError && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {reviewError}
+        </div>
+      )}
+
+      {/* Review status banner — shown when review has run at least once */}
+      {task.reviewStatus === "failed" && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          <span className="font-semibold">Review failed</span> — reached {task.reviewAttempts} consecutive incomplete verdict{task.reviewAttempts !== 1 ? "s" : ""}. Task left as completed; operator action required.
+          {task.reviewVerdictNotes && (
+            <p className="mt-1 text-red-700 whitespace-pre-wrap">{task.reviewVerdictNotes}</p>
+          )}
+        </div>
+      )}
+      {task.reviewStatus === "incomplete" && task.reviewAttempts > 0 && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span className="font-semibold">Review attempt {task.reviewAttempts}</span> returned incomplete. Task reset to pending for re-run ({3 - task.reviewAttempts} attempt{3 - task.reviewAttempts !== 1 ? "s" : ""} remaining before review fails).
+        </div>
+      )}
+      {task.reviewAttempts > 0 && task.reviewStatus !== "failed" && task.reviewStatus !== "incomplete" && (
+        <div className="mb-4 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-2 text-xs text-zinc-600">
+          Review attempts: {task.reviewAttempts}
+        </div>
+      )}
+
+      {/* Clone success banner */}
+      {cloneResult && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 flex items-center justify-between gap-3">
+          <span>
+            Task duplicated —{" "}
+            <a
+              href={`/tasks/${cloneResult.id}`}
+              className="font-medium underline underline-offset-2 hover:text-blue-900"
+            >
+              #{cloneResult.id.slice(-8)}
+            </a>{" "}
+            <span className="text-blue-700">{cloneResult.title}</span>
+          </span>
+          <button
+            onClick={() => setCloneResult(null)}
+            className="text-blue-500 hover:text-blue-700 shrink-0 text-lg leading-none"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -994,6 +1066,29 @@ export function TaskDetailPanel({
               {checkingCompletion ? "Checking…" : "Check if Done"}
             </Btn>
             <span className="text-xs text-zinc-500">Auto-checks every 30 s</span>
+          </div>
+        )}
+        {task.status === "running" && task.progressPercent != null && (
+          <div className="mt-4">
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wide">
+                Progress
+              </p>
+              <span className="text-xs font-mono text-zinc-600 dark:text-zinc-400">
+                {task.progressPercent}%
+              </span>
+            </div>
+            <div className="h-2 w-full bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                style={{ width: `${task.progressPercent}%` }}
+              />
+            </div>
+            {task.progressMessage && (
+              <p className="mt-1.5 text-sm text-zinc-600 dark:text-zinc-400">
+                {task.progressMessage}
+              </p>
+            )}
           </div>
         )}
         {task.status === "running" && task.timeoutExpiresAt && (

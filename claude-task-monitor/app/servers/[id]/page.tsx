@@ -130,6 +130,7 @@ export default function ServerDetailPage() {
     sshKeyPath: "",
     claudePermissionMode: "workspace_write" as ClaudePermissionMode,
   });
+  const [editSshKeyError, setEditSshKeyError] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
   const [launchResult, setLaunchResult] = useState<{ success: boolean; message: string } | null>(null);
   const [recovering, setRecovering] = useState(false);
@@ -380,7 +381,8 @@ export default function ServerDetailPage() {
 
   async function handleEditSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await fetch(`/api/servers/${id}`, {
+    setEditSshKeyError(null);
+    const res = await fetch(`/api/servers/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -388,6 +390,14 @@ export default function ServerDetailPage() {
         port: Number(editForm.port),
       }),
     });
+    if (!res.ok) {
+      const data = await res.json();
+      const msg: string = data.error ?? "Failed to save server";
+      if (msg.startsWith("SSH key file not found or not readable")) {
+        setEditSshKeyError(msg);
+      }
+      return;
+    }
     setShowEditForm(false);
     loadServer();
   }
@@ -969,7 +979,7 @@ export default function ServerDetailPage() {
 
       {/* ── Edit Modal ── */}
       {showEditForm && (
-        <Modal title="Edit Server" onClose={() => setShowEditForm(false)}>
+        <Modal title="Edit Server" onClose={() => { setShowEditForm(false); setEditSshKeyError(null); }}>
           <form onSubmit={handleEditSubmit} className="space-y-4">
             <FormField label="Name" required>
               <input
@@ -1012,9 +1022,12 @@ export default function ServerDetailPage() {
               <input
                 required
                 value={editForm.sshKeyPath}
-                onChange={(e) => setEditForm({ ...editForm, sshKeyPath: e.target.value })}
-                className={`${inputCls} font-mono`}
+                onChange={(e) => { setEditSshKeyError(null); setEditForm({ ...editForm, sshKeyPath: e.target.value }); }}
+                className={`${inputCls} font-mono${editSshKeyError ? " border-red-400 focus:border-red-500" : ""}`}
               />
+              {editSshKeyError && (
+                <p className="text-xs text-red-600 mt-1">{editSshKeyError}</p>
+              )}
             </FormField>
             <FormField label="Claude Execution Mode">
               <select
@@ -1039,7 +1052,7 @@ export default function ServerDetailPage() {
               <Btn type="submit" variant="primary" className="flex-1">
                 Save Changes
               </Btn>
-              <Btn type="button" variant="secondary" className="flex-1" onClick={() => setShowEditForm(false)}>
+              <Btn type="button" variant="secondary" className="flex-1" onClick={() => { setShowEditForm(false); setEditSshKeyError(null); }}>
                 Cancel
               </Btn>
             </ModalActions>

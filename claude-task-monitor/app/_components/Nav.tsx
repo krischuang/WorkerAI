@@ -23,6 +23,9 @@ import {
   Moon,
   Monitor,
   HelpCircle,
+  FileJson,
+  ClipboardCheck,
+  CalendarClock,
 } from "lucide-react";
 import { KeyboardShortcutsModal } from "./KeyboardShortcutsModal";
 import { GlobalSearch } from "./GlobalSearch";
@@ -39,8 +42,9 @@ const sections = [
     label: "Work",
     items: [
       { href: "/projects",  label: "Projects",        icon: FolderKanban },
-      { href: "/tasks",     label: "Tasks",           icon: ClipboardList },
-      { href: "/queue",     label: "Priority Queue",  icon: ArrowUpDown   },
+      { href: "/tasks",            label: "Tasks",            icon: ClipboardList  },
+      { href: "/scheduled-tasks", label: "Scheduled Tasks",  icon: CalendarClock  },
+      { href: "/queue",            label: "Priority Queue",   icon: ArrowUpDown    },
     ],
   },
   {
@@ -53,19 +57,19 @@ const sections = [
   {
     label: "Tools",
     items: [
-      { href: "/task-templates",  label: "Templates",     icon: FileStack },
-      { href: "/analytics",       label: "Analytics",     icon: BarChart2 },
-      { href: "/reports/daily",   label: "Daily Report",  icon: FileText  },
-      { href: "/reports/weekly",  label: "Weekly Report", icon: FileText  },
-      { href: "/reports/monthly", label: "Monthly Report",icon: FileText  },
+      { href: "/task-templates",  label: "Templates", icon: FileStack },
+      { href: "/analytics",       label: "Analytics", icon: BarChart2 },
+      { href: "/reports",         label: "Reports",   icon: FileText  },
     ],
   },
   {
     label: "Admin",
     items: [
-      { href: "/admin/health",         label: "Health Monitor", icon: Activity    },
-      { href: "/admin/audit",          label: "Audit Log",      icon: ShieldCheck },
-      { href: "/admin/notifications",  label: "Notifications",  icon: Bell        },
+      { href: "/admin/health",         label: "Health Monitor", icon: Activity       },
+      { href: "/admin/audit",          label: "Audit Log",      icon: ShieldCheck    },
+      { href: "/admin/audit-log",      label: "Admin Actions",  icon: ClipboardCheck },
+      { href: "/admin/notifications",  label: "Notifications",  icon: Bell           },
+      { href: "/admin/api-docs",       label: "API Docs",       icon: FileJson       },
     ],
   },
 ];
@@ -115,7 +119,7 @@ export function Nav() {
     applyTheme(next);
   }
 
-  if (pathname === "/login") return null;
+  if (pathname === "/login" || pathname === "/admin/login") return null;
 
   function closeDrawer() { setDrawerOpen(false); }
 
@@ -155,7 +159,7 @@ export function Nav() {
           fixed md:static inset-y-0 left-0 z-50
           w-64 md:w-52 shrink-0
           bg-zinc-950 text-zinc-100
-          h-screen md:min-h-screen
+          h-screen
           flex flex-col py-4
           transition-transform duration-200 ease-in-out
           ${drawerOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}
@@ -238,16 +242,29 @@ export function Nav() {
             <kbd className="ml-auto text-[10px] font-mono bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-zinc-500">?</kbd>
           </button>
 
-          <button
-            onClick={async () => {
-              await fetch("/api/auth", { method: "DELETE" });
-              window.location.href = "/login";
-            }}
-            className="flex items-center gap-2.5 w-full rounded-md px-2.5 py-1.5 text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition-colors"
-          >
-            <LogOut className="w-4 h-4 shrink-0" aria-hidden="true" />
-            Sign out
-          </button>
+          {pathname.startsWith("/admin") ? (
+            <button
+              onClick={async () => {
+                await fetch("/api/admin/logout", { method: "POST" });
+                window.location.href = "/admin/login";
+              }}
+              className="flex items-center gap-2.5 w-full rounded-md px-2.5 py-1.5 text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition-colors"
+            >
+              <LogOut className="w-4 h-4 shrink-0" aria-hidden="true" />
+              Admin sign out
+            </button>
+          ) : (
+            <button
+              onClick={async () => {
+                await fetch("/api/auth", { method: "DELETE" });
+                window.location.href = "/login";
+              }}
+              className="flex items-center gap-2.5 w-full rounded-md px-2.5 py-1.5 text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition-colors"
+            >
+              <LogOut className="w-4 h-4 shrink-0" aria-hidden="true" />
+              Sign out
+            </button>
+          )}
           <p className="text-[11px] text-zinc-600 px-2.5 mt-2">v1.0 — local</p>
         </div>
       </nav>

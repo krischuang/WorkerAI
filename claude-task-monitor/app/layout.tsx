@@ -28,11 +28,11 @@ export default function RootLayout({
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body className="flex min-h-screen bg-zinc-50 dark:bg-zinc-950 transition-colors duration-200">
+      <body className="flex h-screen overflow-hidden bg-zinc-50 dark:bg-zinc-950 transition-colors duration-200">
         <Nav />
         <GlobalKeyboardShortcuts />
         {/* pt-12 compensates for the fixed mobile top bar; removed on md+ */}
-        <main className="flex-1 overflow-auto pt-12 md:pt-0">{children}</main>
+        <main className="flex-1 overflow-y-auto pt-12 md:pt-0">{children}</main>
       </body>
     </html>
   );

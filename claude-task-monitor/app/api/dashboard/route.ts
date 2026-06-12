@@ -18,6 +18,9 @@ export async function GET() {
     connectedServers,
     failedServers,
     lastCheckedServer,
+    serversWithUsage,
+    agentsWithUsage,
+    upcomingScheduled,
   ] = await Promise.all([
     prisma.project.count({ where: { status: "active" } }),
     prisma.task.count({ where: { status: "pending" } }),
@@ -47,7 +50,99 @@ export async function GET() {
       orderBy: { lastCheckedAt: "desc" },
       select: { id: true, name: true, status: true, lastCheckedAt: true },
     }),
+    prisma.server.findMany({
+      where: { claudeSessionResetsAt: { not: null } },
+      select: {
+        id: true,
+        name: true,
+        claudeSessionPct: true,
+        claudeWeekPct: true,
+        claudeSessionResetsAt: true,
+        claudeWeekResetsAt: true,
+        pausedDueToUsage: true,
+      },
+    }),
+    prisma.agent.findMany({
+      where: { claudeSessionResetsAt: { not: null } },
+      select: {
+        id: true,
+        name: true,
+        claudeSessionPct: true,
+        claudeWeekPct: true,
+        claudeSessionResetsAt: true,
+        claudeWeekResetsAt: true,
+        pausedDueToUsage: true,
+      },
+    }),
+    prisma.scheduledTask.findMany({
+      where: { enabled: true, nextRunAt: { not: null } },
+      select: {
+        id: true,
+        title: true,
+        cronSchedule: true,
+        nextRunAt: true,
+        lastRunAt: true,
+        priority: true,
+        project: { select: { name: true } },
+      },
+      orderBy: { nextRunAt: "asc" },
+      take: 5,
+    }),
   ]);
+
+  // Build quota-reset entries: one entry per resource, keyed by the nearest of
+  // session and week reset times. Only include resources that have at least one
+  // reset timestamp so operators can see when quota will free up.
+  type QuotaEntry = {
+    resourceType: "server" | "agent";
+    resourceId: string;
+    name: string;
+    sessionPct: number | null;
+    weekPct: number | null;
+    sessionResetsAt: string | null;
+    weekResetsAt: string | null;
+    nearestResetsAt: string;
+    pausedDueToUsage: boolean;
+  };
+
+  const quotaEntries: QuotaEntry[] = [];
+
+  for (const srv of serversWithUsage) {
+    const nearest = nearestDate(srv.claudeSessionResetsAt, srv.claudeWeekResetsAt);
+    if (!nearest) continue;
+    quotaEntries.push({
+      resourceType: "server",
+      resourceId: srv.id,
+      name: srv.name,
+      sessionPct: srv.claudeSessionPct,
+      weekPct: srv.claudeWeekPct,
+      sessionResetsAt: srv.claudeSessionResetsAt?.toISOString() ?? null,
+      weekResetsAt: srv.claudeWeekResetsAt?.toISOString() ?? null,
+      nearestResetsAt: nearest.toISOString(),
+      pausedDueToUsage: srv.pausedDueToUsage,
+    });
+  }
+
+  for (const agent of agentsWithUsage) {
+    const nearest = nearestDate(agent.claudeSessionResetsAt, agent.claudeWeekResetsAt);
+    if (!nearest) continue;
+    quotaEntries.push({
+      resourceType: "agent",
+      resourceId: agent.id,
+      name: agent.name,
+      sessionPct: agent.claudeSessionPct,
+      weekPct: agent.claudeWeekPct,
+      sessionResetsAt: agent.claudeSessionResetsAt?.toISOString() ?? null,
+      weekResetsAt: agent.claudeWeekResetsAt?.toISOString() ?? null,
+      nearestResetsAt: nearest.toISOString(),
+      pausedDueToUsage: agent.pausedDueToUsage,
+    });
+  }
+
+  // Sort by nearest reset time ascending so the most urgent appear first.
+  quotaEntries.sort(
+    (a, b) => new Date(a.nearestResetsAt).getTime() - new Date(b.nearestResetsAt).getTime()
+  );
 
   return Response.json({
       activeProjects,
@@ -59,9 +154,26 @@ export async function GET() {
       highPriorityPending,
       recentlyCompleted,
       servers: { totalServers, connectedServers, failedServers, lastCheckedServer },
+      quotaResets: quotaEntries,
+      upcomingScheduled: upcomingScheduled.map((s) => ({
+        id: s.id,
+        title: s.title,
+        cronSchedule: s.cronSchedule,
+        nextRunAt: s.nextRunAt?.toISOString() ?? null,
+        lastRunAt: s.lastRunAt?.toISOString() ?? null,
+        priority: s.priority,
+        project: s.project,
+      })),
     });
   } catch (err) {
     console.error("[dashboard] query failed:", err);
     return Response.json({ error: "Failed to load dashboard" }, { status: 500 });
   }
+}
+
+function nearestDate(a: Date | null, b: Date | null): Date | null {
+  if (!a && !b) return null;
+  if (!a) return b;
+  if (!b) return a;
+  return a.getTime() <= b.getTime() ? a : b;
 }
