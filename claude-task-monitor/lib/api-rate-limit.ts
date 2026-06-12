@@ -124,3 +124,19 @@ export function rateLimitResponse(retryAfterSec: number): Response {
     },
   );
 }
+
+// ─── IP extraction (edge-compatible) ─────────────────────────────────────────
+
+/**
+ * Extract the best-available client IP from request headers.
+ * Works in both Edge runtime (middleware) and Node.js runtime (route handlers).
+ */
+export function extractRequestIp(
+  request: { headers: { get(key: string): string | null } },
+): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0].trim();
+  const real = request.headers.get("x-real-ip");
+  if (real) return real;
+  return "127.0.0.1";
+}
