@@ -435,13 +435,24 @@ export async function startDueImprovementCycles(): Promise<void> {
       continue;
     }
 
-    const cycle = await prisma.improvementCycle.create({
-      data: {
-        projectId: project.id,
-        automationLevel: project.improvementAutomationLevel,
-        status: "idle",
-        startedAt: now,
-      },
+    const nextAt = new Date(now.getTime() + (project.cycleFrequencyDays ?? 7) * 86_400_000);
+
+    const [cycle] = await prisma.$transaction(async (tx) => {
+      const c = await tx.improvementCycle.create({
+        data: {
+          projectId: project.id,
+          automationLevel: project.improvementAutomationLevel,
+          status: "idle",
+          startedAt: now,
+        },
+      });
+      // Advance the schedule immediately so a crash or instant completion
+      // doesn't trigger another cycle on the very next poller tick.
+      await tx.project.update({
+        where: { id: project.id },
+        data: { lastImprovementCycleAt: now, nextImprovementCycleAt: nextAt },
+      });
+      return [c];
     });
 
     await emitAudit({
