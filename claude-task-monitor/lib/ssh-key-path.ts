@@ -1,5 +1,6 @@
 import * as path from "path";
 import * as os from "os";
+import * as fs from "fs";
 
 export type SshKeyPathResult =
   | { ok: true; resolved: string }
@@ -38,13 +39,25 @@ export function validateSshKeyPath(raw: unknown): SshKeyPathResult {
   // Canonicalise without filesystem access — eliminates . and .. segments
   const resolved = path.normalize(expanded);
 
-  // Enforce home-directory boundary
+  // Enforce home-directory boundary.
+  // Allow paths under the current user's home directory OR any user's home
+  // under /home/<username>/ — this handles the case where the process runs as
+  // root (os.homedir() = /root) but SSH keys live in /home/<user>/.ssh/.
+  // We verify that /home/<username> is an existing directory to prevent
+  // traversal attacks that land inside /home/ (e.g. ~/.ssh/../../etc/passwd
+  // normalises to /home/etc/passwd on systems where HOME is under /home/).
   const home = os.homedir();
   const homeWithSep = home.endsWith(path.sep) ? home : home + path.sep;
-  if (resolved !== home && !resolved.startsWith(homeWithSep)) {
+  const isUnderCurrentHome = resolved === home || resolved.startsWith(homeWithSep);
+  const isUnderSystemHomes = (() => {
+    const parts = resolved.split(path.sep); // ["", "home", "<user>", ...]
+    if (parts[1] !== "home" || !parts[2] || parts.length < 4) return false;
+    try { return fs.statSync(path.join("/home", parts[2])).isDirectory(); } catch { return false; }
+  })();
+  if (!isUnderCurrentHome && !isUnderSystemHomes) {
     return {
       ok: false,
-      error: `sshKeyPath must be within the home directory (${home})`,
+      error: `sshKeyPath must be within a home directory (${home})`,
     };
   }
 
