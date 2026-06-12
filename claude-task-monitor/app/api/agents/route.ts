@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { logAdminAction } from "@/lib/admin-audit-log";
 
 export async function GET(request: NextRequest) {
   try {
@@ -16,7 +17,22 @@ export async function GET(request: NextRequest) {
       orderBy: [{ serverId: "asc" }, { name: "asc" }],
     });
 
-    return NextResponse.json(agents);
+    // Attach running task counts for concurrent capacity display.
+    const runningRows = agents.length > 0
+      ? await prisma.task.groupBy({
+          by: ["agentId"],
+          where: { status: "running", agentId: { in: agents.map((a) => a.id) } },
+          _count: { _all: true },
+        })
+      : [];
+    const runningCountMap = new Map(runningRows.map((r) => [r.agentId!, r._count._all]));
+
+    return NextResponse.json(
+      agents.map((a) => ({
+        ...a,
+        runningTaskCount: runningCountMap.get(a.id) ?? 0,
+      }))
+    );
   } catch (err) {
     return serverError("agents GET", err);
   }
@@ -60,6 +76,12 @@ export async function POST(request: NextRequest) {
         include: {
           server: { select: { id: true, name: true, host: true } },
         },
+      });
+      await logAdminAction(request, {
+        action: "agent.created",
+        targetType: "Agent",
+        targetId: agent.id,
+        payload: { name, slug, serverId },
       });
       return NextResponse.json(agent, { status: 201 });
     } catch (err: unknown) {
