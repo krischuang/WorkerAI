@@ -36,8 +36,8 @@ export default function NewAgentPage() {
 
   useEffect(() => {
     fetch("/api/servers")
-      .then((r) => r.json())
-      .then(setServers);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setServers(data); });
   }, []);
 
   // Auto-derive slug, workDir, and tmuxSession from name

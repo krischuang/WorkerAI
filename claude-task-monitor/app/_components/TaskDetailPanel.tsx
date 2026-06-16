@@ -473,8 +473,9 @@ function AuditTimeline({ taskId }: { taskId: string }) {
   function load(cursor?: string) {
     const url = `/api/audit?entityType=task&entityId=${taskId}${cursor ? `&cursor=${cursor}` : ""}`;
     return fetch(url)
-      .then((r) => r.json())
-      .then((data: { events: AuditEvent[]; nextCursor: string | null }) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { events: AuditEvent[]; nextCursor: string | null } | null) => {
+        if (!data) return;
         setEvents((prev) => cursor ? [...prev, ...data.events] : data.events);
         setNextCursor(data.nextCursor);
       });
@@ -832,14 +833,14 @@ export function TaskDetailPanel({
 
   function loadServers() {
     fetch("/api/servers")
-      .then((r) => r.json())
-      .then((data: ServerOption[]) => setServers(data));
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: ServerOption[] | null) => { if (data) setServers(data); });
   }
 
   function loadAgents() {
     fetch("/api/agents")
-      .then((r) => r.json())
-      .then((data: AgentOption[]) => setAgents(data))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: AgentOption[] | null) => { if (data) setAgents(data); })
       .catch(() => {});
   }
 

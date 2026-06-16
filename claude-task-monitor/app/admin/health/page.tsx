@@ -244,9 +244,9 @@ export default function HealthDashboard() {
 
   const load = useCallback(() => {
     fetch("/api/health")
-      .then((r) => r.json())
-      .then((d: HealthData) => {
-        setData(d);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: HealthData | null) => {
+        if (d) setData(d);
         setLoading(false);
         setRefreshing(false);
       })

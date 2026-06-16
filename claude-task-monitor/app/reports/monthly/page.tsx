@@ -32,8 +32,9 @@ export default function MonthlyReportPage() {
 
   const loadReports = useCallback(() => {
     fetch("/api/reports/monthly")
-      .then((r) => r.json())
-      .then((data: MonthlyReport[]) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: MonthlyReport[] | null) => {
+        if (!data) return;
         setReports(data);
         setSelected((prev) => prev ?? (data.length > 0 ? data[0] : null));
       });

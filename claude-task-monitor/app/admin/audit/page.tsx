@@ -51,8 +51,9 @@ export default function AuditPage() {
   function search() {
     setLoading(true);
     fetch(buildUrl())
-      .then((r) => r.json())
-      .then((data: { events: AuditEvent[]; nextCursor: string | null }) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { events: AuditEvent[]; nextCursor: string | null } | null) => {
+        if (!data) return;
         setEvents(data.events);
         setNextCursor(data.nextCursor);
       })
@@ -63,8 +64,9 @@ export default function AuditPage() {
     if (!nextCursor) return;
     setLoadingMore(true);
     fetch(buildUrl(nextCursor))
-      .then((r) => r.json())
-      .then((data: { events: AuditEvent[]; nextCursor: string | null }) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { events: AuditEvent[]; nextCursor: string | null } | null) => {
+        if (!data) return;
         setEvents((prev) => [...prev, ...data.events]);
         setNextCursor(data.nextCursor);
       })

@@ -68,8 +68,8 @@ export default function TaskTemplatesPage() {
 
   function loadTemplates() {
     fetch("/api/task-templates")
-      .then((r) => r.json())
-      .then((data) => { setTemplates(data); setLoading(false); });
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setTemplates(data); setLoading(false); });
   }
 
   useEffect(() => { loadTemplates(); }, []);

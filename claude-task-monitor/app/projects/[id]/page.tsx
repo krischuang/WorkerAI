@@ -65,8 +65,9 @@ function ProjectActivityFeed({ projectId, taskIds }: { projectId: string; taskId
     // Use entityType=task filter then filter client-side to this project's tasks.
     const url = `/api/audit?entityType=task${cursor ? `&cursor=${cursor}` : ""}`;
     return fetch(url)
-      .then((r) => r.json())
-      .then((data: { events: AuditEvent[]; nextCursor: string | null }) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { events: AuditEvent[]; nextCursor: string | null } | null) => {
+        if (!data) return;
         const filtered = data.events.filter((e) => taskIds.includes(e.entityId));
         setEvents((prev) => cursor ? [...prev, ...filtered] : filtered);
         setNextCursor(data.nextCursor);

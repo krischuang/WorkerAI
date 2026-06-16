@@ -31,8 +31,9 @@ export default function DailyReportPage() {
 
   const loadReports = useCallback(() => {
     fetch("/api/reports/daily")
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
+        if (!data) return;
         setReports(data);
         setSelected((prev) => prev ?? (data.length > 0 ? data[0] : null));
       });
