@@ -13,7 +13,7 @@
  *   SystemConfig key "webhook_secret" / env WEBHOOK_SECRET  (HMAC-SHA256 signing)
  */
 
-import { createHmac } from "crypto";
+import { createHmac, randomBytes } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { sendAlertEmail } from "@/lib/email";
 
@@ -219,6 +219,26 @@ function formatBody(url: string, payload: NotificationPayload): string {
 
 // ─── HMAC signing ─────────────────────────────────────────────────────────────
 
+/**
+ * Returns the dedicated webhook signing secret, creating a fresh 32-byte hex
+ * value in SystemConfig on first call.
+ */
+export async function getOrCreateWebhookSigningSecret(): Promise<string> {
+  const row = await prisma.systemConfig.findUnique({
+    where: { key: "webhook_signing_secret" },
+    select: { value: true },
+  });
+  if (row?.value) return row.value;
+
+  const secret = randomBytes(32).toString("hex");
+  await prisma.systemConfig.upsert({
+    where: { key: "webhook_signing_secret" },
+    create: { key: "webhook_signing_secret", value: secret },
+    update: { value: secret },
+  });
+  return secret;
+}
+
 function signPayload(body: string, secret: string, tsMs: number): string {
   return createHmac("sha256", secret)
     .update(`${tsMs}.${body}`)
@@ -236,6 +256,12 @@ async function fireWebhook(
   headers: Record<string, string>,
   eventType: string,
 ): Promise<void> {
+  // Add dedicated signing header — always present so consumers can always verify.
+  const sigSecret = await getOrCreateWebhookSigningSecret().catch(() => null);
+  if (sigSecret) {
+    headers["X-WorkerAI-Signature"] = `sha256=${createHmac("sha256", sigSecret).update(body).digest("hex")}`;
+  }
+
   let lastError: string | undefined;
   let lastStatusCode: number | undefined;
 

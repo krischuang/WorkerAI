@@ -13,6 +13,8 @@ interface Config {
   alert_email_to: string;
 }
 
+type RegenerateStatus = "idle" | "confirming" | "regenerating" | "done" | "error";
+
 interface WebhookDelivery {
   timestamp: string;
   status: string;
@@ -53,12 +55,15 @@ export default function NotificationsPage() {
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [testDetail, setTestDetail] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [signingSecret, setSigningSecret] = useState<string | null>(null);
+  const [regenerateStatus, setRegenerateStatus] = useState<RegenerateStatus>("idle");
 
   const loadConfig = useCallback(() => {
     Promise.all([
       fetch("/api/admin/config").then((r) => (r.ok ? r.json() : null)),
       fetch("/api/admin/webhook-status").then((r) => (r.ok ? r.json() : null)),
-    ]).then(([configData, statusData]) => {
+      fetch("/api/admin/webhook-signing-secret").then((r) => (r.ok ? r.json() : null)),
+    ]).then(([configData, statusData, secretData]) => {
       if (configData) {
         setConfig({
           webhook_url: configData.webhook_url ?? "",
@@ -72,6 +77,9 @@ export default function NotificationsPage() {
       }
       if (statusData) {
         setWebhookStatus(statusData as WebhookStatus);
+      }
+      if (secretData) {
+        setSigningSecret((secretData as { secret: string | null }).secret);
       }
       setLoading(false);
     });
@@ -144,6 +152,22 @@ export default function NotificationsPage() {
       setEmailTestDetail((body as { error?: string }).error ?? `HTTP ${res.status}`);
     }
     setTimeout(() => setEmailTestStatus("idle"), 8000);
+  }
+
+  async function handleRegenerate() {
+    if (regenerateStatus === "idle") { setRegenerateStatus("confirming"); return; }
+    if (regenerateStatus !== "confirming") return;
+    setRegenerateStatus("regenerating");
+    const res = await fetch("/api/admin/webhook-signing-secret", { method: "POST" });
+    if (res.ok) {
+      const data = await res.json() as { secret: string };
+      setSigningSecret(data.secret);
+      setRegenerateStatus("done");
+      setTimeout(() => setRegenerateStatus("idle"), 5000);
+    } else {
+      setRegenerateStatus("error");
+      setTimeout(() => setRegenerateStatus("idle"), 5000);
+    }
   }
 
   if (loading) {
@@ -390,6 +414,68 @@ export default function NotificationsPage() {
               {emailTestDetail}
             </p>
           )}
+        </div>
+
+        {/* Webhook Signing Secret */}
+        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl p-6">
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">Webhook Signing</h2>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
+            Every outbound webhook includes{" "}
+            <code className="text-xs bg-zinc-100 dark:bg-zinc-800 px-1 rounded">X-WorkerAI-Signature: sha256=&lt;hmac&gt;</code>.
+            Rotate the secret below if it is ever compromised.
+          </p>
+
+          <div className="mb-4">
+            <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-1">Current secret</p>
+            <code className="block text-xs font-mono bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-700 rounded-lg px-3 py-2 text-zinc-700 dark:text-zinc-300 break-all select-all">
+              {signingSecret
+                ? `${signingSecret.slice(0, 8)}${"•".repeat(signingSecret.length - 8)}`
+                : <span className="text-zinc-400 italic">not yet generated — will be created on first webhook delivery</span>}
+            </code>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Btn
+              variant={regenerateStatus === "confirming" ? "danger" : "secondary"}
+              onClick={handleRegenerate}
+              disabled={regenerateStatus === "regenerating"}
+            >
+              {regenerateStatus === "idle" && "Regenerate signing secret"}
+              {regenerateStatus === "confirming" && "Click again to confirm rotation"}
+              {regenerateStatus === "regenerating" && "Regenerating…"}
+              {regenerateStatus === "done" && "Rotated ✓"}
+              {regenerateStatus === "error" && "Rotation failed"}
+            </Btn>
+            {regenerateStatus === "confirming" && (
+              <span className="text-xs text-amber-700 dark:text-amber-400">
+                Existing receivers will break until updated.
+              </span>
+            )}
+          </div>
+
+          <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mt-5 mb-2">Verification (Node.js)</h3>
+          <pre className="text-xs bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4 overflow-x-auto text-zinc-700 dark:text-zinc-300 leading-relaxed">{`const crypto = require("crypto");
+
+function verifyWorkerAISignature(rawBody, sigHeader, secret) {
+  const expected = "sha256=" + crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)       // raw request body bytes
+    .digest("hex");
+  return crypto.timingSafeEqual(
+    Buffer.from(sigHeader),
+    Buffer.from(expected),
+  );
+}
+
+// Express example
+app.post("/webhook", express.raw({ type: "application/json" }), (req, res) => {
+  const sig = req.headers["x-workerai-signature"];
+  if (!verifyWorkerAISignature(req.body, sig, process.env.SIGNING_SECRET)) {
+    return res.status(401).send("Invalid signature");
+  }
+  const payload = JSON.parse(req.body);
+  // ...
+});`}</pre>
         </div>
 
         {/* Payload reference */}
