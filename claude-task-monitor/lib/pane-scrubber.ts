@@ -28,13 +28,22 @@ const REDACTED = "[REDACTED]";
  * Scrub common secret patterns from tmux pane output before it is persisted
  * to the database. Operates on a best-effort basis — it reduces accidental
  * exposure but is not a guarantee that all secrets are removed.
+ *
+ * Pass `knownSecretValues` to also mask any specific values that were injected
+ * as task secrets at dispatch time.
  */
-export function scrubPaneCapture(text: string): string {
+export function scrubPaneCapture(text: string, knownSecretValues?: string[]): string {
   let result = text;
   for (const pattern of SECRET_PATTERNS) {
-    // Reset lastIndex for stateful global regexes.
     pattern.lastIndex = 0;
     result = result.replace(pattern, REDACTED);
+  }
+  if (knownSecretValues) {
+    for (const val of knownSecretValues) {
+      if (val.length >= 4) {
+        result = result.split(val).join(REDACTED);
+      }
+    }
   }
   return result;
 }

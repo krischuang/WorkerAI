@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { StatusBadge } from "@/app/_components/StatusBadge";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
@@ -13,7 +13,9 @@ import {
   FormField,
   inputCls,
 } from "@/app/_components/ui";
+import { TagChip, TagInput } from "@/app/_components/TagInput";
 import { DependencyManager } from "@/app/_components/DependencyManager";
+import { Paperclip, Download, Upload, Trash2, X as XIcon } from "lucide-react";
 
 interface ServerUsage {
   id: string;
@@ -94,6 +96,7 @@ interface Task {
   reviewVerdictNotes: string | null;
   progressPercent: number | null;
   progressMessage: string | null;
+  requiredTags: string[];
   project: { id: string; name: string; priority: string };
   server: ServerUsage | null;
   agent: AgentUsage | null;
@@ -253,6 +256,214 @@ const EVENT_DOT: Record<string, string> = {
   "task.review.max_attempts_reached": "bg-red-500",
 };
 
+// ── Artifact types ────────────────────────────────────────────────────────────
+
+interface TaskArtifact {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  mimeType: string;
+  createdAt: string;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function ArtifactsSection({ taskId }: { taskId: string }) {
+  const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
+  const [usedMb, setUsedMb]       = useState<number>(0);
+  const [limitMb, setLimitMb]     = useState<number>(500);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/tasks/${taskId}/artifacts`);
+    if (res.ok) {
+      const data = await res.json() as { artifacts: TaskArtifact[]; usedMb: number; limitMb: number };
+      setArtifacts(data.artifacts);
+      setUsedMb(data.usedMb);
+      setLimitMb(data.limitMb);
+    }
+  }, [taskId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) {
+      setUploadError("File is too large (max 50 MB)");
+      return;
+    }
+    setUploading(true);
+    setUploadError(null);
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/artifacts`, { method: "POST", body: fd });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string; limitMb?: number; usedMb?: number };
+        const msg = data.limitMb != null
+          ? `${data.error} (used ${data.usedMb} MB of ${data.limitMb} MB)`
+          : (data.error ?? "Upload failed");
+        setUploadError(msg);
+      } else {
+        await load();
+      }
+    } catch {
+      setUploadError("Upload failed");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function handleDelete(artifactId: string) {
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/artifacts/${artifactId}`, { method: "DELETE" });
+      if (res.ok || res.status === 204) {
+        setConfirmDeleteId(null);
+        await load();
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+          <Paperclip className="w-4 h-4 text-zinc-500" />
+          Artifacts ({artifacts.length})
+        </h2>
+        <label className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border cursor-pointer transition-colors ${
+          uploading
+            ? "opacity-50 cursor-not-allowed bg-zinc-100 border-zinc-200 text-zinc-500"
+            : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+        }`}>
+          <Upload className="w-3.5 h-3.5" />
+          {uploading ? "Uploading…" : "Upload file"}
+          <input
+            ref={fileRef}
+            type="file"
+            className="sr-only"
+            onChange={handleUpload}
+            disabled={uploading}
+          />
+        </label>
+      </div>
+
+      {uploadError && (
+        <div className="mb-3 flex items-center gap-2 text-sm text-red-700 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2">
+          <span className="flex-1">{uploadError}</span>
+          <button onClick={() => setUploadError(null)}>
+            <XIcon className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {artifacts.length === 0 ? (
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-6 text-center">
+          <Paperclip className="w-6 h-6 text-zinc-300 mx-auto mb-2" />
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            No artifacts yet. Agents can upload files via{" "}
+            <code className="text-xs font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded">
+              curl -F file=@path /api/tasks/{taskId}/artifacts
+            </code>
+          </p>
+        </div>
+      ) : (
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 divide-y divide-zinc-100 dark:divide-zinc-800">
+          {artifacts.map((a) => (
+            <div key={a.id} className="px-4 py-3">
+              <div className="flex items-center gap-3">
+                <Paperclip className="w-4 h-4 text-zinc-400 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate" title={a.filename}>
+                    {a.filename}
+                  </p>
+                  <p className="text-xs text-zinc-500 mt-0.5">
+                    {formatBytes(a.sizeBytes)} · {a.mimeType} · {new Date(a.createdAt).toLocaleString()}
+                  </p>
+                </div>
+                <a
+                  href={`/api/tasks/${taskId}/artifacts/${a.id}/download`}
+                  download={a.filename}
+                  className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 dark:hover:text-blue-400 font-medium transition-colors shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download
+                </a>
+                {confirmDeleteId === a.id ? null : (
+                  <button
+                    onClick={() => setConfirmDeleteId(a.id)}
+                    title="Delete artifact"
+                    className="p-1 rounded text-zinc-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950 transition-colors shrink-0"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Inline delete confirmation */}
+              {confirmDeleteId === a.id && (
+                <div className="mt-2 ml-7 flex items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2">
+                  <span className="flex-1">Delete <strong>{a.filename}</strong>? This cannot be undone.</span>
+                  <button
+                    onClick={() => handleDelete(a.id)}
+                    disabled={deleting}
+                    className="font-medium text-red-600 hover:text-red-800 disabled:opacity-50 shrink-0"
+                  >
+                    {deleting ? "Deleting…" : "Delete"}
+                  </button>
+                  <button
+                    onClick={() => setConfirmDeleteId(null)}
+                    disabled={deleting}
+                    className="text-zinc-500 hover:text-zinc-700 disabled:opacity-50 shrink-0"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Storage usage footer ─────────────────────────────────────────── */}
+      {(artifacts.length > 0 || usedMb > 0) && (
+        <div className="mt-2 flex items-center gap-2">
+          <div className="flex-1 h-1.5 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                usedMb / limitMb >= 0.9
+                  ? "bg-red-500"
+                  : usedMb / limitMb >= 0.7
+                  ? "bg-amber-400"
+                  : "bg-blue-500"
+              }`}
+              style={{ width: `${Math.min((usedMb / limitMb) * 100, 100)}%` }}
+            />
+          </div>
+          <span className="text-xs text-zinc-500 shrink-0">
+            {usedMb.toFixed(1)} / {limitMb} MB
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ── Audit timeline ────────────────────────────────────────────────────────────
+
 function AuditTimeline({ taskId }: { taskId: string }) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -332,6 +543,207 @@ const ALLOWED_STATUS_TRANSITIONS: Record<string, Set<string>> = {
   archived:  new Set([]),
 };
 
+interface TaskSecretEntry {
+  key: string;
+  createdAt: string;
+}
+
+function SecretsSection({ taskId }: { taskId: string }) {
+  const [secrets, setSecrets] = useState<TaskSecretEntry[]>([]);
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [noKeyConfigured, setNoKeyConfigured] = useState(false);
+
+  function load() {
+    fetch(`/api/tasks/${taskId}/secrets`)
+      .then(r => r.ok ? r.json() : null)
+      .then((data: TaskSecretEntry[] | null) => { if (data) setSecrets(data); });
+  }
+
+  useEffect(() => { load(); }, [taskId]);
+
+  async function handleAdd() {
+    if (!newKey.trim() || !newValue.trim()) return;
+    setAdding(true);
+    setAddError(null);
+    const res = await fetch(`/api/tasks/${taskId}/secrets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: newKey.trim(), value: newValue.trim() }),
+    });
+    setAdding(false);
+    if (res.ok) {
+      setNewKey(""); setNewValue(""); setShowForm(false);
+      load();
+    } else {
+      const body = await res.json().catch(() => ({})) as { error?: string };
+      if (res.status === 503) setNoKeyConfigured(true);
+      setAddError(body.error ?? "Failed to add secret");
+    }
+  }
+
+  async function handleDelete(key: string) {
+    await fetch(`/api/tasks/${taskId}/secrets/${encodeURIComponent(key)}`, { method: "DELETE" });
+    load();
+  }
+
+  return (
+    <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="font-semibold text-zinc-900 text-sm">Secrets</h2>
+          <p className="text-xs text-zinc-500 mt-0.5">
+            Environment variables injected at dispatch time. Values are AES-256-GCM encrypted and never shown.
+          </p>
+        </div>
+        {!showForm && (
+          <Btn variant="secondary" size="sm" onClick={() => { setShowForm(true); setAddError(null); }}>
+            Add secret
+          </Btn>
+        )}
+      </div>
+
+      {noKeyConfigured && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+          TASK_SECRET_KEY is not set on the server. Add it to your .env file and restart.
+        </p>
+      )}
+
+      {secrets.length === 0 && !showForm && (
+        <p className="text-xs text-zinc-400">No secrets configured.</p>
+      )}
+
+      {secrets.length > 0 && (
+        <ul className="space-y-1 mb-3">
+          {secrets.map(s => (
+            <li key={s.key} className="flex items-center justify-between py-1.5 px-3 bg-zinc-50 rounded-lg border border-zinc-100">
+              <span className="font-mono text-xs text-zinc-900">{s.key}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-400">••••••••</span>
+                <button
+                  onClick={() => handleDelete(s.key)}
+                  className="text-xs text-red-600 hover:text-red-800"
+                >
+                  Remove
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {showForm && (
+        <div className="border border-zinc-200 rounded-lg p-3 space-y-2 bg-zinc-50">
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-xs font-medium text-zinc-700 mb-1">Key (env var name)</label>
+              <input
+                type="text"
+                value={newKey}
+                onChange={e => setNewKey(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))}
+                placeholder="API_KEY"
+                className={`${inputCls} font-mono`}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-700 mb-1">Value</label>
+              <input
+                type="password"
+                value={newValue}
+                onChange={e => setNewValue(e.target.value)}
+                placeholder="••••••••"
+                className={inputCls}
+                autoComplete="new-password"
+              />
+            </div>
+          </div>
+          {addError && (
+            <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">{addError}</p>
+          )}
+          <div className="flex gap-2">
+            <Btn variant="primary" size="sm" onClick={handleAdd} disabled={adding || !newKey.trim() || !newValue.trim()}>
+              {adding ? "Saving…" : "Save secret"}
+            </Btn>
+            <Btn variant="secondary" size="sm" onClick={() => { setShowForm(false); setNewKey(""); setNewValue(""); setAddError(null); }}>
+              Cancel
+            </Btn>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RequiredTagsEditor({
+  taskId,
+  requiredTags,
+  onSaved,
+}: {
+  taskId: string;
+  requiredTags: string[];
+  onSaved: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [tags, setTags] = useState<string[]>(requiredTags);
+  const [saving, setSaving] = useState(false);
+
+  // Sync when parent reloads the task.
+  const prevTags = JSON.stringify(requiredTags);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setTags(requiredTags); }, [prevTags]);
+
+  async function handleSave() {
+    setSaving(true);
+    await fetch(`/api/tasks/${taskId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requiredTags: tags }),
+    });
+    setSaving(false);
+    setEditing(false);
+    onSaved();
+  }
+
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-2 mb-6">
+        <p className="text-xs text-zinc-500 font-medium shrink-0">Required tags:</p>
+        {tags.length === 0 ? (
+          <span className="text-xs text-zinc-400">none</span>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {tags.map((t) => <TagChip key={t} tag={t} />)}
+          </div>
+        )}
+        <button
+          onClick={() => setEditing(true)}
+          className="text-xs text-blue-600 hover:underline ml-1"
+        >
+          Edit
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-6 space-y-2">
+      <p className="text-xs text-zinc-500 font-medium">Required tags</p>
+      <TagInput tags={tags} onChange={setTags} placeholder="e.g. has-browser, gpu…" />
+      <div className="flex gap-2">
+        <Btn variant="primary" size="sm" onClick={handleSave} disabled={saving}>
+          {saving ? "Saving…" : "Save"}
+        </Btn>
+        <Btn variant="secondary" size="sm" onClick={() => { setEditing(false); setTags(requiredTags); }}>
+          Cancel
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 export function TaskDetailPanel({
   id,
   onClose,
@@ -377,6 +789,10 @@ export function TaskDetailPanel({
   const loadAttemptRef   = useRef(0);
   const pollAttemptRef   = useRef(0);
   const [pollConnState, setPollConnState] = useState<"ok" | "retrying" | "offline">("ok");
+
+  // Live log state populated by the SSE stream while the task is running.
+  const [streamedLogs, setStreamedLogs] = useState<ExecutionLog[]>([]);
+  const sseRef = useRef<EventSource | null>(null);
 
   function loadTask(attempt = 0) {
     fetch(`/api/tasks/${id}`)
@@ -472,6 +888,74 @@ export function TaskDetailPanel({
   useEffect(() => () => {
     if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
   }, []);
+
+  // SSE log stream — open while the task is running, close when it ends.
+  useEffect(() => {
+    if (task?.status !== "running") {
+      // Close any open stream and clear streamed logs when no longer running.
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+      setStreamedLogs([]);
+      return;
+    }
+
+    // Use the last known log id as the cursor so we only receive new entries.
+    const knownIds = new Set(task.executionLogs.map((l) => l.id));
+    const lastLogId = task.executionLogs.length > 0
+      ? task.executionLogs[task.executionLogs.length - 1].id
+      : null;
+
+    const url = `/api/tasks/${id}/logs/stream${lastLogId ? `?cursor=${lastLogId}` : ""}`;
+
+    // Fall back to polling if EventSource is not available (rare but possible).
+    if (typeof EventSource === "undefined") return;
+
+    // Don't open a second connection if one is already live for this task.
+    if (sseRef.current) {
+      sseRef.current.close();
+      sseRef.current = null;
+    }
+    setStreamedLogs([]);
+
+    const es = new EventSource(url);
+    sseRef.current = es;
+
+    es.addEventListener("log", (e: MessageEvent) => {
+      const log: ExecutionLog = JSON.parse(e.data);
+      if (knownIds.has(log.id)) return; // skip duplicates
+      knownIds.add(log.id);
+      setStreamedLogs((prev) => {
+        if (prev.some((l) => l.id === log.id)) return prev;
+        return [...prev, log];
+      });
+    });
+
+    es.addEventListener("status", () => {
+      // Task left running — reload to get final state.
+      es.close();
+      sseRef.current = null;
+      loadTask();
+    });
+
+    es.addEventListener("close", () => {
+      es.close();
+      sseRef.current = null;
+    });
+
+    es.onerror = () => {
+      // SSE error — close and let the existing completion poller handle the rest.
+      es.close();
+      sseRef.current = null;
+    };
+
+    return () => {
+      es.close();
+      sseRef.current = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.status, id]);
 
   // Completion poller with exponential backoff on failure.
   // Uses recursive setTimeout so failure delays don't disturb the success cadence.
@@ -778,7 +1262,7 @@ export function TaskDetailPanel({
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-3 mb-6">
+      <div className="grid grid-cols-3 gap-3 mb-4">
         <div className="bg-white rounded-lg border border-zinc-200 p-3">
           <p className="text-xs text-zinc-600 font-medium mb-0.5">Type</p>
           <p className="text-sm font-semibold text-zinc-900 capitalize">{task.taskType}</p>
@@ -792,6 +1276,12 @@ export function TaskDetailPanel({
           <p className="text-sm font-semibold text-zinc-900">{task.project.priority}</p>
         </div>
       </div>
+
+      {/* Secrets — env vars injected at dispatch */}
+      <SecretsSection taskId={task.id} />
+
+      {/* Required tags — editable inline */}
+      <RequiredTagsEditor taskId={task.id} requiredTags={task.requiredTags ?? []} onSaved={loadTask} />
 
       {/* ── Run ─────────────────────────────────────────────────────────────── */}
       <section className="bg-white rounded-xl border border-zinc-200 p-5 mb-6">
@@ -1121,46 +1611,71 @@ export function TaskDetailPanel({
         </section>
       )}
 
+      {/* ── Artifacts ───────────────────────────────────────────────────────── */}
+      <ArtifactsSection taskId={id} />
+
       {/* ── Execution Logs ───────────────────────────────────────────────────── */}
       <section>
-        <h2 className="font-semibold text-zinc-900 mb-3">
-          Execution Logs ({task.executionLogs.length})
-        </h2>
-        {task.executionLogs.length === 0 ? (
-          <div className="bg-white rounded-xl border border-zinc-200 p-6 text-center">
-            <p className="text-sm text-zinc-600">No execution logs yet.</p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {task.executionLogs.map((log) => (
-              <div key={log.id} className="bg-white rounded-xl border border-zinc-200 p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <StatusBadge status={log.status} />
-                  <span className="text-xs text-zinc-600">
-                    {new Date(log.createdAt).toLocaleString()}
+        {(() => {
+          // Merge base logs (from task fetch) with live-streamed logs, deduped by id.
+          const knownIds = new Set(task.executionLogs.map((l) => l.id));
+          const allLogs = [
+            ...task.executionLogs,
+            ...streamedLogs.filter((l) => !knownIds.has(l.id)),
+          ];
+          const isStreaming = task.status === "running" && typeof EventSource !== "undefined";
+
+          return (
+            <>
+              <div className="flex items-center gap-2 mb-3">
+                <h2 className="font-semibold text-zinc-900">
+                  Execution Logs ({allLogs.length})
+                </h2>
+                {isStreaming && (
+                  <span className="inline-flex items-center gap-1 text-xs text-blue-600 font-medium">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                    Live
                   </span>
-                </div>
-                {log.logText && (
-                  <pre className="text-xs text-zinc-700 bg-zinc-50 rounded-lg p-3 mt-2 overflow-x-auto whitespace-pre-wrap font-mono">
-                    {log.logText}
-                  </pre>
-                )}
-                {log.outputSummary && (
-                  <p className="text-sm text-zinc-800 mt-2">
-                    <span className="font-medium text-zinc-700">Output: </span>
-                    {log.outputSummary}
-                  </p>
-                )}
-                {log.errorMessage && (
-                  <p className="text-sm text-red-700 mt-2">
-                    <span className="font-medium">Error: </span>
-                    {log.errorMessage}
-                  </p>
                 )}
               </div>
-            ))}
-          </div>
-        )}
+              {allLogs.length === 0 ? (
+                <div className="bg-white rounded-xl border border-zinc-200 p-6 text-center">
+                  <p className="text-sm text-zinc-600">No execution logs yet.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {allLogs.map((log) => (
+                    <div key={log.id} className="bg-white rounded-xl border border-zinc-200 p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <StatusBadge status={log.status} />
+                        <span className="text-xs text-zinc-600">
+                          {new Date(log.createdAt).toLocaleString()}
+                        </span>
+                      </div>
+                      {log.logText && (
+                        <pre className="text-xs text-zinc-700 bg-zinc-50 rounded-lg p-3 mt-2 overflow-x-auto whitespace-pre-wrap font-mono">
+                          {log.logText}
+                        </pre>
+                      )}
+                      {log.outputSummary && (
+                        <p className="text-sm text-zinc-800 mt-2">
+                          <span className="font-medium text-zinc-700">Output: </span>
+                          {log.outputSummary}
+                        </p>
+                      )}
+                      {log.errorMessage && (
+                        <p className="text-sm text-red-700 mt-2">
+                          <span className="font-medium">Error: </span>
+                          {log.errorMessage}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          );
+        })()}
       </section>
 
       {/* ── Add Log Modal ────────────────────────────────────────────────────── */}
