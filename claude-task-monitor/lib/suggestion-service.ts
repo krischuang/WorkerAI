@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { emitAudit } from "@/lib/audit";
 import { isTemplatePlaceholder } from "@/lib/scan-helpers";
+import { classifyTaskRisk } from "@/lib/risk-classifier";
 
 const MAX_SUGGESTIONS_PER_RUN = 10;
 
@@ -211,11 +212,14 @@ export async function generateSuggestionsForProject(projectId: string): Promise<
 }
 
 export async function approveSuggestion(
-  suggestionId: string
+  suggestionId: string,
+  opts?: { isAutonomous?: boolean },
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
   const s = await prisma.taskSuggestion.findUnique({ where: { id: suggestionId } });
   if (!s) return { ok: false, error: "Not found" };
   if (s.status !== "pending_review") return { ok: false, error: `Suggestion is already ${s.status}` };
+
+  const riskLevel = classifyTaskRisk({ title: s.title, description: s.description, taskType: s.taskType });
 
   const task = await prisma.$transaction(async (tx) => {
     const t = await tx.task.create({
@@ -227,6 +231,8 @@ export async function approveSuggestion(
         taskType: s.taskType,
         estimatedCostLevel: s.estimatedCostLevel,
         status: "pending",
+        riskLevel,
+        isAutonomous: opts?.isAutonomous ?? false,
       },
     });
     await tx.taskSuggestion.update({

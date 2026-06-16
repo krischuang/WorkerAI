@@ -63,6 +63,14 @@ export const DEFAULT_TASK_TIMEOUT_MIN = 120;
 export const COMPLETION_BLOCK_START = "[WORKERAI_RESULT]";
 export const COMPLETION_BLOCK_END = "[/WORKERAI_RESULT]";
 
+/**
+ * Structured validation-evidence block delimiters. Required (in addition to the completion
+ * block above) for tasks where Task.isAutonomous is true — see lib/prompt-sanitiser.ts and the
+ * completion handling in instrumentation.node.ts.
+ */
+export const VALIDATION_BLOCK_START = "[WORKERAI_VALIDATION]";
+export const VALIDATION_BLOCK_END = "[/WORKERAI_VALIDATION]";
+
 /** Lines of tmux scrollback to capture when scanning for the completion block. */
 export const COMPLETION_SCAN_LINES = 1000;
 

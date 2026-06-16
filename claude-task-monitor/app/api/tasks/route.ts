@@ -3,6 +3,7 @@ import { serverError } from "@/lib/api-error";
 import { validateTaskCreate } from "@/lib/task-validation";
 import { emitAudit } from "@/lib/audit";
 import { recalculateProjectProgress } from "@/lib/project-progress";
+import { classifyTaskRisk } from "@/lib/risk-classifier";
 
 export async function GET(request: Request) {
   try {
@@ -87,6 +88,9 @@ export async function POST(request: Request) {
       // Useful for seed scripts or bulk imports that supply their own values.
       skipPriorityInherit,
       requiredTags,
+      // Manual override — when omitted, riskLevel is auto-computed by lib/risk-classifier.ts.
+      riskLevel,
+      isAutonomous,
     } = body;
 
     const validationErr = validateTaskCreate(body);
@@ -107,6 +111,8 @@ export async function POST(request: Request) {
     }
     resolvedPriority ??= "P3";
 
+    const resolvedRiskLevel = riskLevel ?? classifyTaskRisk({ title, description, taskType: taskType ?? "coding" });
+
     const task = await prisma.task.create({
       data: {
         projectId,
@@ -116,6 +122,8 @@ export async function POST(request: Request) {
         status: status ?? "pending",
         estimatedCostLevel: estimatedCostLevel ?? "medium",
         taskType: taskType ?? "coding",
+        riskLevel: resolvedRiskLevel,
+        ...(isAutonomous !== undefined && { isAutonomous: Boolean(isAutonomous) }),
         ...(timeoutMinutes != null && { timeoutMinutes: Number(timeoutMinutes) }),
         ...(maxRetries != null && { maxRetries: Number(maxRetries) }),
         ...(Array.isArray(requiredTags) && { requiredTags: requiredTags.map((t: string) => t.trim().toLowerCase()) }),
@@ -127,7 +135,7 @@ export async function POST(request: Request) {
       entityId: task.id,
       eventType: "task.created",
       actorType: "user",
-      payload: { projectId, title, priority: task.priority, status: task.status, taskType: task.taskType },
+      payload: { projectId, title, priority: task.priority, status: task.status, taskType: task.taskType, riskLevel: task.riskLevel },
     });
     recalculateProjectProgress(task.projectId).catch(() => {});
 
