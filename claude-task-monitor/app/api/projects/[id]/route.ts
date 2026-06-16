@@ -32,6 +32,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       autoReviewEnabled, autoScanEnabled, scanFrequencyDays,
       improvementAutomationLevel, cycleFrequencyDays, nextImprovementCycleAt,
       resetImprovementPause,
+      repoUrl, defaultBranch, workspaceStrategy,
     } = body;
 
     const project = await prisma.project.update({
@@ -57,6 +58,10 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
           autoImprovementPaused: false,
           scanFailureCount: 0,
         }),
+        // Remote-first repository fields
+        ...(repoUrl !== undefined && { repoUrl: repoUrl === null ? null : String(repoUrl) }),
+        ...(defaultBranch !== undefined && { defaultBranch: String(defaultBranch) }),
+        ...(workspaceStrategy !== undefined && { workspaceStrategy }),
       },
     });
     return Response.json(project);
