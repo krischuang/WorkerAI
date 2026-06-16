@@ -20,12 +20,15 @@ import { validateSshKeyEnv, validateArtifactStoragePath } from "./lib/startup-va
 import { prisma } from "./lib/prisma";
 import {
   fetchClaudeUsageViaTmux,
+  fetchClaudeUsageReliable,
   detectClaudeIdle,
   detectTaskCompletion,
   killTaskTmuxSession,
   launchClaudeInTmux,
   type ClaudePermissionMode,
 } from "./lib/ssh-claude-tmux";
+import { recordUsageSnapshot } from "./lib/usage-snapshot-service";
+import { applyValidationGate } from "./lib/validation-gate";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "./lib/task-dispatch";
 import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS, POST_RESET_RESTART_BUFFER_MS, estimateCostUsd, AGENT_COOLDOWN_MS, LOG_TAIL_LINES } from "./lib/constants";
 import { readRunCompletion, readLogTail, tmuxSessionExists } from "./lib/run-completion";
@@ -60,8 +63,9 @@ import { generateWeeklyAnalytics, priorWeekStart, weeklyAnalyticsExists } from "
 import { generateWeeklyReport, mondayOfWeek, weeklyReportExists } from "./lib/weekly-report-service";
 import { generateMonthlyReport, firstOfMonth, monthlyReportExists } from "./lib/monthly-report-service";
 import { unblockDependents } from "./lib/task-dependency";
-import { processReviewQueue } from "./lib/task-service";
+import { processReviewQueue, autoAssignQueuedTasks } from "./lib/task-service";
 import { runDueProjectScans } from "./lib/project-scan-service";
+import { runDueImprovementReviews } from "./lib/improvement-review-service";
 import { advanceImprovementCycles, startDueImprovementCycles } from "./lib/improvement-cycle-service";
 import { emitNotification, emitStalePendingNotification } from "./lib/notification";
 import { scrubPaneCapture } from "./lib/pane-scrubber";
@@ -95,6 +99,7 @@ const g = globalThis as unknown as {
   _lastMonthlyReportDate?: string | null;
   _lastWeeklyAnalyticsDate?: string | null;
   _lastProjectScanDate?: string | null;
+  _lastImprovementReviewDate?: string | null;
   // zombie-detection pane-line baseline (owned by lib/zombie-detection.ts)
   _zombiePaneLines?: Map<string, number>;
   // Server/agent IDs whose Claude CLI session must be restarted before the next
@@ -116,6 +121,7 @@ if (!g._usagePollerStarted) {
   if (g._lastMonthlyReportDate === undefined) g._lastMonthlyReportDate = null;
   if (g._lastWeeklyAnalyticsDate === undefined) g._lastWeeklyAnalyticsDate = null;
   if (g._lastProjectScanDate === undefined) g._lastProjectScanDate = null;
+  if (g._lastImprovementReviewDate === undefined) g._lastImprovementReviewDate = null;
   if (!g._pendingServerRestarts) g._pendingServerRestarts = new Set();
   if (!g._pendingAgentRestarts) g._pendingAgentRestarts = new Set();
   if (g._shutdownRequested === undefined) g._shutdownRequested = false;
@@ -141,6 +147,20 @@ async function runProjectScansIfNeeded() {
     await runDueProjectScans();
   } catch (err) {
     console.error(`${TAG} runDueProjectScans threw:`, err);
+  }
+}
+
+async function runImprovementReviewsIfNeeded() {
+  const now = new Date();
+  // Run once per day at or after 4 AM UTC (staggered from the gap-analysis scan at 2 AM)
+  if (now.getUTCHours() < 4) return;
+  const todayKey = now.toISOString().slice(0, 10);
+  if (g._lastImprovementReviewDate === todayKey) return;
+  g._lastImprovementReviewDate = todayKey;
+  try {
+    await runDueImprovementReviews();
+  } catch (err) {
+    console.error(`${TAG} runDueImprovementReviews threw:`, err);
   }
 }
 
@@ -518,60 +538,67 @@ function startPoller() {
           }
         }
 
-        const result = await fetchClaudeUsageViaTmux(agent.server, agent.tmuxSession);
+        const result = await fetchClaudeUsageReliable(agent.server, agent.tmuxSession, "tmux_capture");
+        // Always record a snapshot — success, failure, or low confidence — so the full capture
+        // history is inspectable. Only updates Agent.claudeSessionPct/claudeWeekPct etc. when
+        // result.confidence is "high" or "medium"; see lib/usage-snapshot-service.ts.
+        const { agentUpdated } = await recordUsageSnapshot(agent.id, result, "tmux_capture");
 
         if (result.success) {
           clearAgentOffline(agent.id, agentOfflineStore);
-          const freshSession = result.parsed.sessionPct ?? 0;
-          const freshWeek = result.parsed.weekPct ?? 0;
-          const isUnblocked = freshSession < USAGE_THRESHOLD && freshWeek < USAGE_THRESHOLD;
 
-          await prisma.agent.update({
-            where: { id: agent.id },
-            data: {
-              status:                "idle",
-              claudeSessionPct:      result.parsed.sessionPct      ?? null,
-              claudeSessionResets:   result.parsed.sessionResets    ?? null,
-              claudeSessionResetsAt: result.parsed.sessionResetsAt  ?? null,
-              claudeWeekPct:         result.parsed.weekPct           ?? null,
-              claudeWeekResets:      result.parsed.weekResets        ?? null,
-              claudeWeekResetsAt:    result.parsed.weekResetsAt      ?? null,
-              claudeUsageRaw:        result.rawOutput.slice(0, 500),
-              claudeUsageFetchedAt:  new Date(),
-              ...(agent.pausedDueToUsage && isUnblocked ? { pausedDueToUsage: false, pausedAt: null } : {}),
-            },
-          });
+          if (!agentUpdated) {
+            // Claude responded but the parser wasn't confident enough to trust the numbers —
+            // the agent is reachable (so mark idle) but the cached pct fields are left as-is.
+            await prisma.agent.update({ where: { id: agent.id }, data: { status: "idle" } }).catch(() => {});
+            console.warn(
+              `${TAG} Agent ${agent.name}: usage captured with confidence="${result.confidence}" — ` +
+              `Agent fields not updated (${result.warnings.join("; ") || "no warnings"})`
+            );
+          } else {
+            const freshSession = result.parsed.sessionPct ?? 0;
+            const freshWeek = result.parsed.weekPct ?? 0;
+            const isUnblocked = freshSession < USAGE_THRESHOLD && freshWeek < USAGE_THRESHOLD;
 
-          if (needsRestart) {
-            if (isUnblocked) {
-              console.log(
-                `${TAG} Agent ${agent.name}: fresh usage fetched (session=${freshSession}% week=${freshWeek}%) — worker resumed`
-              );
-            } else {
-              console.log(
-                `${TAG} Agent ${agent.name}: still rate-limited after restart ` +
-                `(session=${freshSession}% week=${freshWeek}%) — worker paused until next reset`
-              );
-              if (agent.autoPauseEnabled) {
-                const nextResetsAt = nearestResetsAt(
-                  result.parsed.sessionResetsAt,
-                  result.parsed.weekResetsAt,
+            await prisma.agent.update({
+              where: { id: agent.id },
+              data: {
+                status: "idle",
+                ...(agent.pausedDueToUsage && isUnblocked ? { pausedDueToUsage: false, pausedAt: null } : {}),
+              },
+            });
+
+            if (needsRestart) {
+              if (isUnblocked) {
+                console.log(
+                  `${TAG} Agent ${agent.name}: fresh usage fetched (session=${freshSession}% week=${freshWeek}%, confidence=${result.confidence}) — worker resumed`
                 );
-                if (nextResetsAt) {
-                  const scheduleAt = new Date(nextResetsAt.getTime() + POST_RESET_RESTART_BUFFER_MS);
-                  await upsertScheduledResume("agent", agent.id, scheduleAt);
-                  console.log(
-                    `${TAG} Agent ${agent.name}: rescheduled restart for ${scheduleAt.toISOString()}`
+              } else {
+                console.log(
+                  `${TAG} Agent ${agent.name}: still rate-limited after restart ` +
+                  `(session=${freshSession}% week=${freshWeek}%) — worker paused until next reset`
+                );
+                if (agent.autoPauseEnabled) {
+                  const nextResetsAt = nearestResetsAt(
+                    result.parsed.sessionResetsAt,
+                    result.parsed.weekResetsAt,
                   );
+                  if (nextResetsAt) {
+                    const scheduleAt = new Date(nextResetsAt.getTime() + POST_RESET_RESTART_BUFFER_MS);
+                    await upsertScheduledResume("agent", agent.id, scheduleAt);
+                    console.log(
+                      `${TAG} Agent ${agent.name}: rescheduled restart for ${scheduleAt.toISOString()}`
+                    );
+                  }
                 }
               }
-            }
-          } else {
-            console.log(
-              `${TAG} Agent ${agent.name}: session=${freshSession}% week=${freshWeek}%`
-            );
-            if (agent.pausedDueToUsage && isUnblocked) {
-              console.log(`${TAG} Agent ${agent.name}: usage recovered — worker resumed`);
+            } else {
+              console.log(
+                `${TAG} Agent ${agent.name}: session=${freshSession}% week=${freshWeek}% (confidence=${result.confidence})`
+              );
+              if (agent.pausedDueToUsage && isUnblocked) {
+                console.log(`${TAG} Agent ${agent.name}: usage recovered — worker resumed`);
+              }
             }
           }
         } else {
@@ -616,6 +643,8 @@ function startPoller() {
     let runningTasks: {
       id: string;
       projectId: string;
+      title: string;
+      isAutonomous: boolean;
       serverId: string | null;
       runId: string | null;
       completionNonce: string | null;
@@ -648,6 +677,8 @@ function startPoller() {
         select: {
           id: true,
           projectId: true,
+          title: true,
+          isAutonomous: true,
           serverId: true,
           runId: true,
           completionNonce: true,
@@ -931,22 +962,37 @@ function startPoller() {
           // Compute cost from current server usage snapshot (after task ran)
           const costData = computeCostFromRaw(srv.claudeUsageRaw ?? null);
 
+          // Autonomous tasks must prove their work with a [WORKERAI_VALIDATION] block before
+          // they're allowed to complete — see lib/validation-gate.ts.
+          const gate = await applyValidationGate({
+            taskId: task.id,
+            projectId: task.projectId,
+            title: task.title,
+            isAutonomous: task.isAutonomous,
+            paneText: completionResult.paneText,
+            expectedNonce: task.completionNonce,
+          });
+          const finalStatus: "completed" | "failed" = gate.allowed ? "completed" : "failed";
+          const finalExitReason = gate.allowed ? exitReason : "validation_failed";
+
           await prisma.$transaction(async (tx) => {
             const latestLog = await tx.executionLog.findFirst({
               where: { taskId: task.id, status: "running", finishedAt: null },
               orderBy: { createdAt: "desc" },
               select: { id: true, startedAt: true },
             });
-            await tx.task.update({ where: { id: task.id }, data: { status: "completed" } });
+            if (gate.allowed) {
+              await tx.task.update({ where: { id: task.id }, data: { status: "completed" } });
+            }
             if (latestLog) {
               const durationMs = finishedAt.getTime() - latestLog.startedAt.getTime();
               await tx.executionLog.update({
                 where: { id: latestLog.id },
                 data: {
-                  status: "completed",
+                  status: finalStatus,
                   finishedAt,
                   durationMs,
-                  exitReason,
+                  exitReason: finalExitReason,
                   paneCapture,
                   tokenCount: costData.tokenCount,
                   actualCostUsd: costData.actualCostUsd,
@@ -954,6 +1000,17 @@ function startPoller() {
               });
             }
           });
+
+          if (!gate.allowed) {
+            console.log(`[TASK_FINISHED] taskId="${task.id}" detectedBy="${completedHow}" blockedByValidationGate="${gate.validationStatus}"`);
+            emitNotification(task.id, "task.failed").catch(() => {});
+            recalculateProjectProgress(task.projectId).catch(() => {});
+            if (task.taskTmuxSession) {
+              await killTaskTmuxSession(sshConfig, task.id);
+              await prisma.task.update({ where: { id: task.id }, data: { taskTmuxSession: null } }).catch(() => {});
+            }
+            return;
+          }
 
           clearDispatchBackoff(task.id, backoff);
           console.log(`[TASK_FINISHED] taskId="${task.id}" detectedBy="${completedHow}"`);
@@ -997,6 +1054,8 @@ function startPoller() {
     let runningAgentTasks: {
       id: string;
       projectId: string;
+      title: string;
+      isAutonomous: boolean;
       agentId: string | null;
       runId: string | null;
       completionNonce: string | null;
@@ -1033,6 +1092,8 @@ function startPoller() {
         select: {
           id: true,
           projectId: true,
+          title: true,
+          isAutonomous: true,
           agentId: true,
           runId: true,
           completionNonce: true,
@@ -1088,6 +1149,8 @@ function startPoller() {
       tmuxOutputOffset: number | null;
       taskTmuxSession: string | null;
       taskStartedAt: Date;
+      title: string;
+      isAutonomous: boolean;
     };
     type AgentTaskEntry = {
       agent: AgentInfo;
@@ -1113,6 +1176,8 @@ function startPoller() {
         tmuxOutputOffset: task.tmuxOutputOffset,
         taskTmuxSession: task.taskTmuxSession,
         taskStartedAt: task.updatedAt,
+        title: task.title,
+        isAutonomous: task.isAutonomous,
       };
       const entry = byAgent.get(task.agentId);
       if (entry) {
@@ -1362,21 +1427,34 @@ function startPoller() {
             const perExitReason = completedHowToExitReason(perHow);
 
             try {
+              const perGate = await applyValidationGate({
+                taskId,
+                projectId: agentTaskProjectId.get(taskId) ?? "",
+                title: info.title,
+                isAutonomous: info.isAutonomous,
+                paneText: perResult.paneText,
+                expectedNonce: info.completionNonce,
+              });
+              const perFinalStatus: "completed" | "failed" = perGate.allowed ? "completed" : "failed";
+              const perFinalExitReason = perGate.allowed ? perExitReason : "validation_failed";
+
               await prisma.$transaction(async (tx) => {
                 const latestLog = await tx.executionLog.findFirst({
                   where: { taskId, status: "running", finishedAt: null },
                   orderBy: { createdAt: "desc" },
                   select: { id: true, startedAt: true },
                 });
-                await tx.task.update({ where: { id: taskId }, data: { status: "completed" } });
+                if (perGate.allowed) {
+                  await tx.task.update({ where: { id: taskId }, data: { status: "completed" } });
+                }
                 if (latestLog) {
                   await tx.executionLog.update({
                     where: { id: latestLog.id },
                     data: {
-                      status: "completed",
+                      status: perFinalStatus,
                       finishedAt: perFinishedAt,
                       durationMs: perFinishedAt.getTime() - latestLog.startedAt.getTime(),
-                      exitReason: perExitReason,
+                      exitReason: perFinalExitReason,
                       paneCapture: perPaneCapture,
                       tokenCount: agentCostData.tokenCount,
                       actualCostUsd: agentCostData.actualCostUsd,
@@ -1384,8 +1462,19 @@ function startPoller() {
                   });
                 }
               });
+              completedTaskIds.push(taskId); // releases the agent either way — the task is no longer running
+
+              if (!perGate.allowed) {
+                console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${perHow}" blockedByValidationGate="${perGate.validationStatus}"`);
+                emitNotification(taskId, "task.failed").catch(() => {});
+                const failedProjId = agentTaskProjectId.get(taskId);
+                if (failedProjId) recalculateProjectProgress(failedProjId).catch(() => {});
+                await killTaskTmuxSession(agent.server, taskId).catch(() => {});
+                await prisma.task.update({ where: { id: taskId }, data: { taskTmuxSession: null } }).catch(() => {});
+                continue;
+              }
+
               clearDispatchBackoff(taskId, backoff);
-              completedTaskIds.push(taskId);
               console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${perHow}"`);
               emitAudit({ entityType: "task", entityId: taskId, eventType: "task.completed", actorType: "poller", payload: { detectedBy: perHow, agentId } }).catch(() => {});
               emitNotification(taskId, "task.completed").catch(() => {});
@@ -1461,21 +1550,35 @@ function startPoller() {
 
               for (const taskId of legacyRemaining) {
                 try {
+                  const legacyInfo = taskTimeouts.get(taskId);
+                  const legacyGate = await applyValidationGate({
+                    taskId,
+                    projectId: agentTaskProjectId.get(taskId) ?? "",
+                    title: legacyInfo?.title ?? "",
+                    isAutonomous: legacyInfo?.isAutonomous ?? false,
+                    paneText: legacyResult.paneText,
+                    expectedNonce: legacyInfo?.completionNonce ?? completionNonce,
+                  });
+                  const legacyFinalStatus: "completed" | "failed" = legacyGate.allowed ? "completed" : "failed";
+                  const legacyFinalExitReason = legacyGate.allowed ? legacyExitReason : "validation_failed";
+
                   await prisma.$transaction(async (tx) => {
                     const latestLog = await tx.executionLog.findFirst({
                       where: { taskId, status: "running", finishedAt: null },
                       orderBy: { createdAt: "desc" },
                       select: { id: true, startedAt: true },
                     });
-                    await tx.task.update({ where: { id: taskId }, data: { status: "completed" } });
+                    if (legacyGate.allowed) {
+                      await tx.task.update({ where: { id: taskId }, data: { status: "completed" } });
+                    }
                     if (latestLog) {
                       await tx.executionLog.update({
                         where: { id: latestLog.id },
                         data: {
-                          status: "completed",
+                          status: legacyFinalStatus,
                           finishedAt: legacyFinishedAt,
                           durationMs: legacyFinishedAt.getTime() - latestLog.startedAt.getTime(),
-                          exitReason: legacyExitReason,
+                          exitReason: legacyFinalExitReason,
                           paneCapture: legacyPaneCapture,
                           tokenCount: agentCostData.tokenCount,
                           actualCostUsd: agentCostData.actualCostUsd,
@@ -1483,8 +1586,17 @@ function startPoller() {
                       });
                     }
                   });
+                  completedTaskIds.push(taskId); // releases the agent either way
+
+                  if (!legacyGate.allowed) {
+                    console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${legacyHow}" blockedByValidationGate="${legacyGate.validationStatus}"`);
+                    emitNotification(taskId, "task.failed").catch(() => {});
+                    const failedProjId = agentTaskProjectId.get(taskId);
+                    if (failedProjId) recalculateProjectProgress(failedProjId).catch(() => {});
+                    continue;
+                  }
+
                   clearDispatchBackoff(taskId, backoff);
-                  completedTaskIds.push(taskId);
                   console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="${legacyHow}"`);
                   emitAudit({ entityType: "task", entityId: taskId, eventType: "task.completed", actorType: "poller", payload: { detectedBy: legacyHow, agentId } }).catch(() => {});
                   emitNotification(taskId, "task.completed").catch(() => {});
@@ -1518,13 +1630,17 @@ function startPoller() {
           try {
             await prisma.agent.update({
               where: { id: agentId },
-              data: { status: "idle", cooldownUntil: new Date(Date.now() + AGENT_COOLDOWN_MS) },
+              data: { status: "idle", cooldownUntil: new Date(Date.now() + AGENT_COOLDOWN_MS), activeTaskCount: 0 },
             });
             console.log(`[AGENT_RELEASED] agentId="${agentId}" name="${agent.name}" cooldown=${AGENT_COOLDOWN_MS / 1000}s`);
             cooldownActive = true;
           } catch (err) {
             console.error(`${TAG} Agent ${agent.name}: failed to set idle:`, err);
           }
+        } else {
+          // Re-sync the cached counter (e.g. one of several concurrent tasks finished/failed
+          // while others kept running) so lib/agent-selector.ts always sees an accurate count.
+          await prisma.agent.update({ where: { id: agentId }, data: { activeTaskCount: nowRunningCount } }).catch(() => {});
         }
 
         // Auto-advance: fill up to maxConcurrentTasks after completions.
@@ -1638,6 +1754,18 @@ function startPoller() {
       }
     } catch (err) {
       console.error(`${TAG} scheduled task dispatch threw:`, err);
+    }
+
+    // ── 2c-ext2. Autonomous agent selection — assign + dispatch unassigned pending tasks ──
+    // Only acts on projects with autonomousMode >= 3; see lib/agent-selector.ts and
+    // lib/task-service.ts's autoAssignQueuedTasks for the scoring/risk-gating rules.
+    try {
+      const { assigned, skipped } = await autoAssignQueuedTasks();
+      if (assigned > 0 || skipped > 0) {
+        console.log(`${TAG} Autonomous agent selection: assigned=${assigned} skipped=${skipped}`);
+      }
+    } catch (err) {
+      console.error(`${TAG} autoAssignQueuedTasks threw:`, err);
     }
 
     // ── 2d. Stuck-task reconciliation — running tasks with runId but no session/done-file ──
@@ -2291,6 +2419,9 @@ function startPoller() {
 
     // ── 12. Project improvement scans (daily at 2 AM UTC, frequency-gated) ───
     await runProjectScansIfNeeded();
+
+    // ── 12b. Objective-driven improvement review (daily at 4 AM UTC, autonomousMode >= 1) ──
+    await runImprovementReviewsIfNeeded();
 
     // ── 13. Continuous improvement engine (advance cycles + start due cycles) ─
     try {
