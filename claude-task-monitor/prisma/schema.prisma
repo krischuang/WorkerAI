@@ -28,6 +28,7 @@ enum TaskStatus {
   completed
   failed
   archived
+  needs_review
 }
 
 enum CostLevel {
@@ -51,6 +52,12 @@ enum ReviewStatus {
   incomplete
   skipped
   failed
+}
+
+enum WorkspaceStrategy {
+  local_permanent
+  temporary_clone
+  remote_api
 }
 
 model Project {
@@ -86,6 +93,11 @@ model Project {
   scanFailureCount      Int       @default(0)
   autoImprovementPaused Boolean   @default(false)
 
+  // Remote-first repository support
+  repoUrl               String?
+  defaultBranch         String    @default("main")
+  workspaceStrategy     WorkspaceStrategy @default(local_permanent)
+
   // Progress tracking — updated after every task status change
   completionPct         Float?
   totalTasks            Int?
@@ -113,6 +125,7 @@ model Task {
   taskType           TaskType       @default(coding)
   resultSummary      String?
   nextAction         String?
+  runId              String?
   completionNonce    String?
   tmuxOutputOffset   Int?
   // Per-task tmux session name (claude_<taskId>) used for parallel execution on servers.
@@ -138,6 +151,8 @@ model Task {
   // Incremental progress reported by the agent during execution (0-100 %)
   progressPercent    Int?
   progressMessage    String?
+  // Temporary workspace directory path (set during execution, cleared on completion/failure)
+  workspaceDir       String?
   // Auto-review fields — populated when project.autoReviewEnabled is true
   autoReviewEnabled  Boolean        @default(false)
   reviewStatus       ReviewStatus?
@@ -146,11 +161,20 @@ model Task {
   reviewCompletedAt  DateTime?
   reviewVerdictNotes String?
   reviewAttempts     Int            @default(0)
+  // Tags required on the assigned agent for this task to be dispatched.
+  requiredTags       String[]
+  // Stale-pending alert deduplication — set when the alert fires so it doesn't repeat < 1 h
+  lastStalePendingAlertAt DateTime?
+  // Link back to the ScheduledTask that spawned this task (null for manually created tasks)
+  scheduledTaskId    String?
+  scheduledTask      ScheduledTask? @relation(fields: [scheduledTaskId], references: [id], onDelete: SetNull)
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
   executionLogs      ExecutionLog[]
   dependents         TaskDependency[] @relation("DependentTask")
   prerequisites      TaskDependency[] @relation("PrerequisiteTask")
+  secrets            TaskSecret[]
+  artifacts          TaskArtifact[]
 
   @@index([status])
   @@index([priority])
@@ -158,6 +182,31 @@ model Task {
   @@index([serverId])
   @@index([reviewStatus])
   @@index([scheduledFor])
+}
+
+model TaskSecret {
+  id             String   @id @default(cuid())
+  taskId         String
+  task           Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  key            String
+  encryptedValue String
+  createdAt      DateTime @default(now())
+
+  @@unique([taskId, key])
+  @@index([taskId])
+}
+
+model TaskArtifact {
+  id          String   @id @default(cuid())
+  taskId      String
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  filename    String
+  sizeBytes   Int
+  mimeType    String   @default("application/octet-stream")
+  storagePath String
+  createdAt   DateTime @default(now())
+
+  @@index([taskId])
 }
 
 model TaskDependency {
@@ -189,6 +238,7 @@ model ExecutionLog {
   durationMs    Int?
   exitReason    String?
   paneCapture   String?
+  runId         String?    // same runId as Task.runId at dispatch time, for done-file correlation
   archivedAt    DateTime?
   // Cost tracking
   usageSnapshotPct Float?  // claudeSessionPct at dispatch time (before), for delta calculation
@@ -245,6 +295,9 @@ model Agent {
   // Max tasks this agent can run concurrently (each in its own per-task tmux session).
   maxConcurrentTasks Int @default(1)
 
+  // Capability tags describing what this agent can do (e.g. "has-browser", "gpu", "nodejs-available").
+  tags String[]
+
   // Health monitoring
   healthScore          Int?
   consecutiveFailures  Int       @default(0)
@@ -277,6 +330,9 @@ model Agent {
   autoPauseEnabled  Boolean   @default(true)
   pausedDueToUsage  Boolean   @default(false)
   pausedAt          DateTime?
+
+  // Cooldown after any terminal task status — poller skips dispatch until this passes
+  cooldownUntil DateTime?
 
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
@@ -732,6 +788,7 @@ model ScheduledTask {
   nextRunAt          DateTime? // pre-computed by service; null until first compute
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
+  spawnedTasks       Task[]
 
   @@index([projectId])
   @@index([nextRunAt, enabled])
