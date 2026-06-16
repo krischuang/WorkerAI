@@ -26,6 +26,7 @@ export async function runDueScheduledTasks(): Promise<void> {
         estimatedCostLevel: st.estimatedCostLevel,
         ...(st.timeoutMinutes != null && { timeoutMinutes: st.timeoutMinutes }),
         maxRetries: st.maxRetries,
+        scheduledTaskId: st.id,
       },
     });
 

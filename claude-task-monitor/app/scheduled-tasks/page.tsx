@@ -1,7 +1,10 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { CalendarClock, PlusCircle, Pencil, Trash2, ToggleLeft, ToggleRight } from "lucide-react";
+import {
+  CalendarClock, PlusCircle, Pencil, Trash2, ToggleLeft, ToggleRight,
+  ChevronDown, ChevronRight, CheckCircle2, XCircle, Clock, AlertCircle,
+} from "lucide-react";
 import {
   PageHeader,
   EmptyState,
@@ -13,6 +16,7 @@ import {
   inputCls,
 } from "@/app/_components/ui";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
+import { nextCronDate } from "@/lib/cron-schedule";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -37,6 +41,14 @@ interface ScheduledTask {
   lastRunAt: string | null;
   nextRunAt: string | null;
   project: { name: string; priority: string };
+}
+
+interface ScheduledRunHistory {
+  taskId: string;
+  triggeredAt: string;
+  status: string;
+  durationMs: number | null;
+  title: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -119,6 +131,43 @@ function relativeTime(iso: string): string {
   return past ? `${d}d ago` : `in ${d}d`;
 }
 
+// ── Status icon helper ────────────────────────────────────────────────────────
+
+function StatusIcon({ status, size = "sm" }: { status: string; size?: "sm" | "md" }) {
+  const cls = size === "sm" ? "w-3.5 h-3.5" : "w-4 h-4";
+  switch (status) {
+    case "completed":   return <CheckCircle2 className={`${cls} text-green-500`} />;
+    case "failed":      return <XCircle      className={`${cls} text-red-500`} />;
+    case "running":     return <Clock        className={`${cls} text-blue-500 animate-pulse`} />;
+    case "pending":
+    case "queued":      return <Clock        className={`${cls} text-zinc-400`} />;
+    default:            return <AlertCircle  className={`${cls} text-amber-500`} />;
+  }
+}
+
+function durationLabel(ms: number | null): string {
+  if (ms == null) return "";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function getUpcoming5(cronExpr: string): Date[] {
+  const dates: Date[] = [];
+  let after = new Date();
+  for (let i = 0; i < 5; i++) {
+    try {
+      after = nextCronDate(cronExpr, after);
+      dates.push(after);
+    } catch {
+      break;
+    }
+  }
+  return dates;
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ScheduledTasksPage() {
@@ -139,6 +188,9 @@ function ScheduledTasksPageInner() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError]       = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [expandedHistory, setExpandedHistory] = useState<string | null>(null);
+  const [expandedUpcoming, setExpandedUpcoming] = useState<string | null>(null);
+  const [historyMap, setHistoryMap] = useState<Record<string, ScheduledRunHistory[]>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -155,6 +207,25 @@ function ScheduledTasksPageInner() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  async function toggleHistory(taskId: string) {
+    if (expandedHistory === taskId) {
+      setExpandedHistory(null);
+      return;
+    }
+    setExpandedHistory(taskId);
+    if (!historyMap[taskId]) {
+      const res = await fetch(`/api/scheduled-tasks/${taskId}/history`);
+      if (res.ok) {
+        const data: ScheduledRunHistory[] = await res.json();
+        setHistoryMap((prev) => ({ ...prev, [taskId]: data }));
+      }
+    }
+  }
+
+  function toggleUpcoming(taskId: string) {
+    setExpandedUpcoming(expandedUpcoming === taskId ? null : taskId);
+  }
 
   function openCreate() {
     const first = projects[0];
@@ -298,7 +369,7 @@ function ScheduledTasksPageInner() {
                   </span>
                 </div>
 
-                <div className="flex gap-4 mt-1.5 text-xs text-zinc-500">
+                <div className="flex gap-4 mt-1.5 text-xs text-zinc-500 flex-wrap">
                   {task.nextRunAt && (
                     <span>
                       Next: <span className="text-zinc-700 dark:text-zinc-300 font-medium">{relativeTime(task.nextRunAt)}</span>
@@ -307,6 +378,71 @@ function ScheduledTasksPageInner() {
                   )}
                   {task.lastRunAt && (
                     <span>Last: {relativeTime(task.lastRunAt)}</span>
+                  )}
+                </div>
+
+                {/* ── Collapsible: Run History ─────────────────────────── */}
+                <div className="mt-2">
+                  <button
+                    onClick={() => toggleHistory(task.id)}
+                    className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                  >
+                    {expandedHistory === task.id
+                      ? <ChevronDown className="w-3.5 h-3.5" />
+                      : <ChevronRight className="w-3.5 h-3.5" />}
+                    Run history
+                  </button>
+
+                  {expandedHistory === task.id && (
+                    <div className="mt-1.5 space-y-1 pl-4 border-l-2 border-zinc-100 dark:border-zinc-800">
+                      {!historyMap[task.id] ? (
+                        <p className="text-xs text-zinc-400">Loading…</p>
+                      ) : historyMap[task.id].length === 0 ? (
+                        <p className="text-xs text-zinc-400">No runs yet.</p>
+                      ) : (
+                        historyMap[task.id].map((run) => (
+                          <div key={run.taskId} className="flex items-center gap-2 text-xs">
+                            <StatusIcon status={run.status} size="sm" />
+                            <span className="text-zinc-600 dark:text-zinc-400 capitalize">{run.status}</span>
+                            {run.durationMs != null && (
+                              <span className="text-zinc-400">{durationLabel(run.durationMs)}</span>
+                            )}
+                            <span className="text-zinc-400">{relativeTime(run.triggeredAt)}</span>
+                            <a
+                              href={`/tasks/${run.taskId}`}
+                              className="text-blue-600 hover:underline ml-auto"
+                            >
+                              View →
+                            </a>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Collapsible: Upcoming next 5 ─────────────────────── */}
+                <div className="mt-1">
+                  <button
+                    onClick={() => toggleUpcoming(task.id)}
+                    className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                  >
+                    {expandedUpcoming === task.id
+                      ? <ChevronDown className="w-3.5 h-3.5" />
+                      : <ChevronRight className="w-3.5 h-3.5" />}
+                    Upcoming (next 5)
+                  </button>
+
+                  {expandedUpcoming === task.id && (
+                    <div className="mt-1.5 space-y-0.5 pl-4 border-l-2 border-zinc-100 dark:border-zinc-800">
+                      {getUpcoming5(task.cronSchedule).map((d, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+                          <CalendarClock className="w-3 h-3 text-zinc-400 shrink-0" />
+                          <span>{d.toLocaleString()}</span>
+                          <span className="text-zinc-400">({relativeTime(d.toISOString())})</span>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               </div>
