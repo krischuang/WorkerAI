@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { PageHeader, Btn, LoadingState, EmptyState } from "@/app/_components/ui";
+import { TagChip } from "@/app/_components/TagInput";
 
 type AgentStatus = "idle" | "running" | "offline" | "error";
 type ClaudePermissionMode = "read_only" | "workspace_write" | "full_autonomous";
@@ -23,6 +24,7 @@ interface Agent {
   server: { id: string; name: string; host: string };
   _count: { tasks: number };
   maxConcurrentTasks: number;
+  tags: string[];
   runningTaskCount: number;
   pausedDueToUsage: boolean;
 }
@@ -143,6 +145,11 @@ export default function AgentsPage() {
                       <td className="px-4 py-3">
                         <div className="font-medium text-zinc-900 dark:text-zinc-100">{agent.name}</div>
                         <div className="text-xs text-zinc-500 font-mono">{agent.tmuxSession}</div>
+                        {agent.tags && agent.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {agent.tags.map((tag) => <TagChip key={tag} tag={tag} />)}
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-1">

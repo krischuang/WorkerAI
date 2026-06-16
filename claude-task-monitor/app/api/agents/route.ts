@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
 
 export async function GET(request: NextRequest) {
@@ -27,7 +28,7 @@ export async function GET(request: NextRequest) {
       : [];
     const runningCountMap = new Map(runningRows.map((r) => [r.agentId!, r._count._all]));
 
-    return NextResponse.json(
+    return jsonResponse(
       agents.map((a) => ({
         ...a,
         runningTaskCount: runningCountMap.get(a.id) ?? 0,
@@ -83,7 +84,7 @@ export async function POST(request: NextRequest) {
         targetId: agent.id,
         payload: { name, slug, serverId },
       });
-      return NextResponse.json(agent, { status: 201 });
+      return jsonResponse(agent, { status: 201 });
     } catch (err: unknown) {
       if (err && typeof err === "object" && "code" in err && err.code === "P2002") {
         return NextResponse.json(

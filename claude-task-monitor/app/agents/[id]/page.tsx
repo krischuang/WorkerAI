@@ -6,6 +6,7 @@ import Link from "next/link";
 import {
   PageHeader, BackLink, Btn, FormField, inputCls, Modal, ModalActions,
 } from "@/app/_components/ui";
+import { TagChip, TagInput } from "@/app/_components/TagInput";
 
 type AgentStatus = "idle" | "running" | "offline" | "error";
 type ClaudePermissionMode = "read_only" | "workspace_write" | "full_autonomous";
@@ -41,6 +42,7 @@ interface Agent {
   server: { id: string; name: string; host: string; username: string; port: number };
   _count: { tasks: number };
   maxConcurrentTasks: number;
+  tags: string[];
   pausedDueToUsage: boolean;
   pausedAt: string | null;
   autoPauseEnabled: boolean;
@@ -139,6 +141,7 @@ export default function AgentDetailPage() {
   const [editTmuxSession, setEditTmuxSession] = useState("");
   const [editMode, setEditMode] = useState<ClaudePermissionMode>("workspace_write");
   const [editMaxConcurrentTasks, setEditMaxConcurrentTasks] = useState(1);
+  const [editTags, setEditTags] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
   // Delete confirm
@@ -163,6 +166,7 @@ export default function AgentDetailPage() {
         setEditTmuxSession(data.tmuxSession);
         setEditMode(data.claudePermissionMode);
         setEditMaxConcurrentTasks(data.maxConcurrentTasks ?? 1);
+        setEditTags(data.tags ?? []);
         setLoading(false);
       });
   }
@@ -268,6 +272,7 @@ export default function AgentDetailPage() {
         tmuxSession: editTmuxSession,
         claudePermissionMode: editMode,
         maxConcurrentTasks: editMaxConcurrentTasks,
+        tags: editTags,
       }),
     });
     setSaving(false);
@@ -359,6 +364,14 @@ export default function AgentDetailPage() {
             {tasks.filter((t) => t.status === "running").length}/{agent.maxConcurrentTasks ?? 1} tasks
           </p>
         </div>
+        {agent.tags && agent.tags.length > 0 && (
+          <div className="col-span-2 bg-white dark:bg-zinc-900 rounded-lg border border-zinc-200 dark:border-zinc-700 p-3">
+            <p className="text-xs text-zinc-500 font-medium mb-1.5">Capability tags</p>
+            <div className="flex flex-wrap gap-1.5">
+              {agent.tags.map((tag) => <TagChip key={tag} tag={tag} />)}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Claude Usage ─────────────────────────────────────────────────────── */}
@@ -574,6 +587,12 @@ HOME=${agent.workDir} claude login
                 onChange={(e) => setEditMaxConcurrentTasks(Math.min(5, Math.max(1, Number(e.target.value))))}
                 className={`${inputCls} w-24`}
               />
+            </FormField>
+            <FormField
+              label="Capability tags"
+              hint="Describe what this agent can do (e.g. has-browser, gpu, nodejs-available). Press Enter or comma to add."
+            >
+              <TagInput tags={editTags} onChange={setEditTags} placeholder="Add capability tag…" />
             </FormField>
             <ModalActions>
               <Btn type="button" variant="secondary" onClick={() => setShowEdit(false)}>Cancel</Btn>

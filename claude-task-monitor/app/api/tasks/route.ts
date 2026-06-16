@@ -86,6 +86,7 @@ export async function POST(request: Request) {
       // When true, callers opt out of priority inheritance and always get P3.
       // Useful for seed scripts or bulk imports that supply their own values.
       skipPriorityInherit,
+      requiredTags,
     } = body;
 
     const validationErr = validateTaskCreate(body);
@@ -117,6 +118,7 @@ export async function POST(request: Request) {
         taskType: taskType ?? "coding",
         ...(timeoutMinutes != null && { timeoutMinutes: Number(timeoutMinutes) }),
         ...(maxRetries != null && { maxRetries: Number(maxRetries) }),
+        ...(Array.isArray(requiredTags) && { requiredTags: requiredTags.map((t: string) => t.trim().toLowerCase()) }),
       },
       include: { project: { select: { name: true } } },
     });
