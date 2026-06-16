@@ -5,9 +5,17 @@ export async function GET() {
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
+  const thresholdRow = await prisma.systemConfig.findUnique({
+    where: { key: "stale_pending_alert_minutes" },
+    select: { value: true },
+  });
+  const thresholdMinutes = Math.max(1, parseInt(thresholdRow?.value ?? "60", 10) || 60);
+  const stalePendingCutoff = new Date(now.getTime() - thresholdMinutes * 60_000);
+
   const [
     activeProjects,
     pendingTasks,
+    stalePendingCount,
     queuedTasks,
     runningTasks,
     completedToday,
@@ -24,6 +32,7 @@ export async function GET() {
   ] = await Promise.all([
     prisma.project.count({ where: { status: "active" } }),
     prisma.task.count({ where: { status: "pending" } }),
+    prisma.task.count({ where: { status: "pending", createdAt: { lte: stalePendingCutoff } } }),
     prisma.task.count({ where: { status: "queued" } }),
     prisma.task.count({ where: { status: "running" } }),
     prisma.task.count({
@@ -84,6 +93,11 @@ export async function GET() {
         lastRunAt: true,
         priority: true,
         project: { select: { name: true } },
+        spawnedTasks: {
+          select: { id: true, status: true, createdAt: true },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+        },
       },
       orderBy: { nextRunAt: "asc" },
       take: 5,
@@ -147,6 +161,7 @@ export async function GET() {
   return Response.json({
       activeProjects,
       pendingTasks,
+      stalePendingCount,
       queuedTasks,
       runningTasks,
       completedToday,
@@ -163,6 +178,8 @@ export async function GET() {
         lastRunAt: s.lastRunAt?.toISOString() ?? null,
         priority: s.priority,
         project: s.project,
+        lastRunStatus: s.spawnedTasks[0]?.status ?? null,
+        lastRunTaskId: s.spawnedTasks[0]?.id ?? null,
       })),
     });
   } catch (err) {
