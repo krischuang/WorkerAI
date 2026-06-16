@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   FolderKanban,
@@ -13,10 +14,23 @@ import {
   ChevronDown,
   ChevronRight,
   CalendarClock,
+  AlertCircle,
 } from "lucide-react";
+import { nextCronDate } from "@/lib/cron-schedule";
 import { StatusBadge } from "@/app/_components/StatusBadge";
 import { PriorityBadge } from "@/app/_components/PriorityBadge";
 import { PageHeader, LoadingState } from "@/app/_components/ui";
+import type { TrendsResponse } from "@/app/api/dashboard/trends/route";
+
+// Dynamically imported to avoid SSR issues with recharts DOM dependencies.
+const ThroughputChart = dynamic(
+  () => import("@/app/_components/ThroughputChart").then(m => ({ default: m.ThroughputChart })),
+  { ssr: false, loading: () => <div className="h-[180px] bg-zinc-50 dark:bg-zinc-950 rounded animate-pulse" /> },
+);
+const ProjectSparklineRow = dynamic(
+  () => import("@/app/_components/ThroughputChart").then(m => ({ default: m.ProjectSparklineRow })),
+  { ssr: false },
+);
 
 interface TodayReport {
   id: string;
@@ -59,6 +73,7 @@ interface QuotaReset {
 interface DashboardData {
   activeProjects: number;
   pendingTasks: number;
+  stalePendingCount: number;
   queuedTasks: number;
   runningTasks: number;
   completedToday: number;
@@ -73,6 +88,8 @@ interface DashboardData {
     lastRunAt: string | null;
     priority: string;
     project: { name: string };
+    lastRunStatus: string | null;
+    lastRunTaskId: string | null;
   }>;
   highPriorityPending: Array<{
     id: string;
@@ -270,11 +287,39 @@ function StatCard({
   );
 }
 
+function ScheduledRunStatusIcon({ status }: { status: string | null }) {
+  if (!status) return null;
+  let icon: React.ReactNode;
+  switch (status) {
+    case "completed": icon = <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />; break;
+    case "failed":    icon = <XCircle      className="w-3.5 h-3.5 text-red-500" />; break;
+    case "running":   icon = <Clock        className="w-3.5 h-3.5 text-blue-500 animate-pulse" />; break;
+    default:          icon = <AlertCircle  className="w-3.5 h-3.5 text-amber-500" />; break;
+  }
+  return <span title={`Last run: ${status}`} className="shrink-0">{icon}</span>;
+}
+
+function getNext5(cronExpr: string): Date[] {
+  const dates: Date[] = [];
+  let after = new Date();
+  for (let i = 0; i < 5; i++) {
+    try {
+      after = nextCronDate(cronExpr, after);
+      dates.push(after);
+    } catch {
+      break;
+    }
+  }
+  return dates;
+}
+
 function ScheduledTasksWidget({
   entries,
 }: {
   entries: DashboardData["upcomingScheduled"];
 }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
   if (entries.length === 0) return null;
   return (
     <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
@@ -290,27 +335,55 @@ function ScheduledTasksWidget({
           Manage schedules →
         </Link>
       </div>
-      <ul className="space-y-2">
+      <ul className="space-y-3">
         {entries.map((s) => (
-          <li key={s.id} className="flex items-center justify-between gap-4">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">{s.title}</p>
-              <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
-                {s.project.name} · <span className="font-mono">{s.cronSchedule}</span> · {cronSummary(s.cronSchedule)}
-              </p>
-            </div>
-            <div className="text-right shrink-0">
-              {s.nextRunAt && (
-                <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                  {relativeTime(s.nextRunAt)}
+          <li key={s.id}>
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <ScheduledRunStatusIcon status={s.lastRunStatus} />
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">{s.title}</p>
+                </div>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
+                  {s.project.name} · <span className="font-mono">{s.cronSchedule}</span> · {cronSummary(s.cronSchedule)}
                 </p>
-              )}
-              {s.nextRunAt && (
-                <p className="text-xs text-zinc-500">
-                  {new Date(s.nextRunAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
-                </p>
-              )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="text-right">
+                  {s.nextRunAt && (
+                    <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                      {relativeTime(s.nextRunAt)}
+                    </p>
+                  )}
+                  {s.nextRunAt && (
+                    <p className="text-xs text-zinc-500">
+                      {new Date(s.nextRunAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() => setExpandedId(expandedId === s.id ? null : s.id)}
+                  title="Show upcoming runs"
+                  className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-600 transition-colors"
+                >
+                  {expandedId === s.id
+                    ? <ChevronDown className="w-3.5 h-3.5" />
+                    : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+              </div>
             </div>
+
+            {expandedId === s.id && (
+              <div className="mt-2 ml-5 pl-3 border-l-2 border-zinc-100 dark:border-zinc-800 space-y-1">
+                {getNext5(s.cronSchedule).map((d, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+                    <CalendarClock className="w-3 h-3 text-zinc-400 shrink-0" />
+                    <span>{d.toLocaleString([], { dateStyle: "short", timeStyle: "short" })}</span>
+                    <span className="text-zinc-400">({relativeTime(d.toISOString())})</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </li>
         ))}
       </ul>
@@ -327,6 +400,7 @@ const SERVER_STATUS_DOT: Record<string, string> = {
 export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [todayReport, setTodayReport] = useState<TodayReport | null | undefined>(undefined);
+  const [trends, setTrends] = useState<TrendsResponse | null>(null);
 
   useEffect(() => {
     fetch("/api/dashboard")
@@ -338,6 +412,10 @@ export default function DashboardPage() {
       .then((r) => { if (r.status === 404) return null; if (!r.ok) return null; return r.json(); })
       .then((d) => setTodayReport(d))
       .catch(() => setTodayReport(null));
+    fetch("/api/dashboard/trends")
+      .then((r) => r.ok ? r.json() : null)
+      .then((d: TrendsResponse | null) => { if (d) setTrends(d); })
+      .catch(() => {});
   }, []);
 
   if (!data) return <LoadingState message="Loading dashboard…" />;
@@ -360,13 +438,56 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
         <StatCard label="Projects" value={data.activeProjects} color="text-zinc-700 dark:text-zinc-300" icon={FolderKanban} iconBg="bg-zinc-100 dark:bg-zinc-800" />
-        <StatCard label="Pending" value={data.pendingTasks} color="text-zinc-600 dark:text-zinc-400" icon={Clock} iconBg="bg-zinc-100 dark:bg-zinc-800" />
+        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 flex items-center gap-4">
+          <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-zinc-100 dark:bg-zinc-800">
+            <Clock className="w-5 h-5 text-zinc-600 dark:text-zinc-400" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs text-zinc-500 font-medium uppercase tracking-wide">Pending</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-2xl font-bold tracking-tight text-zinc-600 dark:text-zinc-400">{data.pendingTasks}</p>
+              {(data.stalePendingCount ?? 0) > 0 && (
+                <span
+                  className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-700 shrink-0"
+                  title={`${data.stalePendingCount} task${data.stalePendingCount === 1 ? "" : "s"} waiting over 1 hour`}
+                >
+                  {data.stalePendingCount} stale
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
         <StatCard label="Queued" value={data.queuedTasks} color="text-violet-700" icon={ArrowUpDown} iconBg="bg-violet-50" />
         <StatCard label="Running" value={data.runningTasks} color="text-blue-700" icon={Play} iconBg="bg-blue-50" />
         <StatCard label="Completed Today" value={data.completedToday} color="text-green-700" icon={CheckCircle2} iconBg="bg-green-50" />
         <StatCard label="Failed" value={data.failedTasks} color="text-red-700" icon={XCircle} iconBg="bg-red-50" />
         <StatCard label="Servers Online" value={data.servers.connectedServers} color="text-green-700" icon={Server} iconBg="bg-green-50" />
       </div>
+
+      {/* ── 7-day throughput chart ──────────────────────────────────────── */}
+      {trends && (
+        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
+          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-4">7-Day Throughput</h2>
+          <ThroughputChart days={trends.days} />
+
+          {trends.projectSparklines.length > 1 && (
+            <>
+              <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mt-5 mb-3">
+                Per-project (completed)
+              </h3>
+              <div className="space-y-2">
+                {trends.projectSparklines.slice(0, 6).map(s => (
+                  <ProjectSparklineRow key={s.projectId} sparkline={s} />
+                ))}
+              </div>
+            </>
+          )}
+
+          <p className="text-xs text-zinc-400 mt-3 text-right">
+            Cached · refreshes every 5 min
+          </p>
+        </section>
+      )}
 
       {todayReport !== undefined && (
         <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">

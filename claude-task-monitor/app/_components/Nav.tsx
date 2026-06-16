@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
+  LayoutGrid,
   FolderKanban,
   ClipboardList,
   ArrowUpDown,
@@ -15,6 +16,7 @@ import {
   FileText,
   Activity,
   ShieldCheck,
+  ShieldAlert,
   Bell,
   LogOut,
   Menu,
@@ -36,6 +38,7 @@ const sections = [
   {
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/overview",  label: "Overview",  icon: LayoutGrid       },
     ],
   },
   {
@@ -69,6 +72,7 @@ const sections = [
       { href: "/admin/audit",          label: "Audit Log",      icon: ShieldCheck    },
       { href: "/admin/audit-log",      label: "Admin Actions",  icon: ClipboardCheck },
       { href: "/admin/notifications",  label: "Notifications",  icon: Bell           },
+      { href: "/admin/security",       label: "Security",       icon: ShieldAlert    },
       { href: "/admin/api-docs",       label: "API Docs",       icon: FileJson       },
     ],
   },
