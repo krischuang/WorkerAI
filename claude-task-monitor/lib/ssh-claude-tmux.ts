@@ -22,6 +22,7 @@
 import { execSSH } from "@/lib/ssh";
 import {
   type ClaudeUsageParsed,
+  type ParseConfidence,
   parseUsage,
   looksLikeUsage,
   cleanPane,
@@ -29,6 +30,7 @@ import {
   classifyIdlePane,
   classifyPreflightPane,
   detectCompletionBlock,
+  assessParseConfidence,
 } from "@/lib/usage-parser";
 import { buildDispatchPrompt, type DispatchTask } from "@/lib/prompt-sanitiser";
 import { COMPLETION_SCAN_LINES, RUN_DIR } from "@/lib/constants";
@@ -257,6 +259,212 @@ export async function fetchClaudeUsageViaTmux(
     error: hasData
       ? undefined
       : `Could not extract usage data. Is Claude CLI running in the '${tmuxSession}' tmux session?`,
+  };
+}
+
+// ─── Reliable multi-capture /usage fetch ─────────────────────────────────────
+
+export type UsageCaptureSource = "tmux_capture" | "pipe_pane" | "manual_refresh";
+
+export interface ReliableUsageResult {
+  success: boolean;
+  status: ClaudeUsageStatus;
+  /** The most recent of the captures taken, used as the canonical parsed result. */
+  parsed: ClaudeUsageParsed;
+  confidence: ParseConfidence;
+  warnings: string[];
+  rawOutput: string;
+  cleanedOutput: string;
+  source: UsageCaptureSource;
+  error?: string;
+}
+
+/** Number of independent pane captures taken after sending /usage. */
+const RELIABLE_CAPTURE_COUNT = 3;
+/** Delay between successive captures — long enough for the TUI to finish a redraw. */
+const RELIABLE_CAPTURE_DELAY_MS = 1_200;
+/**
+ * Scrollback depth for each capture. Wider than a bare `capture-pane -p` (which only returns
+ * the currently-visible screen) so the full /usage panel is captured even on a short terminal,
+ * and so a stale panel higher in the buffer is still visible to the last-match-wins section
+ * extraction in lib/usage-parser.ts.
+ */
+const RELIABLE_CAPTURE_SCROLLBACK = 200;
+
+/**
+ * Fetch Claude CLI /usage data with a reliability pipeline: preflight check, send /usage, then
+ * capture the rendered pane multiple times with short delays and only accept the result once
+ * `assessParseConfidence` has scored it. This is the primary entry point for both the
+ * background poller and the manual "Refresh usage" button — see lib/usage-snapshot-service.ts
+ * for how the result is written to the database.
+ */
+export async function fetchClaudeUsageReliable(
+  config: SSHConfig,
+  tmuxSession: string,
+  source: UsageCaptureSource,
+): Promise<ReliableUsageResult> {
+  if (!tmuxSession || !tmuxSession.trim()) {
+    return {
+      success: false, status: "offline", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: "", cleanedOutput: "", source,
+      error: "Agent tmuxSession is not configured. Set the tmuxSession field on the agent.",
+    };
+  }
+
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+
+  // ── 1. Verify tmux session exists ─────────────────────────────────────────
+  let sessionExists: boolean;
+  try {
+    const { stdout } = await execSSH(
+      ssh,
+      `tmux has-session -t ${tmuxSession} 2>/dev/null && echo yes || echo no`,
+      5_000
+    );
+    sessionExists = stdout.trim() === "yes";
+  } catch (err) {
+    return {
+      success: false, status: "offline", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: "", cleanedOutput: "", source,
+      error: `SSH error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!sessionExists) {
+    return {
+      success: false, status: "offline", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: "", cleanedOutput: "", source,
+      error:
+        `tmux session '${tmuxSession}' not found. ` +
+        `Create it:\n  tmux new-session -d -s ${tmuxSession}\n  tmux send-keys -t ${tmuxSession} 'claude' Enter`,
+    };
+  }
+
+  // ── 2. Pre-flight: auth/rate-limit/session-unavailable check ─────────────
+  // Same tail-window strategy and auth retry as fetchClaudeUsageViaTmux — see that function's
+  // comments for the rationale (do not revert to full-pane scanning).
+  const AUTH_PREFLIGHT_RETRY_DELAYS_MS = [2_000, 2_000];
+
+  await execSSH(ssh, `tmux send-keys -t ${tmuxSession} "" Enter && sleep 0.3`, 5_000).catch(() => {});
+
+  let before = "";
+  let preflight = classifyPreflightPane(before);
+
+  for (let attempt = 0; attempt <= AUTH_PREFLIGHT_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      const { stdout } = await execSSH(ssh, `tmux capture-pane -t ${tmuxSession} -p`, 5_000);
+      before = cleanPane(stdout);
+    } catch { /* non-fatal */ }
+
+    preflight = classifyPreflightPane(before);
+
+    if (preflight.status !== "auth_required" || attempt === AUTH_PREFLIGHT_RETRY_DELAYS_MS.length) break;
+
+    const delay = AUTH_PREFLIGHT_RETRY_DELAYS_MS[attempt];
+    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+  }
+
+  if (preflight.status === "auth_required") {
+    return {
+      success: false, status: "auth_required", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: before.slice(-2000), cleanedOutput: "", source,
+      error: "Claude CLI is not authenticated. SSH in and run 'claude login'.",
+    };
+  }
+  if (preflight.status === "rate_limited") {
+    return {
+      success: false, status: "rate_limited", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: before.slice(-2000), cleanedOutput: "", source,
+      error: "Claude CLI is rate limited. Wait a moment before refreshing.",
+    };
+  }
+  if (preflight.status === "session_unavailable") {
+    return {
+      success: false, status: "offline", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: before.slice(-2000), cleanedOutput: "", source,
+      error: "Claude CLI session is unavailable.",
+    };
+  }
+
+  // ── 3. Send /usage ─────────────────────────────────────────────────────────
+  try {
+    await execSSH(ssh, `tmux send-keys -t ${tmuxSession} "/usage" Enter && sleep 3`, 12_000);
+  } catch (err) {
+    return {
+      success: false, status: "error", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: "", cleanedOutput: "", source,
+      error: `Failed to send /usage: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // ── 4. Capture the rendered pane multiple times so a mid-redraw read doesn't get
+  //      mistaken for a stable result — see RELIABLE_CAPTURE_COUNT/DELAY_MS above. ──
+  const rawCaptures: string[] = [];
+  try {
+    for (let i = 0; i < RELIABLE_CAPTURE_COUNT; i++) {
+      const { stdout } = await execSSH(
+        ssh,
+        `tmux capture-pane -t ${tmuxSession} -p -S -${RELIABLE_CAPTURE_SCROLLBACK}`,
+        5_000,
+      );
+      rawCaptures.push(cleanPane(stdout));
+      if (i < RELIABLE_CAPTURE_COUNT - 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, RELIABLE_CAPTURE_DELAY_MS));
+      }
+    }
+  } catch (err) {
+    return {
+      success: false, status: "error", parsed: {}, confidence: "failed", warnings: [],
+      rawOutput: "", cleanedOutput: "", source,
+      error: `Failed to capture pane: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // ── 5. Dismiss the /usage overlay so the pane is ready for the next command ─
+  await execSSH(
+    ssh,
+    `tmux send-keys -t ${tmuxSession} Escape 2>/dev/null; sleep 0.8`,
+    5_000,
+  ).catch(() => {});
+
+  // ── 6. Parse every capture that looks like usage data, then score confidence ─
+  const usageCaptures = rawCaptures.filter(looksLikeUsage);
+  const parsedCaptures = usageCaptures.map(parseUsage);
+
+  const lastRaw = rawCaptures[rawCaptures.length - 1] ?? "";
+  const lastCleaned = lastRaw; // already cleaned by cleanPane above
+
+  if (parsedCaptures.length === 0) {
+    const tail = lastRaw.split("\n").filter((l) => l.trim()).slice(-10);
+    console.warn(
+      `[usage-parse-fail] session='${tmuxSession}' source='${source}' — last 10 non-empty lines of final capture:\n` +
+      tail.map((l, i) => `  [${i}] ${JSON.stringify(l)}`).join("\n")
+    );
+    return {
+      success: false, status: "error", parsed: {}, confidence: "failed",
+      warnings: ["No capture out of " + RELIABLE_CAPTURE_COUNT + " attempts looked like /usage output."],
+      rawOutput: lastRaw.slice(-2000), cleanedOutput: lastCleaned.slice(-2000), source,
+      error: `Could not extract usage data after ${RELIABLE_CAPTURE_COUNT} attempts. Is Claude CLI running in the '${tmuxSession}' tmux session?`,
+    };
+  }
+
+  const parsed = parsedCaptures[parsedCaptures.length - 1];
+  const { confidence, warnings } = assessParseConfidence(parsed, parsedCaptures);
+
+  return {
+    success: true,
+    status: "ok",
+    parsed,
+    confidence,
+    warnings,
+    rawOutput: lastRaw.slice(-2000),
+    cleanedOutput: lastCleaned.slice(-2000),
+    source,
   };
 }
 

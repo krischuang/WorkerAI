@@ -111,15 +111,42 @@ export function utcToSydney(utcStr: string): string {
 /**
  * Extract the usage percent and reset time from one named section of
  * Claude's /usage output.
+ *
+ * Matches the LAST occurrence of the heading, not the first. tmux scrollback can contain a
+ * stale /usage panel (left over from an earlier check, or a previous task's output) above a
+ * freshly-rendered one — the most recent panel is always the bottom-most match in the capture.
+ * Picking the first match risks reporting stale numbers as current.
  */
+/** Matches either section heading — used to find where the NEXT section starts. */
+const ANY_SECTION_HEADING = /Current\s*(?:session|week)/i;
+
 export function extractSection(
   text: string,
   sectionPattern: RegExp
 ): { pct: number | undefined; resetsRaw: string } | null {
-  const headingMatch = sectionPattern.exec(text);
-  if (!headingMatch) return null;
+  const flags = sectionPattern.flags.includes("g") ? sectionPattern.flags : sectionPattern.flags + "g";
+  const globalPattern = new RegExp(sectionPattern.source, flags);
 
-  const slice = text.slice(headingMatch.index, headingMatch.index + 300);
+  let headingIndex: number | undefined;
+  let headingLength = 0;
+  let match: RegExpExecArray | null;
+  while ((match = globalPattern.exec(text)) !== null) {
+    headingIndex = match.index;
+    headingLength = match[0].length;
+    if (match[0].length === 0) globalPattern.lastIndex++; // guard against zero-length matches
+  }
+  if (headingIndex === undefined) return null;
+
+  // Bound the slice at the next section heading (if any) so a short or cut-off section never
+  // bleeds into the following section's percentage/reset line — e.g. a "Current session" whose
+  // own "% used" line hasn't rendered yet must not pick up "Current week"'s numbers instead.
+  const searchFrom = headingIndex + headingLength;
+  const nextHeadingMatch = ANY_SECTION_HEADING.exec(text.slice(searchFrom));
+  const sliceEnd = nextHeadingMatch
+    ? Math.min(headingIndex + 300, searchFrom + nextHeadingMatch.index)
+    : headingIndex + 300;
+
+  const slice = text.slice(headingIndex, sliceEnd);
   const pctMatch = slice.match(/(\d+)%\s*used/);
   // \s* instead of \s+ — pipe-pane output strips spaces between words
   const resetMatch = slice.match(/Resets\s*(.+?)\s*\(UTC\)/);
@@ -196,6 +223,87 @@ export function parseUsage(text: string): ClaudeUsageParsed {
 
 export function looksLikeUsage(text: string): boolean {
   return /Current\s*session/i.test(text) || /Current\s*week/i.test(text) || /%\s*used/i.test(text);
+}
+
+// ─── Parser confidence scoring ───────────────────────────────────────────────
+
+export type ParseConfidence = "high" | "medium" | "low" | "failed";
+
+export interface ConfidenceAssessment {
+  confidence: ParseConfidence;
+  warnings: string[];
+}
+
+function pctInRange(pct: number | undefined): boolean {
+  return pct === undefined || (pct >= 0 && pct <= 100);
+}
+
+/**
+ * Assess how much to trust a parsed /usage result.
+ *
+ * `captures` should hold one ClaudeUsageParsed per independent pane capture (the caller is
+ * expected to capture the pane multiple times in quick succession and parse each one
+ * separately — see fetchClaudeUsageReliable). Disagreement between captures means the TUI was
+ * mid-redraw when one of them was taken, which is treated as a reliability problem even though
+ * each individual capture "parsed successfully".
+ *
+ * Confidence levels:
+ *   failed — no session/week section found at all, or a percentage is out of [0, 100]
+ *   low    — a section was found but captures disagree with no clear majority
+ *   medium — percentage found but reset time missing, or only one of session/week present
+ *   high   — session and week percentages and reset times all present and consistent
+ */
+export function assessParseConfidence(
+  parsed: ClaudeUsageParsed,
+  captures: ClaudeUsageParsed[],
+): ConfidenceAssessment {
+  const warnings: string[] = [];
+
+  const sessionFound = parsed.sessionPct !== undefined;
+  const weekFound = parsed.weekPct !== undefined;
+
+  if (!sessionFound && !weekFound) {
+    warnings.push("No 'Current session' or 'Current week' section found in captured output.");
+    return { confidence: "failed", warnings };
+  }
+
+  if (!pctInRange(parsed.sessionPct) || !pctInRange(parsed.weekPct)) {
+    warnings.push("Parsed percentage outside the valid 0-100 range.");
+    return { confidence: "failed", warnings };
+  }
+
+  if (!sessionFound) warnings.push("'Current session' section not found — only week usage available.");
+  if (!weekFound) warnings.push("'Current week' section not found — only session usage available.");
+
+  const sessionResetMissing = sessionFound && !parsed.sessionResets;
+  const weekResetMissing = weekFound && !parsed.weekResets;
+  if (sessionResetMissing) warnings.push("Session percentage found but its reset time is missing.");
+  if (weekResetMissing) warnings.push("Week percentage found but its reset time is missing.");
+
+  // Cross-check against the other captures, if more than one was taken.
+  let agreement = true;
+  if (captures.length > 1) {
+    const sessionValues = captures.map((c) => c.sessionPct).filter((v): v is number => v !== undefined);
+    const weekValues = captures.map((c) => c.weekPct).filter((v): v is number => v !== undefined);
+    const allSame = (vals: number[]) => vals.every((v) => v === vals[0]);
+
+    if (sessionValues.length > 1 && !allSame(sessionValues)) {
+      agreement = false;
+      warnings.push(`Captures disagreed on session %: ${sessionValues.join(", ")}.`);
+    }
+    if (weekValues.length > 1 && !allSame(weekValues)) {
+      agreement = false;
+      warnings.push(`Captures disagreed on week %: ${weekValues.join(", ")}.`);
+    }
+  }
+
+  if (!agreement) return { confidence: "low", warnings };
+
+  if (sessionResetMissing || weekResetMissing || !sessionFound || !weekFound) {
+    return { confidence: "medium", warnings };
+  }
+
+  return { confidence: "high", warnings };
 }
 
 // ─── ANSI / terminal control stripping ───────────────────────────────────────

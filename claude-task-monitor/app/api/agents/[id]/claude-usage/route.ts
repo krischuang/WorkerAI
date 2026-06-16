@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { fetchClaudeUsageViaPipePaneTmux } from "@/lib/ssh-claude-tmux";
+import { fetchClaudeUsageReliable } from "@/lib/ssh-claude-tmux";
+import { recordUsageSnapshot } from "@/lib/usage-snapshot-service";
 import { serverError } from "@/lib/api-error";
 import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
@@ -34,54 +35,22 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
     }
 
     const s = agent.server;
-    const result = await fetchClaudeUsageViaPipePaneTmux(
+    const result = await fetchClaudeUsageReliable(
       { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
       agent.tmuxSession,
+      "manual_refresh",
     );
 
-    // Always store a snapshot — even on failure, so history is preserved.
-    // Never interpret null usagePercent as 0%.
-    const snapshot = await prisma.agentUsageSnapshot.create({
-      data: {
-        agentId:            id,
-        usagePercent:       result.success ? (result.parsed.weekPct ?? null) : null,
-        resetTime:          result.success ? (result.parsed.weekResets ?? null) : null,
-        resetAt:            result.success ? (result.parsed.weekResetsAt ?? null) : null,
-        usageCreditsEnabled: result.success ? (result.parsed.usageCreditsEnabled ?? null) : null,
-        captureStatus:      result.status,
-        rawOutput:          result.rawOutput.slice(0, 2000) || null,
-        cleanedOutput:      result.cleanedOutput.slice(0, 2000) || null,
-      },
-    });
+    // Always store a snapshot — even on failure or low confidence, so history is preserved.
+    // Agent.claudeSessionPct/claudeWeekPct are only touched when confidence is high/medium —
+    // see lib/usage-snapshot-service.ts for the full rule.
+    const { snapshotId, agentUpdated } = await recordUsageSnapshot(id, result, "manual_refresh");
 
-    // Only update the Agent's cached usage fields on a successful capture.
-    // A failed refresh must NOT overwrite valid data with nulls.
     if (result.success) {
-      await prisma.agent.update({
-        where: { id },
-        data: {
-          claudeSessionPct:           result.parsed.sessionPct ?? null,
-          claudeSessionResets:        result.parsed.sessionResets ?? null,
-          claudeSessionResetsAt:      result.parsed.sessionResetsAt ?? null,
-          claudeWeekPct:              result.parsed.weekPct ?? null,
-          claudeWeekResets:           result.parsed.weekResets ?? null,
-          claudeWeekResetsAt:         result.parsed.weekResetsAt ?? null,
-          claudeUsageRaw:             result.rawOutput.slice(0, 500),
-          claudeUsageFetchedAt:       new Date(),
-          claudeUsageCreditsEnabled:  result.parsed.usageCreditsEnabled ?? null,
-          claudeLastRefreshStatus:    result.status,
-          status:                     "idle",
-        },
-      });
-    } else {
-      // Record that the last refresh failed without clearing usage data.
-      await prisma.agent.update({
-        where: { id },
-        data: { claudeLastRefreshStatus: result.status },
-      });
+      await prisma.agent.update({ where: { id }, data: { status: "idle" } }).catch(() => {});
     }
 
-    return NextResponse.json({ ...result, snapshot: { id: snapshot.id, captureStatus: snapshot.captureStatus, capturedAt: snapshot.capturedAt } });
+    return NextResponse.json({ ...result, agentUpdated, snapshot: { id: snapshotId } });
   } catch (err) {
     return serverError("agents/[id]/claude-usage POST", err);
   }
