@@ -35,8 +35,8 @@ export default function QueuePage() {
 
   function loadQueue() {
     fetch("/api/queue")
-      .then((r) => r.json())
-      .then(setTasks);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setTasks(data); });
   }
 
   useEffect(() => {

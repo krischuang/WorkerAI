@@ -82,8 +82,8 @@ export default function ServersPage() {
 
   function loadServers() {
     fetch("/api/servers")
-      .then((r) => r.json())
-      .then(setServers);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setServers(data); });
   }
 
   useEffect(() => {

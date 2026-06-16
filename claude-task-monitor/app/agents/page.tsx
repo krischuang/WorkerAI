@@ -77,8 +77,8 @@ export default function AgentsPage() {
 
   useEffect(() => {
     fetch("/api/agents")
-      .then((r) => r.json())
-      .then((data) => { setAgents(data); setLoading(false); })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setAgents(data); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 

@@ -207,24 +207,26 @@ function TasksPageInner() {
 
   function loadProjects() {
     fetch("/api/projects")
-      .then((r) => r.json())
-      .then((data: Project[]) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: Project[] | null) => {
+        if (!data) return;
         setProjects(data);
         if (data.length > 0) setForm((f) => ({ ...f, projectId: f.projectId || data[0].id }));
-      });
+      })
+      .catch(() => {});
   }
 
   function loadServers() {
     fetch("/api/servers")
-      .then((r) => r.json())
-      .then((data: ServerOption[]) => setServers(data))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: ServerOption[] | null) => { if (data) setServers(data); })
       .catch(() => {});
   }
 
   function loadAgents() {
     fetch("/api/agents")
-      .then((r) => r.json())
-      .then((data: AgentOption[]) => setAgents(data))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: AgentOption[] | null) => { if (data) setAgents(data); })
       .catch(() => {});
   }
 

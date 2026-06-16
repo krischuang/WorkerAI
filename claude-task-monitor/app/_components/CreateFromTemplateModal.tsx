@@ -31,8 +31,8 @@ export function CreateFromTemplateModal({ projectId, onClose, onCreated }: Props
 
   useEffect(() => {
     fetch("/api/task-templates")
-      .then((r) => r.json())
-      .then((data: TaskTemplate[]) => { setTemplates(data); setLoading(false); });
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: TaskTemplate[] | null) => { if (data) setTemplates(data); setLoading(false); });
   }, []);
 
   function selectTemplate(t: TaskTemplate) {

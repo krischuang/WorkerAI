@@ -43,8 +43,8 @@ export default function ProjectsPage() {
 
   function loadProjects() {
     fetch("/api/projects")
-      .then((r) => r.json())
-      .then(setProjects);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setProjects(data); });
   }
 
   useEffect(() => {

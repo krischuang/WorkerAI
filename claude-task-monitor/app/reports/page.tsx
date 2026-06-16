@@ -123,8 +123,9 @@ function DailyTab() {
 
   const loadReports = useCallback(() => {
     fetch("/api/reports/daily")
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
+        if (!data) return;
         setReports(data);
         setSelected((prev) => prev ?? (data.length > 0 ? data[0] : null));
       });
@@ -238,8 +239,9 @@ function WeeklyTab() {
 
   const loadReports = useCallback(() => {
     fetch("/api/reports/weekly")
-      .then((r) => r.json())
-      .then((data: WeeklyReport[]) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: WeeklyReport[] | null) => {
+        if (!data) return;
         setReports(data);
         setSelected((prev) => prev ?? (data.length > 0 ? data[0] : null));
       });
@@ -350,8 +352,9 @@ function MonthlyTab() {
 
   const loadReports = useCallback(() => {
     fetch("/api/reports/monthly")
-      .then((r) => r.json())
-      .then((data: MonthlyReport[]) => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: MonthlyReport[] | null) => {
+        if (!data) return;
         setReports(data);
         setSelected((prev) => prev ?? (data.length > 0 ? data[0] : null));
       });
