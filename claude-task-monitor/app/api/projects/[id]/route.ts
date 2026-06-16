@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import type { NextRequest } from "next/server";
+import { validateObjectiveUpdate } from "@/lib/project-objective-service";
+import { emitAudit } from "@/lib/audit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -33,7 +35,16 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       improvementAutomationLevel, cycleFrequencyDays, nextImprovementCycleAt,
       resetImprovementPause,
       repoUrl, defaultBranch, workspaceStrategy,
+      objective, successCriteria, constraints, nonGoals, improvementFocus,
+      autonomousMode, allowHighRiskAutonomy,
     } = body;
+
+    const validationErr = validateObjectiveUpdate({ objective, successCriteria, constraints, nonGoals, improvementFocus, autonomousMode });
+    if (validationErr) {
+      return Response.json({ error: validationErr }, { status: 400 });
+    }
+
+    const editsObjectiveFields = [objective, successCriteria, constraints, nonGoals, improvementFocus].some((v) => v !== undefined);
 
     const project = await prisma.project.update({
       where: { id },
@@ -62,8 +73,38 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(repoUrl !== undefined && { repoUrl: repoUrl === null ? null : String(repoUrl) }),
         ...(defaultBranch !== undefined && { defaultBranch: String(defaultBranch) }),
         ...(workspaceStrategy !== undefined && { workspaceStrategy }),
+        // Project Objective — Claude-drafted, admin-editable. All content must be English.
+        ...(objective !== undefined && { objective }),
+        ...(successCriteria !== undefined && { successCriteria }),
+        ...(constraints !== undefined && { constraints }),
+        ...(nonGoals !== undefined && { nonGoals }),
+        ...(improvementFocus !== undefined && { improvementFocus }),
+        ...(editsObjectiveFields && { lastObjectiveUpdatedAt: new Date() }),
+        // Autonomous execution mode (0-4) — see lib/task-service.ts's autoAssignQueuedTasks.
+        ...(autonomousMode !== undefined && { autonomousMode: Number(autonomousMode) }),
+        ...(allowHighRiskAutonomy !== undefined && { allowHighRiskAutonomy: Boolean(allowHighRiskAutonomy) }),
       },
     });
+
+    if (editsObjectiveFields) {
+      await emitAudit({
+        entityType: "project",
+        entityId: id,
+        eventType: "project.objective.updated",
+        actorType: "user",
+        payload: { fields: Object.fromEntries(Object.entries({ objective, successCriteria, constraints, nonGoals, improvementFocus }).filter(([, v]) => v !== undefined)) },
+      });
+    }
+    if (autonomousMode !== undefined || allowHighRiskAutonomy !== undefined) {
+      await emitAudit({
+        entityType: "project",
+        entityId: id,
+        eventType: "project.autonomous_mode_changed",
+        actorType: "user",
+        payload: { autonomousMode, allowHighRiskAutonomy },
+      });
+    }
+
     return Response.json(project);
   } catch (err) {
     return serverError("projects/[id] PUT", err);

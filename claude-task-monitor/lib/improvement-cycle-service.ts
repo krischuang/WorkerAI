@@ -44,7 +44,8 @@ async function resolveServerForProject(projectId: string): Promise<string | null
   return server?.id ?? null;
 }
 
-async function resolveSessionForProject(
+/** Exported for reuse by lib/project-objective-service.ts and lib/improvement-review-service.ts. */
+export async function resolveSessionForProject(
   projectId: string,
 ): Promise<{ serverId: string; agentId?: string } | null> {
   const taskWithAgent = await prisma.task.findFirst({

@@ -108,13 +108,16 @@ function buildDbInsertPrompt(
     "",
     "Use whatever database tool is available: psql, Node.js with the pg module, or Python with psycopg2.",
     "Generate 0–10 concrete, actionable improvement suggestions based on patterns and gaps in the task history.",
+    "Write every title, description, and rationale in English, regardless of the language used",
+    "in the project name, description, or task content above.",
     "Do not output explanatory text — only execute the database operations.",
   ]
     .filter((l) => l !== null)
     .join("\n");
 }
 
-async function waitForClaudeIdle(
+/** Exported for reuse by lib/project-objective-service.ts and lib/improvement-review-service.ts. */
+export async function waitForClaudeIdle(
   config: SSHConfig,
   tmuxSession: string,
   timeoutMs: number,
