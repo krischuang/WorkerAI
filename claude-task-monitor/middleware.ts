@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isLocalOrigin } from "@/lib/exec-guards";
-import { apiRateLimit, rateLimitResponse, extractRequestIp } from "@/lib/api-rate-limit";
+import { apiRateLimit, rateLimitResponse, extractRequestIp, isRateLimitEnabled } from "@/lib/api-rate-limit";
 
 // ─── General auth ─────────────────────────────────────────────────────────────
 
@@ -123,7 +123,8 @@ export async function middleware(request: NextRequest) {
   // Applied after CSRF (so cross-origin probes are blocked first) and before
   // auth (so we don't burn crypto on throttled requests).
   // Read endpoints: 60 req / min.  Write endpoints: 10 req / min.
-  if (pathname.startsWith("/api/")) {
+  // Disabled when SystemConfig key "rate_limit_enabled" is set to "false".
+  if (pathname.startsWith("/api/") && isRateLimitEnabled()) {
     const ip = extractRequestIp(request);
     const isWrite = MUTATING_METHODS.has(request.method);
     const [rlKey, rlMax] = isWrite
