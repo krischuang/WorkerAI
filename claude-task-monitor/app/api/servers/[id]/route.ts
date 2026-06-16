@@ -2,6 +2,7 @@ import { access, constants as fsConstants } from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { validateSshKeyPath } from "@/lib/ssh-key-path";
 import { serverError } from "@/lib/api-error";
+import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
 import type { NextRequest } from "next/server";
 
@@ -12,7 +13,7 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     const { id } = await ctx.params;
     const server = await prisma.server.findUnique({ where: { id } });
     if (!server) return Response.json({ error: "Not found" }, { status: 404 });
-    return Response.json(server);
+    return jsonResponse(server);
   } catch (err) {
     return serverError("servers/[id] GET", err);
   }
@@ -69,7 +70,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       payload: { fields: changedFields },
     });
 
-    return Response.json(server);
+    return jsonResponse(server);
   } catch (err) {
     return serverError("servers/[id] PUT", err);
   }
