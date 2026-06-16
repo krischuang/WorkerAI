@@ -18,6 +18,7 @@ import {
   FormField,
   inputCls,
 } from "@/app/_components/ui";
+import { TagChip, TagInput } from "@/app/_components/TagInput";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ interface Task {
   blockedByCount: number;
   progressPercent: number | null;
   progressMessage: string | null;
+  requiredTags: string[];
   project: { name: string; priority: string };
   _count: { executionLogs: number };
   executionLogs: { startedAt: string; finishedAt: string | null; actualCostUsd: number | null; status: string }[];
@@ -118,6 +120,7 @@ const defaultForm = {
   priority: "P3",
   taskType: "coding",
   estimatedCostLevel: "medium",
+  requiredTags: [] as string[],
 };
 
 // ── Page component ────────────────────────────────────────────────────────────
@@ -603,6 +606,14 @@ function TasksPageInner() {
                             {formatScheduled(task.scheduledFor)}
                           </span>
                         )}
+                        {task.requiredTags && task.requiredTags.length > 0 && (
+                          <>
+                            <span>·</span>
+                            <span className="flex items-center gap-1 flex-wrap">
+                              {task.requiredTags.map((tag) => <TagChip key={tag} tag={tag} />)}
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                     <div className="flex flex-col items-end gap-0.5 shrink-0">
@@ -848,6 +859,17 @@ function TasksPageInner() {
                 </select>
               </FormField>
             </div>
+
+            <FormField
+              label="Required agent tags"
+              hint="Only agents that have all these tags will run this task. Leave empty for any agent."
+            >
+              <TagInput
+                tags={form.requiredTags}
+                onChange={(tags) => setForm({ ...form, requiredTags: tags })}
+                placeholder="e.g. has-browser, gpu…"
+              />
+            </FormField>
 
             <ModalActions>
               <Btn type="button" variant="secondary" onClick={() => setShowForm(false)}>Cancel</Btn>

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -15,7 +16,7 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     const { id } = await ctx.params;
     const agent = await prisma.agent.findUnique({ where: { id }, include: AGENT_INCLUDE });
     if (!agent) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    return NextResponse.json(agent);
+    return jsonResponse(agent);
   } catch (err) {
     return serverError("agents/[id] GET", err);
   }
@@ -25,12 +26,18 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
     const body = await request.json();
-    const { name, workDir, tmuxSession, status, claudePermissionMode, maxConcurrentTasks } = body;
+    const { name, workDir, tmuxSession, status, claudePermissionMode, maxConcurrentTasks, tags } = body;
 
     if (maxConcurrentTasks !== undefined) {
       const n = Number(maxConcurrentTasks);
       if (!Number.isInteger(n) || n < 1 || n > 5) {
         return NextResponse.json({ error: "maxConcurrentTasks must be an integer between 1 and 5" }, { status: 400 });
+      }
+    }
+
+    if (tags !== undefined) {
+      if (!Array.isArray(tags) || tags.some((t) => typeof t !== "string" || t.trim() === "")) {
+        return NextResponse.json({ error: "tags must be an array of non-empty strings" }, { status: 400 });
       }
     }
 
@@ -43,12 +50,13 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(status !== undefined && { status }),
         ...(claudePermissionMode !== undefined && { claudePermissionMode }),
         ...(maxConcurrentTasks !== undefined && { maxConcurrentTasks: Number(maxConcurrentTasks) }),
+        ...(tags !== undefined && { tags: (tags as string[]).map((t) => t.trim().toLowerCase()) }),
       },
       include: AGENT_INCLUDE,
     });
 
     const changedFields = Object.fromEntries(
-      Object.entries({ name, workDir, tmuxSession, status, claudePermissionMode, maxConcurrentTasks })
+      Object.entries({ name, workDir, tmuxSession, status, claudePermissionMode, maxConcurrentTasks, tags })
         .filter(([, v]) => v !== undefined),
     );
     await logAdminAction(request, {
@@ -58,7 +66,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       payload: { fields: changedFields },
     });
 
-    return NextResponse.json(agent);
+    return jsonResponse(agent);
   } catch (err) {
     return serverError("agents/[id] PUT", err);
   }

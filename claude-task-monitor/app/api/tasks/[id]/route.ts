@@ -87,7 +87,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     const {
       title, description, priority, status, estimatedCostLevel,
       taskType, resultSummary, nextAction, serverId, agentId, timeoutMinutes, maxRetries,
-      scheduledFor,
+      scheduledFor, requiredTags,
     } = body;
 
     const validationErr = validateTaskUpdate(body);
@@ -132,6 +132,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(timeoutMinutes !== undefined && { timeoutMinutes: timeoutMinutes === null ? null : Number(timeoutMinutes) }),
         ...(maxRetries !== undefined && { maxRetries: Number(maxRetries) }),
         ...(scheduledFor !== undefined && { scheduledFor: scheduledFor === null ? null : new Date(scheduledFor) }),
+        ...(Array.isArray(requiredTags) && { requiredTags: requiredTags.map((t: string) => t.trim().toLowerCase()) }),
       },
       include: {
         project: { select: { name: true } },
@@ -201,6 +202,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
                 taskId: id,
                 serverId: server.id,
                 sshConfig: { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
+                tmuxSession: server.tmuxSession,
                 permissionMode: server.claudePermissionMode as import("@/lib/ssh-claude-tmux").ClaudePermissionMode,
                 task: { title: task.title, description: task.description, projectName: task.project?.name },
                 logText: `Auto-sent to Claude on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
