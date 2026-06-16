@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { ADMIN_PASSWORD_HASH_KEY } from "@/lib/admin-auth";
 import { logAdminAction } from "@/lib/admin-audit-log";
+import { setRateLimitEnabled } from "@/lib/api-rate-limit";
 import type { NextRequest } from "next/server";
 
 const DEFAULTS: Record<string, string> = {
@@ -23,6 +24,8 @@ const DEFAULTS: Record<string, string> = {
   smtp_pass: "",
   smtp_from: "",
   alert_email_to: "",
+  // Set to "false" to disable IP-based rate limiting (e.g. trusted internal networks).
+  rate_limit_enabled: "true",
 };
 
 export async function GET() {
@@ -68,6 +71,13 @@ export async function PUT(request: NextRequest) {
       targetType: "SystemConfig",
       payload: { keys: updates.map(([k]) => k), values: Object.fromEntries(updates) },
     });
+
+    // Apply rate_limit_enabled immediately to the in-process cache so the
+    // change takes effect without a server restart.
+    const rlUpdate = updates.find(([k]) => k === "rate_limit_enabled");
+    if (rlUpdate) {
+      setRateLimitEnabled(rlUpdate[1] !== "false");
+    }
 
     return Response.json({ updated: updates.map(([k]) => k) });
   } catch (err) {

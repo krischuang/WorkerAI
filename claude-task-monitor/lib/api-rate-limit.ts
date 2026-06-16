@@ -140,3 +140,28 @@ export function extractRequestIp(
   if (real) return real;
   return "127.0.0.1";
 }
+
+// ─── rate_limit_enabled SystemConfig cache ────────────────────────────────────
+
+const RL_ENABLED_KEY = "_rateLimitEnabled";
+
+/**
+ * Set the cached rate-limit-enabled flag.
+ * Called at startup (instrumentation.node.ts) and on admin config updates.
+ * Stored in globalThis so it survives HMR and is shared across all modules
+ * in the same Node.js process (middleware + route handlers).
+ */
+export function setRateLimitEnabled(enabled: boolean): void {
+  (globalThis as Record<string, unknown>)[RL_ENABLED_KEY] = enabled;
+}
+
+/**
+ * Returns true unless the admin has explicitly disabled rate limiting via
+ * the SystemConfig key "rate_limit_enabled" = "false".
+ * Defaults to true when the flag has not been loaded yet.
+ */
+export function isRateLimitEnabled(): boolean {
+  const g = globalThis as Record<string, unknown>;
+  if (RL_ENABLED_KEY in g) return g[RL_ENABLED_KEY] as boolean;
+  return true;
+}
