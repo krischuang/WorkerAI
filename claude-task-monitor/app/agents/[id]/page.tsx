@@ -48,6 +48,31 @@ interface Agent {
   autoPauseEnabled: boolean;
 }
 
+type ParserConfidence = "high" | "medium" | "low" | "failed";
+
+interface UsageSnapshot {
+  id: string;
+  sessionPercent: number | null;
+  sessionResetTime: string | null;
+  weekPercent: number | null;
+  weekResetTime: string | null;
+  usageCreditsEnabled: boolean | null;
+  parserConfidence: ParserConfidence;
+  parseWarnings: string[];
+  source: "tmux_capture" | "pipe_pane" | "manual_refresh";
+  captureStatus: string;
+  capturedAt: string;
+  rawOutput: string | null;
+  cleanedOutput: string | null;
+}
+
+const CONFIDENCE_STYLE: Record<ParserConfidence, { label: string; cls: string }> = {
+  high:   { label: "High confidence",   cls: "bg-green-50 text-green-700 border-green-200" },
+  medium: { label: "Medium confidence", cls: "bg-blue-50 text-blue-700 border-blue-200" },
+  low:    { label: "Low confidence",    cls: "bg-amber-50 text-amber-700 border-amber-200" },
+  failed: { label: "Parse failed",      cls: "bg-red-50 text-red-700 border-red-200" },
+};
+
 type UsageDisplayStatus = "live" | "stale" | "rate_limited" | "unknown";
 
 function computeDisplayStatus(
@@ -126,6 +151,10 @@ export default function AgentDetailPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
 
+  // Usage reliability — latest snapshots + expandable raw-capture viewer
+  const [snapshots, setSnapshots] = useState<UsageSnapshot[]>([]);
+  const [showRawCapture, setShowRawCapture] = useState(false);
+
   // Launch Claude
   const [launching, setLaunching] = useState(false);
   const [launchResult, setLaunchResult] = useState<{ success: boolean; command?: string; error?: string } | null>(null);
@@ -171,6 +200,13 @@ export default function AgentDetailPage() {
       });
   }
 
+  function loadSnapshots() {
+    fetch(`/api/agents/${id}/usage-snapshots?limit=5`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: UsageSnapshot[]) => setSnapshots(Array.isArray(data) ? data : []))
+      .catch(() => setSnapshots([]));
+  }
+
   function loadTasks() {
     fetch(`/api/tasks?agentId=${id}`)
       .then((r) => r.ok ? r.json() : [])
@@ -183,6 +219,7 @@ export default function AgentDetailPage() {
   useEffect(() => {
     loadAgent();
     loadTasks();
+    loadSnapshots();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -229,6 +266,7 @@ export default function AgentDetailPage() {
       setRefreshError(data.error ?? "Failed to fetch usage");
     }
     loadAgent();
+    loadSnapshots();
   }
 
   async function handleLaunchClaude() {
@@ -298,6 +336,7 @@ export default function AgentDetailPage() {
 
   const sessionPct = agent.claudeSessionPct;
   const weekPct = agent.claudeWeekPct;
+  const latestSnapshot = snapshots[0] ?? null;
 
   return (
     <div className="p-6 max-w-3xl">
@@ -388,6 +427,11 @@ export default function AgentDetailPage() {
                 </span>
               );
             })()}
+            {latestSnapshot && (
+              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${CONFIDENCE_STYLE[latestSnapshot.parserConfidence].cls}`}>
+                {CONFIDENCE_STYLE[latestSnapshot.parserConfidence].label}
+              </span>
+            )}
           </div>
           <div className="flex gap-2">
             <Btn
@@ -474,13 +518,60 @@ export default function AgentDetailPage() {
             </div>
 
             <p className="text-xs text-zinc-400 mt-3">
-              Last updated {new Date(agent.claudeUsageFetchedAt).toLocaleString()}
+              Last reliable refresh {new Date(agent.claudeUsageFetchedAt).toLocaleString()} — the
+              percentages above only update from captures the parser is confident in (high or
+              medium confidence). Low-confidence or failed captures are recorded but never
+              overwrite these numbers.
             </p>
           </>
         ) : (
           <p className="text-sm text-zinc-500 mt-4">
             No usage data yet. Click <strong>Refresh Usage</strong> to fetch from the server.
           </p>
+        )}
+
+        {/* ── Raw capture history / parser reliability detail ────────────────── */}
+        {snapshots.length > 0 && (
+          <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800">
+            <button
+              type="button"
+              onClick={() => setShowRawCapture((v) => !v)}
+              className="text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              {showRawCapture ? "▾" : "▸"} Latest raw usage capture {latestSnapshot && `(${latestSnapshot.source}, ${new Date(latestSnapshot.capturedAt).toLocaleString()})`}
+            </button>
+            {showRawCapture && (
+              <div className="mt-3 space-y-3">
+                {snapshots.map((s) => (
+                  <div key={s.id} className="rounded-lg border border-zinc-200 dark:border-zinc-700 p-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium border ${CONFIDENCE_STYLE[s.parserConfidence].cls}`}>
+                          {CONFIDENCE_STYLE[s.parserConfidence].label}
+                        </span>
+                        <span className="text-xs text-zinc-500">{s.source}</span>
+                        <span className="text-xs text-zinc-500">{s.captureStatus}</span>
+                      </div>
+                      <span className="text-xs text-zinc-400">{new Date(s.capturedAt).toLocaleString()}</span>
+                    </div>
+                    <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-1">
+                      session: {s.sessionPercent ?? "—"}% · week: {s.weekPercent ?? "—"}%
+                    </p>
+                    {s.parseWarnings.length > 0 && (
+                      <ul className="text-xs text-amber-700 mb-2 list-disc list-inside">
+                        {s.parseWarnings.map((w, i) => <li key={i}>{w}</li>)}
+                      </ul>
+                    )}
+                    {s.rawOutput && (
+                      <pre className="text-xs font-mono bg-zinc-50 dark:bg-zinc-950 rounded p-2 whitespace-pre-wrap max-h-48 overflow-y-auto text-zinc-700 dark:text-zinc-300">
+                        {s.rawOutput}
+                      </pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </section>
 

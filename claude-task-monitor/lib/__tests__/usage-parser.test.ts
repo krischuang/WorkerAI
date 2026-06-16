@@ -9,6 +9,8 @@ import {
   cleanPane,
   classifyPreflightPane,
   PREFLIGHT_TAIL_LINES,
+  assessParseConfidence,
+  detectValidationBlock,
 } from "../usage-parser";
 
 // ─── parseUTCResetTime ────────────────────────────────────────────────────────
@@ -179,11 +181,11 @@ Resets Jun 15, 9am (UTC)
     expect(result!.resetsRaw).toBe("");
   });
 
-  it("handles section with Resets line but no % used — pct defaults to 0", () => {
+  it("handles section with Resets line but no % used — pct stays undefined", () => {
     const text = "Current session\nResets 9am (UTC)";
     const result = extractSection(text, /Current session/i);
     expect(result).not.toBeNull();
-    expect(result!.pct).toBe(0);
+    expect(result!.pct).toBeUndefined();
     expect(result!.resetsRaw).toBe("9am");
   });
 });
@@ -405,5 +407,219 @@ describe("PREFLIGHT_TAIL_LINES", () => {
     expect(typeof PREFLIGHT_TAIL_LINES).toBe("number");
     expect(PREFLIGHT_TAIL_LINES).toBeGreaterThanOrEqual(20);
     expect(PREFLIGHT_TAIL_LINES).toBeLessThanOrEqual(50);
+  });
+});
+
+// ─── Reliability pipeline — required scenarios ────────────────────────────────
+// Six scenarios called out explicitly by the usage-reliability spec: normal output, tmux
+// spacing-stripped output, multiple percentages on screen, stale output mixed with fresh
+// output, missing section headings, and fast-changing/truncated partial output.
+
+describe("parseUsage — required reliability scenarios", () => {
+  it("normal /usage output", () => {
+    const text = [
+      "Current session",
+      "██████████████ 100% used",
+      "Resets 3:10pm (UTC)",
+      "",
+      "Current week (all models)",
+      "█████           10% used",
+      "Resets Jun 15, 9am (UTC)",
+    ].join("\n");
+    const parsed = parseUsage(text);
+    expect(parsed.sessionPct).toBe(100);
+    expect(parsed.weekPct).toBe(10);
+  });
+
+  it("stripped spacing from tmux/pipe-pane output", () => {
+    const text = [
+      "Currentsession",
+      "██████████████100%used",
+      "ResetsJun15,9am(UTC)",
+      "",
+      "Currentweek(allmodels)",
+      "█████10%used",
+      "ResetsJun16,10am(UTC)",
+    ].join("\n");
+    const parsed = parseUsage(text);
+    expect(parsed.sessionPct).toBe(100);
+    expect(parsed.weekPct).toBe(10);
+  });
+
+  it("multiple percentages on screen — each section keeps its own value", () => {
+    const text = [
+      "Current session",
+      "████ 45% used",
+      "Resets 3pm (UTC)",
+      "",
+      "Current week (all models)",
+      "██ 12% used",
+      "Resets Jun 15, 9am (UTC)",
+    ].join("\n");
+    const parsed = parseUsage(text);
+    expect(parsed.sessionPct).toBe(45);
+    expect(parsed.weekPct).toBe(12);
+  });
+
+  it("stale usage mixed with new terminal output — last (freshest) block wins", () => {
+    const text = [
+      // Stale panel left over from an earlier /usage check, scrolled higher in the buffer.
+      "Current session",
+      "████████████ 80% used",
+      "Resets 1pm (UTC)",
+      "",
+      "$ some other command ran in between",
+      "",
+      // Fresh panel rendered after running /usage again.
+      "Current session",
+      "███ 23% used",
+      "Resets 5pm (UTC)",
+    ].join("\n");
+    const parsed = parseUsage(text);
+    expect(parsed.sessionPct).toBe(23);
+    expect(parsed.sessionResetsAt?.getUTCHours()).toBe(17);
+  });
+
+  it("missing section headings — no percentage extracted, confidence should be failed", () => {
+    const text = "Some unrelated terminal output with 45% used somewhere in it, no headings.";
+    expect(looksLikeUsage(text)).toBe(true); // matches the loose "% used" fallback regex
+    const parsed = parseUsage(text);
+    expect(parsed.sessionPct).toBeUndefined();
+    expect(parsed.weekPct).toBeUndefined();
+    const { confidence, warnings } = assessParseConfidence(parsed, [parsed]);
+    expect(confidence).toBe("failed");
+    expect(warnings.some((w) => /No 'Current session' or 'Current week'/.test(w))).toBe(true);
+  });
+
+  it("fast-changing partial output — session section cut off mid-render", () => {
+    const text = [
+      "Current session",
+      "████", // bar rendered, but "% used" and "Resets" line haven't painted yet
+      "",
+      "Current week (all models)",
+      "█████ 10% used",
+      "Resets Jun 15, 9am (UTC)",
+    ].join("\n");
+    const parsed = parseUsage(text);
+    expect(parsed.sessionPct).toBeUndefined();
+    expect(parsed.weekPct).toBe(10);
+    const { confidence, warnings } = assessParseConfidence(parsed, [parsed]);
+    expect(confidence).toBe("medium");
+    expect(warnings.some((w) => /'Current session' section not found/.test(w))).toBe(true);
+  });
+});
+
+// ─── assessParseConfidence ─────────────────────────────────────────────────────
+
+describe("assessParseConfidence", () => {
+  const complete = {
+    sessionPct: 50,
+    sessionResets: "3pm (Sydney)",
+    weekPct: 10,
+    weekResets: "Jun 15, 9am (Sydney)",
+  };
+
+  it("returns high when both sections are complete and captures agree", () => {
+    const { confidence, warnings } = assessParseConfidence(complete, [complete, complete, complete]);
+    expect(confidence).toBe("high");
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("returns failed when neither section was found", () => {
+    const empty = {};
+    const { confidence, warnings } = assessParseConfidence(empty, [empty]);
+    expect(confidence).toBe("failed");
+    expect(warnings.length).toBeGreaterThan(0);
+  });
+
+  it("returns failed when a percentage is out of the 0-100 range", () => {
+    const bad = { ...complete, sessionPct: 150 };
+    const { confidence, warnings } = assessParseConfidence(bad, [bad]);
+    expect(confidence).toBe("failed");
+    expect(warnings.some((w) => /outside the valid 0-100 range/.test(w))).toBe(true);
+  });
+
+  it("returns medium when a percentage is found but its reset time is missing", () => {
+    const noReset = { ...complete, sessionResets: undefined };
+    const { confidence, warnings } = assessParseConfidence(noReset, [noReset]);
+    expect(confidence).toBe("medium");
+    expect(warnings.some((w) => /reset time is missing/.test(w))).toBe(true);
+  });
+
+  it("returns low when independent captures disagree on the percentage", () => {
+    const captureA = { ...complete, sessionPct: 50 };
+    const captureB = { ...complete, sessionPct: 54 };
+    const { confidence, warnings } = assessParseConfidence(captureA, [captureA, captureB]);
+    expect(confidence).toBe("low");
+    expect(warnings.some((w) => /Captures disagreed on session %/.test(w))).toBe(true);
+  });
+
+  it("returns high when multiple captures agree exactly", () => {
+    const { confidence } = assessParseConfidence(complete, [complete, { ...complete }]);
+    expect(confidence).toBe("high");
+  });
+});
+
+// ─── detectValidationBlock ──────────────────────────────────────────────────────
+
+describe("detectValidationBlock", () => {
+  const taskId = "task-123";
+  const nonce = "nonce-abc";
+
+  it("detects a passed validation block with evidence", () => {
+    const pane = [
+      "[WORKERAI_VALIDATION]",
+      `taskId: ${taskId}`,
+      `nonce: ${nonce}`,
+      "result: passed",
+      "evidence: npm test — 42 passed, 0 failed. npm run build succeeded.",
+      "[/WORKERAI_VALIDATION]",
+    ].join("\n");
+    const result = detectValidationBlock(pane, taskId, nonce);
+    expect(result.found).toBe(true);
+    expect(result.status).toBe("passed");
+    expect(result.evidence).toMatch(/42 passed/);
+  });
+
+  it("detects a failed validation block", () => {
+    const pane = [
+      "[WORKERAI_VALIDATION]",
+      `taskId: ${taskId}`,
+      `nonce: ${nonce}`,
+      "result: failed",
+      "evidence: npm test failed — 2 tests broken.",
+      "[/WORKERAI_VALIDATION]",
+    ].join("\n");
+    const result = detectValidationBlock(pane, taskId, nonce);
+    expect(result.found).toBe(true);
+    expect(result.status).toBe("failed");
+  });
+
+  it("returns not found when taskId/nonce do not match", () => {
+    const pane = [
+      "[WORKERAI_VALIDATION]",
+      "taskId: some-other-task",
+      `nonce: ${nonce}`,
+      "result: passed",
+      "[/WORKERAI_VALIDATION]",
+    ].join("\n");
+    expect(detectValidationBlock(pane, taskId, nonce).found).toBe(false);
+  });
+
+  it("returns found with null status for a malformed block missing the result line", () => {
+    const pane = [
+      "[WORKERAI_VALIDATION]",
+      `taskId: ${taskId}`,
+      `nonce: ${nonce}`,
+      "[/WORKERAI_VALIDATION]",
+    ].join("\n");
+    const result = detectValidationBlock(pane, taskId, nonce);
+    expect(result.found).toBe(true);
+    expect(result.status).toBeNull();
+  });
+
+  it("returns not found when taskId or nonce is empty", () => {
+    expect(detectValidationBlock("anything", "", nonce).found).toBe(false);
+    expect(detectValidationBlock("anything", taskId, "").found).toBe(false);
   });
 });
