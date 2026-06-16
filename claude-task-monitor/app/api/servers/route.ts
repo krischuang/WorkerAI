@@ -2,6 +2,7 @@ import { access, constants as fsConstants } from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { validateSshKeyPath } from "@/lib/ssh-key-path";
 import { serverError } from "@/lib/api-error";
+import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
 import type { NextRequest } from "next/server";
 
@@ -18,7 +19,7 @@ export async function GET() {
       orderBy: { createdAt: "desc" },
     });
 
-    return Response.json(
+    return jsonResponse(
       servers.map(({ tasks, ...s }) => ({
         ...s,
         queuedCount: tasks.filter((t) => t.status === "queued").length,
@@ -73,7 +74,7 @@ export async function POST(request: NextRequest) {
       targetId: server.id,
       payload: { name, host, username },
     });
-    return Response.json(server, { status: 201 });
+    return jsonResponse(server, { status: 201 });
   } catch (err) {
     return serverError("servers POST", err);
   }
