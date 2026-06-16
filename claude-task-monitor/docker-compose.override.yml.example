@@ -15,8 +15,9 @@ services:
   app:
     volumes:
       - .:/app
+      # Keep the container's node_modules isolated from the host copy.
       - /app/node_modules
-      # Mount host SSH keys so the dev container can reach remote workers.
-      # Adjust the host-side path if your keys are elsewhere.
-      - ${SSH_KEY_DIR:-/home/ec2-user/.ssh}:/home/ec2-user/.ssh:ro
+      # Mount the single host key file at the same stable path used by docker-compose.yml.
+      # Set SSH_KEY_FILE in your shell or .env to override the source path.
+      - ${SSH_KEY_FILE:-/home/ec2-user/.ssh/WorkerAI.pem}:/app/.ssh/WorkerAI.pem:ro
     command: ["sh", "-c", "npm run dev"]

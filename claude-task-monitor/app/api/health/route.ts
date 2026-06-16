@@ -1,5 +1,6 @@
 import { prisma, pool } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { getArtifactStorageStatus } from "@/lib/startup-validation";
 
 export async function GET() {
   try {
@@ -71,11 +72,20 @@ export async function GET() {
         diskTotalBytes: item.diskTotalBytes !== null ? Number(item.diskTotalBytes) : null,
       }));
 
+    const artifactStorage = getArtifactStorageStatus();
+    const configWarnings: string[] = [];
+    if (artifactStorage && !artifactStorage.writable) {
+      configWarnings.push(
+        `ARTIFACT_STORAGE_PATH is not writable — artifact uploads will fail (path: ${artifactStorage.path})`
+      );
+    }
+
     return Response.json({
       servers: serializeDisk(servers),
       agents: serializeDisk(agents),
       dbPool: { total, idle, waiting, utilisation: Math.round(utilisation * 1000) / 1000 },
       poller: { pollerAlive, lastHeartbeatAt, secondsSinceHeartbeat },
+      configWarnings,
     });
   } catch (err) {
     return serverError("health GET", err);
