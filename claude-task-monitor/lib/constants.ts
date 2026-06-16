@@ -1,6 +1,22 @@
 export const USAGE_THRESHOLD = 90;
 
 /**
+ * Database URL provided to dispatched agents for self-reporting task completion.
+ * Set AGENT_DATABASE_URL when agents run on servers that cannot reach "localhost":5432.
+ * Falls back to DATABASE_URL (same-host deployments).
+ */
+export const AGENT_DATABASE_URL = process.env.AGENT_DATABASE_URL ?? process.env.DATABASE_URL ?? "";
+
+/** Cooldown applied to an agent after any terminal task status (completed/failed/needs_review). */
+export const AGENT_COOLDOWN_MS = 30_000; // 30 seconds
+
+/** Directory on remote servers where wrapper scripts and done-files are written. */
+export const RUN_DIR = "/tmp/workerai-runs";
+
+/** Lines of log output to store in DB paneCapture when reading a done-file. */
+export const LOG_TAIL_LINES = 200;
+
+/**
  * Claude model pricing in USD per 1 million tokens (as of mid-2025).
  * Used to estimate cost from token counts parsed from /usage output.
  * Values are blended input+output rates — actual cost depends on ratio.

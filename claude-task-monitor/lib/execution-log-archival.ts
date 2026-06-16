@@ -2,6 +2,13 @@ import { prisma } from "./prisma";
 
 const TAG = "[log-archival]";
 
+/** Default retention windows for high-volume append-only tables. */
+const WORKER_HEALTH_RETENTION_DAYS = 7;
+const AGENT_SNAPSHOT_RETENTION_DAYS = 7;
+const AUDIT_EVENT_RETENTION_DAYS = 90;
+const ADMIN_AUDIT_RETENTION_DAYS = 365;
+const SERVER_CMD_LOG_RETENTION_DAYS = 30;
+
 /** exitReason values for structured completion tracking */
 export type ExitReason =
   | "completion_marker"
@@ -68,6 +75,65 @@ export async function archiveOldLogs(): Promise<{ archived: number }> {
     console.error(`${TAG} archiveOldLogs failed:`, err);
     return { archived: 0 };
   }
+}
+
+/**
+ * Prune high-volume append-only tables that have no hard archival step.
+ * Called nightly alongside archiveOldLogs.
+ *
+ * Retention periods:
+ *   WorkerHealth        7 days  — dense per-worker per-cycle rows
+ *   AgentUsageSnapshot  7 days  — one row per agent per poll cycle
+ *   AuditEvent         90 days  — state-change event log
+ *   AdminAuditLog     365 days  — admin action log
+ *   ServerCommandLog   30 days  — SSH command history
+ */
+export async function pruneHighVolumeTables(): Promise<{
+  workerHealth: number;
+  agentSnapshots: number;
+  auditEvents: number;
+  adminAuditLogs: number;
+  serverCmdLogs: number;
+}> {
+  const now = Date.now();
+  const cutoffFor = (days: number) => new Date(now - days * 86_400_000);
+
+  const results = { workerHealth: 0, agentSnapshots: 0, auditEvents: 0, adminAuditLogs: 0, serverCmdLogs: 0 };
+
+  try {
+    const r = await prisma.workerHealth.deleteMany({ where: { checkedAt: { lt: cutoffFor(WORKER_HEALTH_RETENTION_DAYS) } } });
+    results.workerHealth = r.count;
+  } catch (err) { console.error(`${TAG} pruneWorkerHealth failed:`, err); }
+
+  try {
+    const r = await prisma.agentUsageSnapshot.deleteMany({ where: { capturedAt: { lt: cutoffFor(AGENT_SNAPSHOT_RETENTION_DAYS) } } });
+    results.agentSnapshots = r.count;
+  } catch (err) { console.error(`${TAG} pruneAgentUsageSnapshot failed:`, err); }
+
+  try {
+    const r = await prisma.auditEvent.deleteMany({ where: { createdAt: { lt: cutoffFor(AUDIT_EVENT_RETENTION_DAYS) } } });
+    results.auditEvents = r.count;
+  } catch (err) { console.error(`${TAG} pruneAuditEvent failed:`, err); }
+
+  try {
+    const r = await prisma.adminAuditLog.deleteMany({ where: { createdAt: { lt: cutoffFor(ADMIN_AUDIT_RETENTION_DAYS) } } });
+    results.adminAuditLogs = r.count;
+  } catch (err) { console.error(`${TAG} pruneAdminAuditLog failed:`, err); }
+
+  try {
+    const r = await prisma.serverCommandLog.deleteMany({ where: { createdAt: { lt: cutoffFor(SERVER_CMD_LOG_RETENTION_DAYS) } } });
+    results.serverCmdLogs = r.count;
+  } catch (err) { console.error(`${TAG} pruneServerCommandLog failed:`, err); }
+
+  const total = Object.values(results).reduce((a, b) => a + b, 0);
+  if (total > 0) {
+    console.log(
+      `${TAG} Pruned high-volume tables: workerHealth=${results.workerHealth}, ` +
+      `agentSnapshots=${results.agentSnapshots}, auditEvents=${results.auditEvents}, ` +
+      `adminAuditLogs=${results.adminAuditLogs}, serverCmdLogs=${results.serverCmdLogs}`
+    );
+  }
+  return results;
 }
 
 /**
