@@ -11,7 +11,13 @@
  * so a payload cannot break out of its XML fence.
  */
 
-import { COMPLETION_BLOCK_START, COMPLETION_BLOCK_END, AGENT_DATABASE_URL } from "@/lib/constants";
+import {
+  COMPLETION_BLOCK_START,
+  COMPLETION_BLOCK_END,
+  VALIDATION_BLOCK_START,
+  VALIDATION_BLOCK_END,
+  AGENT_DATABASE_URL,
+} from "@/lib/constants";
 
 /** Replace any </tag> in user content so it cannot close its containing XML fence. */
 function escapeForTag(tag: string, content: string): string {
@@ -30,6 +36,9 @@ export interface DispatchTask {
   projectName?: string | null;
   taskId: string;
   nonce: string;
+  /** True for tasks created/dispatched by the autonomous improvement pipeline — requires a
+   *  [WORKERAI_VALIDATION] evidence block before the completion marker is honored. */
+  isAutonomous?: boolean;
 }
 
 /**
@@ -61,6 +70,28 @@ export function buildDispatchPrompt(task: DispatchTask): string {
   }
 
   lines.push("", "Complete this task now.");
+
+  if (task.isAutonomous) {
+    lines.push(
+      "",
+      "This task was created and dispatched by the autonomous improvement pipeline — no human",
+      "reviewed it before dispatch. Before declaring it complete, verify your work: run the",
+      "project's tests, build, and/or lint as applicable. Then output this validation block",
+      "(no surrounding text; each field on its own line) BEFORE the completion block below:",
+      "",
+      VALIDATION_BLOCK_START,
+      `taskId: ${task.taskId}`,
+      `nonce: ${task.nonce}`,
+      "result: passed",
+      "evidence: <one or two lines — what you ran and the result, e.g. \"npm test: 42 passed, 0 failed. npm run build: succeeded.\">",
+      VALIDATION_BLOCK_END,
+      "",
+      "If you could not verify the change (no tests exist, build tooling unavailable, the change",
+      "broke something), set \"result: failed\" instead and explain why in the evidence field —",
+      "do not guess or claim success without verification.",
+    );
+  }
+
   lines.push(
     "",
     "When you have fully completed the task, output this exact completion block",

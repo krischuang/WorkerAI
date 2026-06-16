@@ -14,6 +14,7 @@
 import { prisma } from "@/lib/prisma";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "@/lib/task-dispatch";
 import { emitAudit } from "@/lib/audit";
+import { selectBestAgent, type AgentCandidate } from "@/lib/agent-selector";
 import { detectClaudeIdle, sendRawPromptToTmux } from "@/lib/ssh-claude-tmux";
 // detectClaudeIdle is used in _advanceAgentQueue (agents still need idle check)
 import { withServerDispatchLock } from "@/lib/dispatch-lock";
@@ -129,7 +130,7 @@ export async function dispatchTask(taskId: string): Promise<DispatchResult> {
       agentId: a.id,
       sshConfig: { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
       tmuxSession: a.tmuxSession,
-      task: { title: task.title, description: task.description, projectName: task.project.name },
+      task: { title: task.title, description: task.description, projectName: task.project.name, isAutonomous: task.isAutonomous },
       logText: `Sent to agent "${a.name}" (${a.tmuxSession}) on server "${s.name}" — mode: ${a.claudePermissionMode}`,
     });
 
@@ -159,7 +160,7 @@ export async function dispatchTask(taskId: string): Promise<DispatchResult> {
     sshConfig: { host: s.host, port: s.port, username: s.username, sshKeyPath: s.sshKeyPath },
     tmuxSession: s.tmuxSession,
     permissionMode: s.claudePermissionMode as import("@/lib/ssh-claude-tmux").ClaudePermissionMode,
-    task: { title: task.title, description: task.description, projectName: task.project.name },
+    task: { title: task.title, description: task.description, projectName: task.project.name, isAutonomous: task.isAutonomous },
     logText: `Sent to Claude on server "${s.name}" (${s.host}) — mode: ${s.claudePermissionMode}`,
   });
 
@@ -511,7 +512,7 @@ async function _advanceServerQueue(
     sshConfig: { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath },
     tmuxSession: server.tmuxSession,
     permissionMode: server.claudePermissionMode as import("@/lib/ssh-claude-tmux").ClaudePermissionMode,
-    task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
+    task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name, isAutonomous: nextTask.isAutonomous },
     logText: `Auto-started from queue on server "${server.name}" (${server.host}) — mode: ${server.claudePermissionMode}`,
   });
 
@@ -584,7 +585,7 @@ async function _advanceAgentQueue(
     agentId,
     sshConfig: agent.server,
     tmuxSession: agent.tmuxSession,
-    task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
+    task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name, isAutonomous: nextTask.isAutonomous },
     logText: `Auto-started from queue on agent "${agent.name}" — mode: ${agent.claudePermissionMode}`,
   });
 
@@ -598,4 +599,141 @@ async function _advanceAgentQueue(
     return { dispatched: false, reason: "ssh_failed" };
   }
   return { dispatched: false, reason: "offline" };
+}
+
+// ─── autoAssignQueuedTasks ────────────────────────────────────────────────────
+
+export interface AutoAssignSummary {
+  assigned: number;
+  skipped: number;
+}
+
+/**
+ * Finds fully-unassigned pending tasks (no agentId, no serverId) belonging to projects with
+ * autonomousMode >= 3 ("auto-create and auto-dispatch low/medium-risk tasks"), scores every
+ * agent via lib/agent-selector.ts, and assigns + dispatches the best one.
+ *
+ * High-risk tasks are skipped entirely unless the project is at autonomousMode >= 4 AND has
+ * explicitly set allowHighRiskAutonomy — see Project.allowHighRiskAutonomy and
+ * Task.riskLevel (lib/risk-classifier.ts).
+ *
+ * Every decision — successful assignment or "no eligible agent" — emits an AuditEvent so the
+ * reasoning is inspectable later. Call site: instrumentation.node.ts, every poller cycle.
+ */
+export async function autoAssignQueuedTasks(maxBatch = 20): Promise<AutoAssignSummary> {
+  const candidates = await prisma.task.findMany({
+    where: {
+      status: "pending",
+      agentId: null,
+      serverId: null,
+      blockedByCount: 0,
+      project: { status: "active", autonomousMode: { gte: 3 } },
+    },
+    include: {
+      project: { select: { id: true, name: true, autonomousMode: true, allowHighRiskAutonomy: true } },
+    },
+    orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+    take: maxBatch,
+  });
+
+  if (candidates.length === 0) return { assigned: 0, skipped: 0 };
+
+  const agentRows = await prisma.agent.findMany({
+    select: {
+      id: true, name: true, tags: true, status: true, healthScore: true,
+      activeTaskCount: true, maxConcurrentTasks: true,
+      claudeSessionPct: true, claudeWeekPct: true, pausedDueToUsage: true, cooldownUntil: true,
+    },
+  });
+
+  const now = new Date();
+  let assigned = 0;
+  let skipped = 0;
+
+  for (const task of candidates) {
+    const { project } = task;
+
+    if (task.riskLevel === "high" && !(project.autonomousMode >= 4 && project.allowHighRiskAutonomy)) {
+      skipped++;
+      await emitAudit({
+        entityType: "task",
+        entityId: task.id,
+        eventType: "agent.rejected",
+        actorType: "system",
+        payload: {
+          reason: "high_risk_requires_explicit_opt_in",
+          autonomousMode: project.autonomousMode,
+          allowHighRiskAutonomy: project.allowHighRiskAutonomy,
+        },
+      });
+      continue;
+    }
+
+    const candidateAgents: AgentCandidate[] = agentRows.map((a) => ({
+      id: a.id,
+      name: a.name,
+      tags: a.tags,
+      status: a.status,
+      healthScore: a.healthScore,
+      activeTaskCount: a.activeTaskCount,
+      maxConcurrentTasks: a.maxConcurrentTasks,
+      claudeSessionPct: a.claudeSessionPct,
+      claudeWeekPct: a.claudeWeekPct,
+      pausedDueToUsage: a.pausedDueToUsage,
+      cooldownUntil: a.cooldownUntil,
+    }));
+
+    const { agentId, scores } = selectBestAgent(candidateAgents, { requiredTags: task.requiredTags }, now);
+
+    if (!agentId) {
+      skipped++;
+      await emitAudit({
+        entityType: "task",
+        entityId: task.id,
+        eventType: "agent.rejected",
+        actorType: "system",
+        payload: { reason: "no_eligible_agent", candidates: scores.map((s) => ({ agentId: s.agentId, agentName: s.agentName, reasons: s.reasons })) },
+      });
+      continue;
+    }
+
+    const selected = scores.find((s) => s.agentId === agentId)!;
+
+    await prisma.task.update({ where: { id: task.id }, data: { agentId, status: "queued" } });
+
+    await emitAudit({
+      entityType: "task",
+      entityId: task.id,
+      eventType: "agent.selected",
+      actorType: "system",
+      payload: { agentId, agentName: selected.agentName, score: selected.score, reasons: selected.reasons, projectId: project.id },
+    });
+
+    // Record the other eligible-but-not-chosen candidates too, capped to keep the payload small.
+    const rejectedOthers = scores.filter((s) => s.agentId !== agentId).slice(0, 5);
+    for (const r of rejectedOthers) {
+      await emitAudit({
+        entityType: "task",
+        entityId: task.id,
+        eventType: "agent.rejected",
+        actorType: "system",
+        payload: { agentId: r.agentId, agentName: r.agentName, eligible: r.eligible, reasons: r.reasons },
+      });
+    }
+
+    // Keep the in-memory candidate pool's capacity figure consistent across this batch so a
+    // second task in the same call doesn't get assigned to an agent that's now at capacity.
+    const agentRow = agentRows.find((a) => a.id === agentId);
+    if (agentRow) agentRow.activeTaskCount += 1;
+
+    assigned++;
+
+    // Attempt immediate dispatch. If it fails (usage gate, transient SSH issue), the task stays
+    // "queued" with an agent assigned — a later manual Run or queue-advance cycle can pick it up.
+    await dispatchTask(task.id).catch((err) => {
+      console.error(`[autoAssignQueuedTasks] dispatch of task ${task.id} threw:`, err);
+    });
+  }
+
+  return { assigned, skipped };
 }

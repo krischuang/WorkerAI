@@ -36,7 +36,7 @@ export async function tryDispatchTaskToServer(opts: {
   /** The server's long-lived Claude tmux session name (e.g. "claude"). */
   tmuxSession: string;
   permissionMode: ClaudePermissionMode;
-  task: { title: string; description?: string | null; projectName?: string | null };
+  task: { title: string; description?: string | null; projectName?: string | null; isAutonomous?: boolean };
   logText: string;
   usageSnapshotPct?: number | null;
 }): Promise<DispatchOutcome> {
@@ -132,7 +132,7 @@ export async function tryDispatchTaskToAgent(opts: {
   workDir?: string;
   permissionMode?: ClaudePermissionMode;
   maxConcurrentTasks?: number;
-  task: { title: string; description?: string | null; projectName?: string | null };
+  task: { title: string; description?: string | null; projectName?: string | null; isAutonomous?: boolean };
   logText: string;
   usageSnapshotPct?: number | null;
 }): Promise<AgentDispatchOutcome> {
@@ -199,7 +199,10 @@ export async function tryDispatchTaskToAgent(opts: {
           tmuxOutputOffset: sendResult.outputOffset ?? null,
         },
       });
-      await tx.agent.update({ where: { id: opts.agentId }, data: { status: "running" } });
+      await tx.agent.update({
+        where: { id: opts.agentId },
+        data: { status: "running", activeTaskCount: { increment: 1 } },
+      });
       await tx.executionLog.create({
         data: {
           taskId:           opts.taskId,
