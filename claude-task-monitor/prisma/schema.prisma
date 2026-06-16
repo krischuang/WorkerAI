@@ -60,6 +60,31 @@ enum WorkspaceStrategy {
   remote_api
 }
 
+enum RiskLevel {
+  low
+  medium
+  high
+}
+
+enum ValidationStatus {
+  passed
+  failed
+  missing
+}
+
+enum ParserConfidence {
+  high
+  medium
+  low
+  failed
+}
+
+enum UsageCaptureSource {
+  tmux_capture
+  pipe_pane
+  manual_refresh
+}
+
 model Project {
   id          String        @id @default(cuid())
   name        String
@@ -107,6 +132,23 @@ model Project {
   pendingTasks          Int?
   progressUpdatedAt     DateTime?
   estimatedCompletionAt DateTime?
+
+  // Project Objective — drafted by Claude, editable by an admin. All content must be English.
+  objective             String?
+  successCriteria       String?
+  constraints           String?
+  nonGoals              String?
+  improvementFocus      String?
+  lastObjectiveUpdatedAt DateTime?
+
+  // Autonomous execution mode (0-4). Separate from improvementAutomationLevel, which only
+  // governs suggestion auto-approval. See lib/autonomous-mode.ts for level semantics.
+  //   0 disabled · 1 scan+suggest only · 2 auto-create low-risk tasks (no dispatch)
+  //   3 auto-create + auto-dispatch low/medium-risk tasks · 4 + high-risk if explicitly allowed
+  autonomousMode        Int       @default(0)
+  // High-risk tasks (db migration, auth/security, prod deploy, destructive, secrets) are never
+  // auto-dispatched at any autonomousMode level unless this is explicitly set to true.
+  allowHighRiskAutonomy Boolean   @default(false)
 }
 
 model Task {
@@ -163,6 +205,16 @@ model Task {
   reviewAttempts     Int            @default(0)
   // Tags required on the assigned agent for this task to be dispatched.
   requiredTags       String[]
+  // Auto-computed at creation by lib/risk-classifier.ts (keyword heuristic); manually overridable.
+  // High-risk tasks are never auto-dispatched unless Project.allowHighRiskAutonomy is true.
+  riskLevel          RiskLevel      @default(medium)
+  // True when this task was created and/or dispatched by the autonomous improvement pipeline
+  // (Project.autonomousMode >= 2). Drives the stricter completion validation gate below.
+  isAutonomous       Boolean        @default(false)
+  // Populated from the [WORKERAI_VALIDATION] completion block for isAutonomous tasks.
+  // null = not applicable (non-autonomous task or not yet evaluated).
+  validationStatus   ValidationStatus?
+  validationEvidence String?
   // Stale-pending alert deduplication — set when the alert fires so it doesn't repeat < 1 h
   lastStalePendingAlertAt DateTime?
   // Link back to the ScheduledTask that spawned this task (null for manually created tasks)
@@ -334,6 +386,10 @@ model Agent {
   // Cooldown after any terminal task status — poller skips dispatch until this passes
   cooldownUntil DateTime?
 
+  // Cached count of currently-running tasks, used by lib/agent-selector.ts for capacity scoring
+  // without an extra query per candidate. Kept in sync wherever Agent.status flips running/idle.
+  activeTaskCount Int @default(0)
+
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
   tasks          Task[]
@@ -344,19 +400,32 @@ model Agent {
   @@unique([serverId, slug])
 }
 
-// Point-in-time snapshot from a pipe-pane usage capture.
-// Stored on every refresh attempt (success or failure) to preserve history.
-// Never interpret null usagePercent as 0% — null means parsing failed.
+// Point-in-time snapshot from a usage capture (tmux capture-pane, pipe-pane, or manual refresh).
+// Stored on EVERY refresh attempt (success or failure) to preserve full history, regardless of
+// parserConfidence — this is the audit trail for "why does the displayed number look wrong".
+// Never interpret a null percent field as 0% — null means parsing did not find that value.
 model AgentUsageSnapshot {
   id                  String    @id @default(cuid())
   agentId             String
   agent               Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   // Parsed fields — null means the field was not present in the captured output.
-  usagePercent        Float?    // current week %
-  resetTime           String?   // display string e.g. "Jun 15, 9am (Sydney)"
-  resetAt             DateTime? // parsed UTC DateTime for countdown math
+  sessionPercent      Float?
+  sessionResetTime    String?   // display string e.g. "Jun 15, 9am (Sydney)"
+  sessionResetAt      DateTime? // parsed UTC DateTime for countdown math
+  weekPercent         Float?
+  weekResetTime       String?
+  weekResetAt         DateTime?
   usageCreditsEnabled Boolean?  // null = unknown; false = "credits are off"
+
+  // How much the parser trusts the values above. Agent.claudeSessionPct/claudeWeekPct are only
+  // updated from snapshots with confidence "high" or "medium" — see lib/usage-snapshot-service.ts.
+  parserConfidence ParserConfidence   @default(failed)
+  // Human-readable reasons behind the confidence rating, e.g. "session section not found",
+  // "captures disagreed: 12% vs 14%", "percentage missing reset time".
+  parseWarnings    String[]
+  // Which capture mechanism produced this snapshot.
+  source           UsageCaptureSource @default(tmux_capture)
 
   // Capture metadata
   captureStatus String   @default("unknown") // "ok" | "rate_limited" | "error" | "offline" | "auth_required"
