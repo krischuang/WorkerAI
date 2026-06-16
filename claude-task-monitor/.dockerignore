@@ -1,0 +1,8 @@
+node_modules
+.next
+.git
+coverage
+test-results
+e2e/test-results
+backups
+*.log

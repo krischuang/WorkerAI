@@ -63,6 +63,7 @@ interface HealthData {
   agents: AgentHealth[];
   dbPool?: DbPool;
   poller?: PollerStatus;
+  configWarnings?: string[];
 }
 
 function scoreColor(score: number | null) {
@@ -298,6 +299,21 @@ export default function HealthDashboard() {
           {refreshing ? "Refreshing…" : "Refresh"}
         </button>
       </div>
+
+      {/* Configuration warnings */}
+      {(data?.configWarnings?.length ?? 0) > 0 && (
+        <section className="mb-6">
+          {data!.configWarnings!.map((w, i) => (
+            <div
+              key={i}
+              className="flex items-start gap-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg px-4 py-3 mb-2"
+            >
+              <span className="text-amber-500 mt-0.5 flex-shrink-0">⚠</span>
+              <p className="text-sm text-amber-800 dark:text-amber-300">{w}</p>
+            </div>
+          ))}
+        </section>
+      )}
 
       {/* Summary row */}
       <div className="grid grid-cols-3 gap-4 mb-8">

@@ -1,0 +1,152 @@
+name: Deploy
+
+on:
+  # Manual trigger — allows deploying any branch, optionally forcing rollback
+  workflow_dispatch:
+    inputs:
+      rollback:
+        description: "Roll back to the previous image (true/false)"
+        required: false
+        default: "false"
+
+  # Auto-deploy only when CI passes on main
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main, master]
+
+env:
+  IMAGE_NAME: claude-task-monitor-app
+  DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+  DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+  APP_DIR: /home/ec2-user/WorkerAI/claude-task-monitor
+
+jobs:
+  # ── Guard: only deploy when CI passed ─────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      # ── Rollback path ──────────────────────────────────────────────────────
+      - name: Rollback to previous image
+        if: github.event.inputs.rollback == 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "
+            set -e
+            PREV=\$(sudo docker images ${{ env.IMAGE_NAME }} --format '{{.Tag}}' | grep -v latest | sort -r | head -1)
+            if [ -z \"\$PREV\" ]; then echo 'No previous image found'; exit 1; fi
+            echo \"Rolling back to \$PREV\"
+            cd ${{ env.APP_DIR }}
+            sudo docker tag ${{ env.IMAGE_NAME }}:\$PREV ${{ env.IMAGE_NAME }}:latest
+            sudo docker compose up -d app
+            echo 'Rollback complete'
+          "
+
+      # ── Normal deploy path ─────────────────────────────────────────────────
+      - name: Pre-deploy checks
+        if: github.event.inputs.rollback != 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "
+            set -e
+            # Check disk space (must have > 3 GB free for image build)
+            AVAIL_KB=\$(df / | awk 'NR==2 {print \$4}')
+            AVAIL_GB=\$((AVAIL_KB / 1024 / 1024))
+            echo \"Disk available: \${AVAIL_GB} GB\"
+            if [ \"\$AVAIL_GB\" -lt 3 ]; then
+              echo 'ERROR: Less than 3 GB free — aborting deployment'
+              sudo docker image prune -f
+              sudo docker builder prune -f
+              AVAIL_KB=\$(df / | awk 'NR==2 {print \$4}')
+              AVAIL_GB=\$((AVAIL_KB / 1024 / 1024))
+              if [ \"\$AVAIL_GB\" -lt 3 ]; then exit 1; fi
+            fi
+            # Verify Docker is running
+            sudo docker info > /dev/null 2>&1 || { echo 'ERROR: Docker not running'; exit 1; }
+            # Verify DB reachable
+            sudo docker exec claude-task-monitor-db-1 pg_isready -U postgres > /dev/null 2>&1 || \
+              sudo docker exec workerai-postgres pg_isready -U postgres > /dev/null 2>&1 || \
+              { echo 'ERROR: DB not ready'; exit 1; }
+            echo 'Pre-deploy checks passed'
+          "
+
+      - name: Build new Docker image on server
+        if: github.event.inputs.rollback != 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "
+            set -e
+            cd ${{ env.APP_DIR }}
+            git pull origin main
+            # Tag the current image as a rollback target before building
+            CURRENT_ID=\$(sudo docker inspect ${{ env.IMAGE_NAME }}-app:latest --format '{{.Id}}' 2>/dev/null || true)
+            if [ -n \"\$CURRENT_ID\" ]; then
+              TS=\$(date +%Y%m%d%H%M%S)
+              sudo docker tag ${{ env.IMAGE_NAME }}-app:latest ${{ env.IMAGE_NAME }}-app:rollback-\$TS
+              # Keep only the 2 most recent rollback tags
+              sudo docker images ${{ env.IMAGE_NAME }}-app --format '{{.Tag}}' | \
+                grep rollback | sort -r | tail -n +3 | \
+                xargs -I{} sudo docker rmi ${{ env.IMAGE_NAME }}-app:{} 2>/dev/null || true
+            fi
+            # Build new image
+            sudo docker compose build --no-cache app
+            echo 'Build complete'
+          "
+
+      - name: Deploy
+        if: github.event.inputs.rollback != 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "
+            set -e
+            cd ${{ env.APP_DIR }}
+            sudo docker compose up -d app
+            echo 'Deploy triggered'
+          "
+
+      - name: Post-deploy health check
+        if: github.event.inputs.rollback != 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "
+            set -e
+            # Wait up to 60s for the container to be healthy
+            for i in \$(seq 1 12); do
+              STATUS=\$(sudo docker inspect --format='{{.State.Status}}' claude-task-monitor-app-1 2>/dev/null || echo 'missing')
+              echo \"  Attempt \$i: container status = \$STATUS\"
+              if [ \"\$STATUS\" = 'running' ]; then
+                # Check API health endpoint
+                HTTP=\$(curl -sf -o /dev/null -w '%{http_code}' http://localhost:3000/api/health 2>/dev/null || echo 000)
+                echo \"  Health check HTTP: \$HTTP\"
+                if [ \"\$HTTP\" = '200' ]; then
+                  echo 'Health check passed'
+                  exit 0
+                fi
+              fi
+              sleep 5
+            done
+            echo 'ERROR: App did not become healthy within 60s — rolling back'
+            PREV_TAG=\$(sudo docker images claude-task-monitor-app --format '{{.Tag}}' | grep rollback | sort -r | head -1)
+            if [ -n \"\$PREV_TAG\" ]; then
+              sudo docker tag claude-task-monitor-app:\$PREV_TAG claude-task-monitor-app:latest
+              cd ${{ env.APP_DIR }} && sudo docker compose up -d app
+              echo 'Automatic rollback complete'
+            fi
+            exit 1
+          "
+
+      - name: Cleanup old images
+        if: always()
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }} "
+            sudo docker image prune -f 2>/dev/null || true
+            sudo docker builder prune -f 2>/dev/null || true
+          "
