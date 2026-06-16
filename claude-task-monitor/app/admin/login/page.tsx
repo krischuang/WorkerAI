@@ -26,7 +26,12 @@ function AdminLoginForm() {
         body: JSON.stringify({ password }),
       });
       if (res.ok) {
+        const data = await res.json().catch(() => ({}));
         const redirect = params.get("redirect") || "/admin/config";
+        if (data.requiresOtp) {
+          router.push(`/admin/verify-otp?redirect=${encodeURIComponent(redirect)}`);
+          return;
+        }
         router.push(redirect);
       } else {
         const body = await res.json().catch(() => ({}));
