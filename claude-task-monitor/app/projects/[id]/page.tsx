@@ -143,6 +143,14 @@ interface Project {
   nextImprovementCycleAt: string | null;
   autoImprovementPaused: boolean;
   scanFailureCount: number;
+  objective: string | null;
+  successCriteria: string | null;
+  constraints: string | null;
+  nonGoals: string | null;
+  improvementFocus: string | null;
+  autonomousMode: number;
+  allowHighRiskAutonomy: boolean;
+  lastObjectiveUpdatedAt: string | null;
 }
 
 interface ScanHealth {
@@ -453,6 +461,270 @@ function CycleHealthPanel({
   );
 }
 
+const AUTONOMOUS_MODE_LEVELS = [
+  { label: "Disabled", description: "No autonomous scanning, suggestion, or dispatch." },
+  { label: "Scan & suggest only", description: "Daily review generates suggestions for human approval. Nothing is auto-created or auto-dispatched." },
+  { label: "Auto-create low-risk tasks", description: "Low-risk suggestions become tasks automatically, but stay pending — a human (or a manual dispatch) must queue them." },
+  { label: "Auto-create + auto-dispatch", description: "Low and medium-risk tasks are created and dispatched to the best available agent automatically." },
+  { label: "Fully autonomous", description: "Same as above, plus high-risk tasks (migrations, auth/security, prod deploy, secrets) are allowed IF \"Allow high-risk autonomy\" is checked below." },
+];
+
+interface ObjectiveGenerateResult {
+  ok: boolean;
+  objective?: string | null;
+  successCriteria?: string | null;
+  constraints?: string | null;
+  nonGoals?: string | null;
+  improvementFocus?: string | null;
+  reason?: string;
+}
+
+interface ImprovementReviewApiResult {
+  ok: boolean;
+  suggestionsGenerated?: number;
+  tasksAutoCreated?: number;
+  reason?: string;
+}
+
+function ProjectObjectiveSection({ project, onProjectRefresh }: { project: Project; onProjectRefresh: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({
+    objective: project.objective ?? "",
+    successCriteria: project.successCriteria ?? "",
+    constraints: project.constraints ?? "",
+    nonGoals: project.nonGoals ?? "",
+    improvementFocus: project.improvementFocus ?? "",
+  });
+  const [autonomousMode, setAutonomousMode] = useState(project.autonomousMode);
+  const [allowHighRiskAutonomy, setAllowHighRiskAutonomy] = useState(project.allowHighRiskAutonomy);
+  const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [lastReview, setLastReview] = useState<{ suggestionsGenerated: number; tasksAutoCreated: number } | null>(null);
+
+  function startEditing() {
+    setForm({
+      objective: project.objective ?? "",
+      successCriteria: project.successCriteria ?? "",
+      constraints: project.constraints ?? "",
+      nonGoals: project.nonGoals ?? "",
+      improvementFocus: project.improvementFocus ?? "",
+    });
+    setAutonomousMode(project.autonomousMode);
+    setAllowHighRiskAutonomy(project.allowHighRiskAutonomy);
+    setEditing(true);
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    await fetch(`/api/projects/${project.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...form, autonomousMode, allowHighRiskAutonomy }),
+    });
+    setSaving(false);
+    setEditing(false);
+    onProjectRefresh();
+  }
+
+  async function handleGenerate() {
+    setGenerating(true);
+    setGenerateError(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/objective/generate`, { method: "POST" });
+      const data: ObjectiveGenerateResult = await res.json();
+      if (!res.ok || !data.ok) {
+        setGenerateError(data.reason ? `Could not generate objective: ${data.reason}` : "Could not generate objective");
+      } else {
+        onProjectRefresh();
+      }
+    } catch {
+      setGenerateError("Network error while generating objective");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleRunReview() {
+    setReviewing(true);
+    setReviewError(null);
+    setLastReview(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/improvement-review`, { method: "POST" });
+      const data: ImprovementReviewApiResult = await res.json();
+      if (!res.ok || !data.ok) {
+        setReviewError(data.reason ? `Could not run review: ${data.reason}` : "Could not run review");
+      } else {
+        setLastReview({ suggestionsGenerated: data.suggestionsGenerated ?? 0, tasksAutoCreated: data.tasksAutoCreated ?? 0 });
+        onProjectRefresh();
+      }
+    } catch {
+      setReviewError("Network error while running review");
+    } finally {
+      setReviewing(false);
+    }
+  }
+
+  const hasObjective = !!(project.objective || project.successCriteria || project.constraints || project.nonGoals || project.improvementFocus);
+
+  return (
+    <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Project Objective</h2>
+        <div className="flex items-center gap-2">
+          {!editing && (
+            <>
+              <Btn variant="secondary" size="sm" onClick={handleGenerate} disabled={generating}>
+                {generating ? "Generating…" : "Generate Objective with Claude"}
+              </Btn>
+              <Btn variant="secondary" size="sm" onClick={handleRunReview} disabled={reviewing}>
+                {reviewing ? "Running…" : "Run Improvement Review"}
+              </Btn>
+              <Btn variant="ghost" size="sm" onClick={startEditing}>Edit</Btn>
+            </>
+          )}
+        </div>
+      </div>
+
+      {generateError && <p className="text-sm text-red-600 mb-3">{generateError}</p>}
+      {reviewError && <p className="text-sm text-red-600 mb-3">{reviewError}</p>}
+      {lastReview && (
+        <p className="text-sm text-green-700 mb-3">
+          Review complete — {lastReview.suggestionsGenerated} suggestion{lastReview.suggestionsGenerated === 1 ? "" : "s"} generated
+          {lastReview.tasksAutoCreated > 0 && `, ${lastReview.tasksAutoCreated} task${lastReview.tasksAutoCreated === 1 ? "" : "s"} auto-created`}.
+        </p>
+      )}
+
+      {!editing ? (
+        <>
+          {!hasObjective ? (
+            <p className="text-sm text-zinc-500">
+              No objective set yet. Click <strong>Generate Objective with Claude</strong> to draft one, or <strong>Edit</strong> to write it manually.
+            </p>
+          ) : (
+            <dl className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              {project.objective && (
+                <div className="md:col-span-2">
+                  <dt className="text-xs text-zinc-500 font-medium mb-0.5">Objective</dt>
+                  <dd className="text-zinc-900 dark:text-zinc-100">{project.objective}</dd>
+                </div>
+              )}
+              {project.successCriteria && (
+                <div>
+                  <dt className="text-xs text-zinc-500 font-medium mb-0.5">Success criteria</dt>
+                  <dd className="text-zinc-700 dark:text-zinc-300">{project.successCriteria}</dd>
+                </div>
+              )}
+              {project.constraints && (
+                <div>
+                  <dt className="text-xs text-zinc-500 font-medium mb-0.5">Constraints</dt>
+                  <dd className="text-zinc-700 dark:text-zinc-300">{project.constraints}</dd>
+                </div>
+              )}
+              {project.nonGoals && (
+                <div>
+                  <dt className="text-xs text-zinc-500 font-medium mb-0.5">Non-goals</dt>
+                  <dd className="text-zinc-700 dark:text-zinc-300">{project.nonGoals}</dd>
+                </div>
+              )}
+              {project.improvementFocus && (
+                <div>
+                  <dt className="text-xs text-zinc-500 font-medium mb-0.5">Improvement focus</dt>
+                  <dd className="text-zinc-700 dark:text-zinc-300">{project.improvementFocus}</dd>
+                </div>
+              )}
+            </dl>
+          )}
+
+          <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between flex-wrap gap-2">
+            <div className="text-xs text-zinc-500">
+              Autonomous mode: <strong className="text-zinc-700 dark:text-zinc-300">L{project.autonomousMode} — {AUTONOMOUS_MODE_LEVELS[project.autonomousMode]?.label}</strong>
+              {project.allowHighRiskAutonomy && <span className="ml-2 text-amber-600">High-risk autonomy allowed</span>}
+            </div>
+            {project.lastObjectiveUpdatedAt && (
+              <p className="text-xs text-zinc-400">
+                Last updated {new Date(project.lastObjectiveUpdatedAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="space-y-3">
+          <FormField label="Objective" hint="One or two sentences stating what this project is trying to achieve.">
+            <textarea
+              value={form.objective}
+              onChange={(e) => setForm({ ...form, objective: e.target.value })}
+              rows={2}
+              className={inputCls}
+            />
+          </FormField>
+          <FormField label="Success criteria">
+            <textarea
+              value={form.successCriteria}
+              onChange={(e) => setForm({ ...form, successCriteria: e.target.value })}
+              rows={2}
+              className={inputCls}
+            />
+          </FormField>
+          <FormField label="Constraints">
+            <textarea
+              value={form.constraints}
+              onChange={(e) => setForm({ ...form, constraints: e.target.value })}
+              rows={2}
+              className={inputCls}
+            />
+          </FormField>
+          <FormField label="Non-goals">
+            <textarea
+              value={form.nonGoals}
+              onChange={(e) => setForm({ ...form, nonGoals: e.target.value })}
+              rows={2}
+              className={inputCls}
+            />
+          </FormField>
+          <FormField label="Improvement focus">
+            <textarea
+              value={form.improvementFocus}
+              onChange={(e) => setForm({ ...form, improvementFocus: e.target.value })}
+              rows={2}
+              className={inputCls}
+            />
+          </FormField>
+
+          <FormField label="Autonomous mode" hint={AUTONOMOUS_MODE_LEVELS[autonomousMode]?.description}>
+            <select
+              value={autonomousMode}
+              onChange={(e) => setAutonomousMode(Number(e.target.value))}
+              className={inputCls}
+            >
+              {AUTONOMOUS_MODE_LEVELS.map((lvl, i) => (
+                <option key={i} value={i}>Level {i} — {lvl.label}</option>
+              ))}
+            </select>
+          </FormField>
+
+          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+            <input
+              type="checkbox"
+              checked={allowHighRiskAutonomy}
+              onChange={(e) => setAllowHighRiskAutonomy(e.target.checked)}
+            />
+            Allow high-risk autonomy (database migrations, auth/security, production deploys,
+            destructive commands, secret-handling) at Level 4
+          </label>
+
+          <ModalActions>
+            <Btn variant="primary" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Save"}</Btn>
+            <Btn variant="secondary" onClick={() => setEditing(false)}>Cancel</Btn>
+          </ModalActions>
+        </div>
+      )}
+    </section>
+  );
+}
+
 const AUTOMATION_LEVELS = [
   {
     label: "Disabled",
@@ -616,6 +888,9 @@ export default function ProjectDetailPage() {
           </button>
         </div>
       </div>
+
+      {/* ── Project Objective ─────────────────────────────────────────────── */}
+      <ProjectObjectiveSection project={project} onProjectRefresh={loadProject} />
 
       {/* ── Progress ───────────────────────────────────────────────────────── */}
       {project.totalTasks !== null && project.totalTasks > 0 && (
