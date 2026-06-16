@@ -20,6 +20,9 @@ export async function cookieToken(secret: string): Promise<string> {
 export const ADMIN_COOKIE = "__admin";
 export const ADMIN_COOKIE_MAX_AGE = 7 * 24 * 60 * 60; // 7 days
 
+export const ADMIN_OTP_PENDING_COOKIE = "__admin_otp_pending";
+export const ADMIN_OTP_PENDING_MAX_AGE = 10 * 60; // 10 minutes
+
 /**
  * HMAC-SHA256 token derived from the admin password.
  * Used as the httpOnly admin session cookie value.
@@ -43,6 +46,28 @@ export async function adminCookieToken(password: string): Promise<string> {
     .join("");
 }
 
+/**
+ * Short-lived HMAC token set after password verification when TOTP is required.
+ * Valid for ADMIN_OTP_PENDING_MAX_AGE seconds only.
+ */
+export async function adminOtpPendingToken(password: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode("admin-otp-pending:v1"),
+  );
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
 function isPublicPath(pathname: string): boolean {
@@ -50,12 +75,14 @@ function isPublicPath(pathname: string): boolean {
   return pathname === "/login" || pathname.startsWith("/api/auth") || pathname === "/api/metrics";
 }
 
-/** Admin paths that bypass the admin auth check (login/logout endpoints). */
+/** Admin paths that bypass the admin auth check (login/logout/otp endpoints). */
 function isAdminPublicPath(pathname: string): boolean {
   return (
     pathname === "/admin/login" ||
+    pathname === "/admin/verify-otp" ||
     pathname === "/api/admin/login" ||
-    pathname === "/api/admin/logout"
+    pathname === "/api/admin/logout" ||
+    pathname === "/api/admin/verify-otp"
   );
 }
 

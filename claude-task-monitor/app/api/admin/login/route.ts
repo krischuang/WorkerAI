@@ -1,7 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import { checkAdminLogin } from "@/lib/admin-auth";
-import { adminCookieToken, ADMIN_COOKIE, ADMIN_COOKIE_MAX_AGE } from "@/middleware";
+import {
+  adminCookieToken, ADMIN_COOKIE, ADMIN_COOKIE_MAX_AGE,
+  adminOtpPendingToken, ADMIN_OTP_PENDING_COOKIE, ADMIN_OTP_PENDING_MAX_AGE,
+} from "@/middleware";
+import { getActiveTotpSecret } from "@/lib/admin-totp";
 
 /** POST /api/admin/login — verify admin password and set httpOnly session cookie. */
 export async function POST(request: NextRequest) {
@@ -29,11 +33,26 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid password" }, { status: 401 });
   }
 
+  // If TOTP is configured, issue a short-lived pending cookie and require OTP step.
+  const totpSecret = await getActiveTotpSecret();
+  if (totpSecret) {
+    const pendingToken = await adminOtpPendingToken(adminPassword);
+    const res = NextResponse.json({ requiresOtp: true });
+    res.cookies.set(ADMIN_OTP_PENDING_COOKIE, pendingToken, {
+      httpOnly: true,
+      secure: false,
+      sameSite: "strict",
+      maxAge: ADMIN_OTP_PENDING_MAX_AGE,
+      path: "/",
+    });
+    return res;
+  }
+
   const token = await adminCookieToken(adminPassword);
   const res = NextResponse.json({ ok: true });
   res.cookies.set(ADMIN_COOKIE, token, {
     httpOnly: true,
-    secure: false, // app runs over plain HTTP on localhost
+    secure: false,
     sameSite: "strict",
     maxAge: ADMIN_COOKIE_MAX_AGE,
     path: "/",
