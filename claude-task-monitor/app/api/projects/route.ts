@@ -21,14 +21,22 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { name, description, priority, status } = body;
+    const { name, description, priority, status, repoUrl, defaultBranch, workspaceStrategy } = body;
 
     if (!name) {
       return Response.json({ error: "Name is required" }, { status: 400 });
     }
 
     const project = await prisma.project.create({
-      data: { name, description, priority: priority ?? "P3", status: status ?? "active" },
+      data: {
+        name,
+        description,
+        priority: priority ?? "P3",
+        status: status ?? "active",
+        ...(repoUrl !== undefined && { repoUrl }),
+        ...(defaultBranch !== undefined && { defaultBranch }),
+        ...(workspaceStrategy !== undefined && { workspaceStrategy }),
+      },
     });
     return Response.json(project, { status: 201 });
   } catch (err) {
