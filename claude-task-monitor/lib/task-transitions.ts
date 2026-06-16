@@ -25,9 +25,10 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<TaskStatus, ReadonlySet<TaskSt
   queued:    new Set<TaskStatus>(["running", "pending", "paused"]),
   running:   new Set<TaskStatus>(["completed", "failed", "paused"]),
   paused:    new Set<TaskStatus>(["queued", "pending"]),
-  completed: new Set<TaskStatus>(["archived", "pending"]),
-  failed:    new Set<TaskStatus>(["pending"]),
-  archived:  new Set<TaskStatus>([]), // terminal state — no outbound transitions
+  completed:    new Set<TaskStatus>(["archived", "pending"]),
+  failed:       new Set<TaskStatus>(["pending"]),
+  archived:     new Set<TaskStatus>([]), // terminal state — no outbound transitions
+  needs_review: new Set<TaskStatus>(["pending"]), // human must re-queue after review
 };
 
 /**

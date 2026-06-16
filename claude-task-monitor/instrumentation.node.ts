@@ -16,6 +16,7 @@
  * than the 60 s interval.
  */
 
+import { validateSshKeyEnv, validateArtifactStoragePath } from "./lib/startup-validation";
 import { prisma } from "./lib/prisma";
 import {
   fetchClaudeUsageViaTmux,
@@ -26,7 +27,8 @@ import {
   type ClaudePermissionMode,
 } from "./lib/ssh-claude-tmux";
 import { tryDispatchTaskToServer, tryDispatchTaskToAgent } from "./lib/task-dispatch";
-import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS, POST_RESET_RESTART_BUFFER_MS, estimateCostUsd } from "./lib/constants";
+import { USAGE_THRESHOLD, IDLE_FALLBACK_MIN_MS, POST_RESET_RESTART_BUFFER_MS, estimateCostUsd, AGENT_COOLDOWN_MS, LOG_TAIL_LINES } from "./lib/constants";
+import { readRunCompletion, readLogTail, tmuxSessionExists } from "./lib/run-completion";
 import { parseTokenCounts } from "./lib/usage-parser";
 import { resolveTaskTimeout, TASK_TYPE_TIMEOUT_KEYS, type TaskTypeKey } from "./lib/task-timeout";
 import { runHealthChecks } from "./lib/worker-health";
@@ -47,6 +49,7 @@ import { emitAudit } from "./lib/audit";
 import { recalculateProjectProgress, reconcileAllProjects } from "./lib/project-progress";
 import {
   archiveOldLogs,
+  pruneHighVolumeTables,
   shouldRunNightlyArchival,
   completedHowToExitReason,
   lastNLines,
@@ -60,9 +63,21 @@ import { unblockDependents } from "./lib/task-dependency";
 import { processReviewQueue } from "./lib/task-service";
 import { runDueProjectScans } from "./lib/project-scan-service";
 import { advanceImprovementCycles, startDueImprovementCycles } from "./lib/improvement-cycle-service";
-import { emitNotification } from "./lib/notification";
+import { emitNotification, emitStalePendingNotification } from "./lib/notification";
 import { scrubPaneCapture } from "./lib/pane-scrubber";
+import { getDecryptedTaskSecrets } from "./lib/task-secrets";
+
+/** Returns plaintext values of all TaskSecrets for a task (for pane scrubbing). */
+async function taskSecretValues(taskId: string): Promise<string[]> {
+  return getDecryptedTaskSecrets(taskId).then(s => s.map(r => r.value)).catch(() => []);
+}
+/** Collects plaintext values across multiple tasks (for shared-session legacy dispatch). */
+async function multiTaskSecretValues(taskIds: string[]): Promise<string[]> {
+  const all = await Promise.all(taskIds.map(id => getDecryptedTaskSecrets(id).catch(() => [])));
+  return all.flat().map(r => r.value);
+}
 import { runDueScheduledTasks } from "./lib/scheduled-task-service";
+import { setRateLimitEnabled } from "./lib/api-rate-limit";
 
 const TAG = "[usage-poller]";
 
@@ -90,6 +105,8 @@ const g = globalThis as unknown as {
 
 if (!g._usagePollerStarted) {
   g._usagePollerStarted = true;
+  validateSshKeyEnv();
+  validateArtifactStoragePath();
   if (!g._dispatchBackoff) g._dispatchBackoff = new Map();
   if (!g._agentOfflineStore) g._agentOfflineStore = new Map();
   if (g._pollerCycleCount === undefined) g._pollerCycleCount = 0;
@@ -102,6 +119,14 @@ if (!g._usagePollerStarted) {
   if (!g._pendingServerRestarts) g._pendingServerRestarts = new Set();
   if (!g._pendingAgentRestarts) g._pendingAgentRestarts = new Set();
   if (g._shutdownRequested === undefined) g._shutdownRequested = false;
+
+  // Load rate_limit_enabled from SystemConfig and populate the in-process cache.
+  prisma.systemConfig.findUnique({ where: { key: "rate_limit_enabled" } })
+    .then((row) => {
+      if (row) setRateLimitEnabled(row.value !== "false");
+    })
+    .catch(() => { /* leave default (true) if DB is not yet ready */ });
+
   startPoller();
 }
 
@@ -592,6 +617,7 @@ function startPoller() {
       id: string;
       projectId: string;
       serverId: string | null;
+      runId: string | null;
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
       taskTmuxSession: string | null;
@@ -623,6 +649,7 @@ function startPoller() {
           id: true,
           projectId: true,
           serverId: true,
+          runId: true,
           completionNonce: true,
           tmuxOutputOffset: true,
           taskTmuxSession: true,
@@ -711,6 +738,7 @@ function startPoller() {
             if (task.taskTmuxSession) {
               const sshCfg = { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath };
               await killTaskTmuxSession(sshCfg, task.id).catch(() => {});
+              await prisma.task.update({ where: { id: task.id }, data: { taskTmuxSession: null } }).catch(() => {});
             }
             clearDispatchBackoff(task.id, backoff);
             console.log(`[TASK_TIMEOUT] taskId="${task.id}" timeoutMin=${timeoutMin}`);
@@ -724,9 +752,126 @@ function startPoller() {
           }
         }
 
+        const sshConfig = { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath };
+
+        // ── File-based completion detection (new tasks with runId) ────────────
+        if (task.runId) {
+          const doneResult = await readRunCompletion(sshConfig, task.runId);
+
+          if (doneResult.found && doneResult.data) {
+            // Done-file written — task has exited.
+            const { exitCode, finishedAt: finishedAtStr } = doneResult.data;
+            const newStatus = exitCode === 0 ? "completed" : "failed";
+            const finishedAt = new Date(finishedAtStr);
+            const logTail = task.disablePaneCapture
+              ? null
+              : (await readLogTail(sshConfig, task.runId, LOG_TAIL_LINES)) || null;
+            const costData = computeCostFromRaw(srv.claudeUsageRaw ?? null);
+            const secretVals = logTail ? await taskSecretValues(task.id) : [];
+
+            try {
+              await prisma.$transaction(async (tx) => {
+                const latestLog = await tx.executionLog.findFirst({
+                  where: { taskId: task.id, status: "running", finishedAt: null },
+                  orderBy: { createdAt: "desc" },
+                  select: { id: true, startedAt: true },
+                });
+                await tx.task.update({ where: { id: task.id }, data: { status: newStatus } });
+                if (latestLog) {
+                  await tx.executionLog.update({
+                    where: { id: latestLog.id },
+                    data: {
+                      status: newStatus,
+                      finishedAt,
+                      durationMs: finishedAt.getTime() - latestLog.startedAt.getTime(),
+                      exitReason: exitCode === 0 ? "done_file" : "done_file_nonzero",
+                      paneCapture: logTail ? scrubPaneCapture(logTail, secretVals) : null,
+                      errorMessage: exitCode !== 0 ? `Claude exited with code ${exitCode}` : null,
+                      tokenCount: costData.tokenCount,
+                      actualCostUsd: costData.actualCostUsd,
+                    },
+                  });
+                }
+              });
+              clearDispatchBackoff(task.id, backoff);
+              console.log(`[TASK_FINISHED] taskId="${task.id}" detectedBy="done_file" exitCode=${exitCode} status="${newStatus}"`);
+              emitAudit({ entityType: "task", entityId: task.id, eventType: `task.${newStatus}`, actorType: "poller", payload: { detectedBy: "done_file", exitCode, serverId } }).catch(() => {});
+              emitNotification(task.id, newStatus === "completed" ? "task.completed" : "task.failed").catch(() => {});
+              recalculateProjectProgress(task.projectId).catch(() => {});
+              if (newStatus === "completed") {
+                unblockDependents(task.id).catch(() => {});
+                prisma.project.findUnique({ where: { id: task.projectId }, select: { autoReviewEnabled: true } })
+                  .then((proj) => {
+                    if (!proj?.autoReviewEnabled) return;
+                    return prisma.task.update({
+                      where: { id: task.id },
+                      data: { autoReviewEnabled: true, reviewStatus: "pending", reviewScheduledAt: new Date(Date.now() + 5 * 60_000) },
+                    });
+                  }).catch(() => {});
+              } else {
+                await evaluateRetry(task.id, "done_file_nonzero").catch((err) => {
+                  console.error(`${TAG} Task ${task.id}: retry evaluation failed:`, err);
+                });
+              }
+              if (task.taskTmuxSession) {
+                await killTaskTmuxSession(sshConfig, task.id).catch(() => {});
+                // Clear after kill so the orphan sweep doesn't re-process this task.
+                await prisma.task.update({ where: { id: task.id }, data: { taskTmuxSession: null } }).catch(() => {});
+              }
+            } catch (err) {
+              console.error(`${TAG} Task ${task.id}: failed to record done-file completion:`, err);
+            }
+            return; // done — do not fall through to tmux detection
+          }
+
+          // Done-file not yet written — check if the tmux session still exists.
+          const sessionAlive = task.taskTmuxSession
+            ? await tmuxSessionExists(sshConfig, task.taskTmuxSession)
+            : false;
+
+          if (!sessionAlive) {
+            // Session is gone but no done-file — wrapper crashed or server rebooted.
+            console.log(
+              `${TAG} ${srv.name}: task "${task.id}" — session gone, no done-file → needs_review`
+            );
+            try {
+              await prisma.$transaction(async (tx) => {
+                await tx.task.update({ where: { id: task.id }, data: { status: "needs_review" } });
+                const latestLog = await tx.executionLog.findFirst({
+                  where: { taskId: task.id, status: "running", finishedAt: null },
+                  orderBy: { createdAt: "desc" },
+                  select: { id: true, startedAt: true },
+                });
+                if (latestLog) {
+                  const now = new Date();
+                  await tx.executionLog.update({
+                    where: { id: latestLog.id },
+                    data: {
+                      status: "failed",
+                      finishedAt: now,
+                      durationMs: now.getTime() - latestLog.startedAt.getTime(),
+                      exitReason: "needs_review",
+                      errorMessage: "tmux session gone before done-file was written — needs manual review",
+                    },
+                  });
+                }
+              });
+              emitAudit({ entityType: "task", entityId: task.id, eventType: "task.needs_review", actorType: "poller", payload: { reason: "session_gone_no_done_file", serverId } }).catch(() => {});
+              emitNotification(task.id, "task.failed").catch(() => {});
+              recalculateProjectProgress(task.projectId).catch(() => {});
+            } catch (err) {
+              console.error(`${TAG} Task ${task.id}: failed to mark needs_review:`, err);
+            }
+            return;
+          }
+
+          // Session alive, done-file not yet written — still running, wait.
+          return;
+        }
+
+        // ── Legacy tmux pane detection (tasks without runId) ─────────────────
         // Use the task's own session; fall back to server session for legacy tasks.
         const checkSession = task.taskTmuxSession ?? srv.tmuxSession;
-        const sshConfig = { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath };
 
         const completionResult = await detectTaskCompletion(
           sshConfig,
@@ -779,7 +924,7 @@ function startPoller() {
         try {
           const finishedAt = new Date();
           const paneCapture = (!task.disablePaneCapture && completionResult.paneText)
-            ? scrubPaneCapture(lastNLines(completionResult.paneText, 200))
+            ? scrubPaneCapture(lastNLines(completionResult.paneText, 200), await taskSecretValues(task.id))
             : null;
           const exitReason = completedHowToExitReason(completedHow);
 
@@ -835,6 +980,7 @@ function startPoller() {
           // Clean up the per-task tmux session now that the task is done.
           if (task.taskTmuxSession) {
             await killTaskTmuxSession(sshConfig, task.id);
+            await prisma.task.update({ where: { id: task.id }, data: { taskTmuxSession: null } }).catch(() => {});
           }
         } catch (err) {
           console.error(`${TAG} Task ${task.id}: failed to mark completed:`, err);
@@ -852,6 +998,7 @@ function startPoller() {
       id: string;
       projectId: string;
       agentId: string | null;
+      runId: string | null;
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
       taskTmuxSession: string | null;
@@ -887,6 +1034,7 @@ function startPoller() {
           id: true,
           projectId: true,
           agentId: true,
+          runId: true,
           completionNonce: true,
           tmuxOutputOffset: true,
           taskTmuxSession: true,
@@ -912,6 +1060,7 @@ function startPoller() {
               claudeUsageRaw: true,
               defaultTaskTimeoutMinutes: true,
               maxConcurrentTasks: true,
+              tags: true,
               server: {
                 select: { host: true, port: true, username: true, sshKeyPath: true },
               },
@@ -934,6 +1083,7 @@ function startPoller() {
       logId: string | null;
       logStartedAt: Date | null;
       // Per-task session fields (set when task uses an isolated tmux session)
+      runId: string | null;
       completionNonce: string | null;
       tmuxOutputOffset: number | null;
       taskTmuxSession: string | null;
@@ -958,6 +1108,7 @@ function startPoller() {
         taskType: task.taskType,
         logId: log?.id ?? null,
         logStartedAt: log?.startedAt ?? null,
+        runId: task.runId,
         completionNonce: task.completionNonce,
         tmuxOutputOffset: task.tmuxOutputOffset,
         taskTmuxSession: task.taskTmuxSession,
@@ -1042,6 +1193,7 @@ function startPoller() {
           const info = taskTimeouts.get(taskId);
           if (info?.taskTmuxSession) {
             await killTaskTmuxSession(agent.server, taskId).catch(() => {});
+            await prisma.task.update({ where: { id: taskId }, data: { taskTmuxSession: null } }).catch(() => {});
           }
         }
 
@@ -1060,6 +1212,115 @@ function startPoller() {
             const info = taskTimeouts.get(taskId)!;
             const perSession = info.taskTmuxSession!;
 
+            // File-based detection for tasks with runId.
+            if (info.runId) {
+              const doneResult = await readRunCompletion(agent.server, info.runId);
+
+              if (doneResult.found && doneResult.data) {
+                const { exitCode, finishedAt: finishedAtStr } = doneResult.data;
+                const newStatus = exitCode === 0 ? "completed" : "failed";
+                const perFinishedAt = new Date(finishedAtStr);
+                const logTail = agentGroupDisablePaneCapture
+                  ? null
+                  : (await readLogTail(agent.server, info.runId, LOG_TAIL_LINES)) || null;
+                const secretVals = logTail ? await taskSecretValues(taskId) : [];
+
+                try {
+                  await prisma.$transaction(async (tx) => {
+                    const latestLog = await tx.executionLog.findFirst({
+                      where: { taskId, status: "running", finishedAt: null },
+                      orderBy: { createdAt: "desc" },
+                      select: { id: true, startedAt: true },
+                    });
+                    await tx.task.update({ where: { id: taskId }, data: { status: newStatus } });
+                    if (latestLog) {
+                      await tx.executionLog.update({
+                        where: { id: latestLog.id },
+                        data: {
+                          status: newStatus,
+                          finishedAt: perFinishedAt,
+                          durationMs: perFinishedAt.getTime() - latestLog.startedAt.getTime(),
+                          exitReason: exitCode === 0 ? "done_file" : "done_file_nonzero",
+                          paneCapture: logTail ? scrubPaneCapture(logTail, secretVals) : null,
+                          errorMessage: exitCode !== 0 ? `Claude exited with code ${exitCode}` : null,
+                          tokenCount: agentCostData.tokenCount,
+                          actualCostUsd: agentCostData.actualCostUsd,
+                        },
+                      });
+                    }
+                  });
+                  clearDispatchBackoff(taskId, backoff);
+                  completedTaskIds.push(taskId);
+                  console.log(`[TASK_FINISHED] taskId="${taskId}" agentId="${agentId}" detectedBy="done_file" exitCode=${exitCode}`);
+                  emitAudit({ entityType: "task", entityId: taskId, eventType: `task.${newStatus}`, actorType: "poller", payload: { detectedBy: "done_file", exitCode, agentId } }).catch(() => {});
+                  emitNotification(taskId, newStatus === "completed" ? "task.completed" : "task.failed").catch(() => {});
+                  const projIdDone = agentTaskProjectId.get(taskId);
+                  if (projIdDone) {
+                    recalculateProjectProgress(projIdDone).catch(() => {});
+                    if (newStatus === "completed") {
+                      unblockDependents(taskId).catch(() => {});
+                      prisma.project.findUnique({ where: { id: projIdDone }, select: { autoReviewEnabled: true } })
+                        .then((proj) => {
+                          if (!proj?.autoReviewEnabled) return;
+                          return prisma.task.update({
+                            where: { id: taskId },
+                            data: { autoReviewEnabled: true, reviewStatus: "pending", reviewScheduledAt: new Date(Date.now() + 5 * 60_000) },
+                          });
+                        }).catch(() => {});
+                    } else {
+                      await evaluateRetry(taskId, "done_file_nonzero").catch((err) => {
+                        console.error(`${TAG} Task ${taskId}: retry evaluation failed:`, err);
+                      });
+                    }
+                  }
+                  await killTaskTmuxSession(agent.server, taskId).catch(() => {});
+                  await prisma.task.update({ where: { id: taskId }, data: { taskTmuxSession: null } }).catch(() => {});
+                } catch (err) {
+                  console.error(`${TAG} Task ${taskId}: failed to record done-file completion:`, err);
+                }
+                continue; // next perTask
+              }
+
+              // Done-file not ready — check if session still alive.
+              const sessionAlive = await tmuxSessionExists(agent.server, perSession);
+              if (!sessionAlive) {
+                console.log(`${TAG} Agent ${agent.name}: task "${taskId}" — session gone, no done-file → needs_review`);
+                try {
+                  await prisma.$transaction(async (tx) => {
+                    await tx.task.update({ where: { id: taskId }, data: { status: "needs_review" } });
+                    const latestLog = await tx.executionLog.findFirst({
+                      where: { taskId, status: "running", finishedAt: null },
+                      orderBy: { createdAt: "desc" },
+                      select: { id: true, startedAt: true },
+                    });
+                    if (latestLog) {
+                      const now = new Date();
+                      await tx.executionLog.update({
+                        where: { id: latestLog.id },
+                        data: {
+                          status: "failed",
+                          finishedAt: now,
+                          durationMs: now.getTime() - latestLog.startedAt.getTime(),
+                          exitReason: "needs_review",
+                          errorMessage: "tmux session gone before done-file was written — needs manual review",
+                        },
+                      });
+                    }
+                  });
+                  completedTaskIds.push(taskId); // so agent is released below
+                  emitAudit({ entityType: "task", entityId: taskId, eventType: "task.needs_review", actorType: "poller", payload: { reason: "session_gone_no_done_file", agentId } }).catch(() => {});
+                  emitNotification(taskId, "task.failed").catch(() => {});
+                  const projIdNr = agentTaskProjectId.get(taskId);
+                  if (projIdNr) recalculateProjectProgress(projIdNr).catch(() => {});
+                } catch (err) {
+                  console.error(`${TAG} Task ${taskId}: failed to mark needs_review:`, err);
+                }
+              }
+              // Session alive, done-file not ready — still running.
+              continue;
+            }
+
+            // ── Legacy per-task pane detection (no runId) ────────────────────
             const perResult = await detectTaskCompletion(
               agent.server,
               perSession,
@@ -1096,7 +1357,7 @@ function startPoller() {
 
             const perFinishedAt = new Date();
             const perPaneCapture = (!agentGroupDisablePaneCapture && perResult.paneText)
-              ? scrubPaneCapture(lastNLines(perResult.paneText, 200))
+              ? scrubPaneCapture(lastNLines(perResult.paneText, 200), await taskSecretValues(taskId))
               : null;
             const perExitReason = completedHowToExitReason(perHow);
 
@@ -1142,6 +1403,7 @@ function startPoller() {
               }
               unblockDependents(taskId).catch(() => {});
               await killTaskTmuxSession(agent.server, taskId).catch(() => {});
+              await prisma.task.update({ where: { id: taskId }, data: { taskTmuxSession: null } }).catch(() => {});
             } catch (err) {
               console.error(`${TAG} Task ${taskId}: failed to mark agent task completed:`, err);
             }
@@ -1193,7 +1455,7 @@ function startPoller() {
             if (legacyHow) {
               const legacyFinishedAt = new Date();
               const legacyPaneCapture = (!agentGroupDisablePaneCapture && legacyResult.paneText)
-                ? scrubPaneCapture(lastNLines(legacyResult.paneText, 200))
+                ? scrubPaneCapture(lastNLines(legacyResult.paneText, 200), await multiTaskSecretValues(legacyRemaining))
                 : null;
               const legacyExitReason = completedHowToExitReason(legacyHow);
 
@@ -1249,12 +1511,17 @@ function startPoller() {
           if (completedTaskIds.length === 0) return;
         }
 
-        // Release agent if no tasks remain running.
+        // Release agent if no tasks remain running; set 30 s cooldown before re-dispatch.
         const nowRunningCount = await prisma.task.count({ where: { agentId, status: "running" } });
+        let cooldownActive = false;
         if (nowRunningCount === 0) {
           try {
-            await prisma.agent.update({ where: { id: agentId }, data: { status: "idle" } });
-            console.log(`[AGENT_RELEASED] agentId="${agentId}" name="${agent.name}"`);
+            await prisma.agent.update({
+              where: { id: agentId },
+              data: { status: "idle", cooldownUntil: new Date(Date.now() + AGENT_COOLDOWN_MS) },
+            });
+            console.log(`[AGENT_RELEASED] agentId="${agentId}" name="${agent.name}" cooldown=${AGENT_COOLDOWN_MS / 1000}s`);
+            cooldownActive = true;
           } catch (err) {
             console.error(`${TAG} Agent ${agent.name}: failed to set idle:`, err);
           }
@@ -1263,6 +1530,8 @@ function startPoller() {
         // Auto-advance: fill up to maxConcurrentTasks after completions.
         const sessionPct = agent.claudeSessionPct ?? 0;
         const weekPct = agent.claudeWeekPct ?? 0;
+
+        if (cooldownActive) return; // 30 s cooldown — next cycle will dispatch if needed
 
         if (sessionPct >= USAGE_THRESHOLD || weekPct >= USAGE_THRESHOLD) {
           console.log(
@@ -1282,10 +1551,22 @@ function startPoller() {
               OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
             },
             orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-            include: { project: { select: { name: true } } },
+            select: {
+              id: true, title: true, description: true, priority: true,
+              requiredTags: true,
+              retryAfter: true, blockedByCount: true,
+              project: { select: { name: true } },
+            },
           });
 
           if (!nextTask) break;
+
+          // Skip tasks whose required capability tags are not met by this agent.
+          const agentTags = new Set((agent as { tags?: string[] }).tags ?? []);
+          if (nextTask.requiredTags.some((t) => !agentTags.has(t))) {
+            console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — agent missing required tags [${nextTask.requiredTags.filter((t) => !agentTags.has(t)).join(", ")}]`);
+            break;
+          }
 
           if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
             console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — backoff in effect`);
@@ -1359,9 +1640,164 @@ function startPoller() {
       console.error(`${TAG} scheduled task dispatch threw:`, err);
     }
 
+    // ── 2d. Stuck-task reconciliation — running tasks with runId but no session/done-file ──
+    // Guards against tasks that were mid-run when the server restarted (no session, no
+    // done-file because the wrapper never exited cleanly). Only checks tasks that have
+    // been "running" for > 10 minutes to avoid false positives on newly dispatched tasks.
+    try {
+      const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
+      const stuckCutoff = new Date(Date.now() - STUCK_THRESHOLD_MS);
+      const potentiallyStuck = await prisma.task.findMany({
+        where: { status: "running", runId: { not: null }, updatedAt: { lte: stuckCutoff } },
+        select: {
+          id: true,
+          runId: true,
+          taskTmuxSession: true,
+          agent: {
+            select: {
+              server: { select: { host: true, port: true, username: true, sshKeyPath: true } },
+            },
+          },
+          server: { select: { host: true, port: true, username: true, sshKeyPath: true } },
+        },
+      });
+
+      for (const stuckTask of potentiallyStuck) {
+        const sshCfg = stuckTask.agent?.server ?? stuckTask.server;
+        if (!sshCfg || !stuckTask.runId) continue;
+
+        const doneResult = await readRunCompletion(sshCfg, stuckTask.runId);
+        if (doneResult.found) continue; // completion handler will pick it up on next cycle
+
+        const sessionName = stuckTask.taskTmuxSession ?? `claude_${stuckTask.id}`;
+        const alive = await tmuxSessionExists(sshCfg, sessionName);
+        if (alive) continue; // still running normally
+
+        console.log(`${TAG} Stuck-task reconciliation: task "${stuckTask.id}" — no session, no done-file → needs_review`);
+        try {
+          await prisma.$transaction(async (tx) => {
+            await tx.task.update({ where: { id: stuckTask.id }, data: { status: "needs_review" } });
+            const latestLog = await tx.executionLog.findFirst({
+              where: { taskId: stuckTask.id, status: "running", finishedAt: null },
+              orderBy: { createdAt: "desc" },
+              select: { id: true, startedAt: true },
+            });
+            if (latestLog) {
+              const reconcileNow = new Date();
+              await tx.executionLog.update({
+                where: { id: latestLog.id },
+                data: {
+                  status: "failed",
+                  finishedAt: reconcileNow,
+                  durationMs: reconcileNow.getTime() - latestLog.startedAt.getTime(),
+                  exitReason: "needs_review",
+                  errorMessage: "stuck-task reconciliation: session gone, no done-file — needs manual review",
+                },
+              });
+            }
+          });
+          emitAudit({
+            entityType: "task",
+            entityId: stuckTask.id,
+            eventType: "task.needs_review",
+            actorType: "poller",
+            payload: { reason: "stuck_task_reconciliation" },
+          }).catch(() => {});
+          emitNotification(stuckTask.id, "task.failed").catch(() => {});
+        } catch (err) {
+          console.error(`${TAG} Stuck-task reconciliation: failed to mark task ${stuckTask.id}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error(`${TAG} Stuck-task reconciliation threw:`, err);
+    }
+
+    // ── 2e. Stale-running agent reconciliation ────────────────────────────────
+    // When Claude self-reports task completion directly to the DB (via the psql
+    // finalization command in the dispatch prompt), the poller's pane scanner won't
+    // see a WORKERAI_RESULT block and won't release the agent.  This step detects
+    // agents whose DB status is "running" but have no running tasks, and resets
+    // them to idle with the standard cooldown so the next queued task can proceed.
+    try {
+      const staleRunningAgents = await prisma.agent.findMany({
+        where: {
+          status: "running",
+          tasks: { none: { status: "running" } },
+        },
+        select: { id: true, name: true },
+      });
+      for (const agent of staleRunningAgents) {
+        await prisma.agent.update({
+          where: { id: agent.id },
+          data: {
+            status: "idle",
+            cooldownUntil: new Date(Date.now() + AGENT_COOLDOWN_MS),
+          },
+        });
+        console.log(
+          `${TAG} Agent ${agent.name}: self-completed task detected — set idle + ${AGENT_COOLDOWN_MS / 1000}s cooldown`,
+        );
+      }
+    } catch (err) {
+      console.error(`${TAG} Stale-running agent reconciliation threw:`, err);
+    }
+
+    // ── 2f. Stale-pending alert ───────────────────────────────────────────────
+    // Alert when a task has been in pending status longer than the configured
+    // threshold without being dispatched. Deduplication: alert fires at most
+    // once per hour per task (lastStalePendingAlertAt gate).
+    try {
+      const thresholdRow = await prisma.systemConfig.findUnique({
+        where: { key: "stale_pending_alert_minutes" },
+        select: { value: true },
+      });
+      const thresholdMinutes = Math.max(1, parseInt(thresholdRow?.value ?? "60", 10) || 60);
+      const thresholdMs = thresholdMinutes * 60_000;
+      const dedupeMs    = 60 * 60_000; // re-alert at most once per hour
+
+      const staleCutoff  = new Date(Date.now() - thresholdMs);
+      const dedupeCutoff = new Date(Date.now() - dedupeMs);
+
+      const stalePending = await prisma.task.findMany({
+        where: {
+          status: "pending",
+          createdAt: { lte: staleCutoff },
+          OR: [
+            { lastStalePendingAlertAt: null },
+            { lastStalePendingAlertAt: { lte: dedupeCutoff } },
+          ],
+        },
+        select: {
+          id: true,
+          title: true,
+          projectId: true,
+          createdAt: true,
+          project: { select: { name: true } },
+        },
+      });
+
+      for (const t of stalePending) {
+        const pendingMinutes = Math.round((Date.now() - t.createdAt.getTime()) / 60_000);
+        console.log(`${TAG} Stale-pending alert: task "${t.id}" (${t.title}) pending ${pendingMinutes}m`);
+        await prisma.task.update({
+          where: { id: t.id },
+          data: { lastStalePendingAlertAt: new Date() },
+        });
+        emitStalePendingNotification({
+          taskId: t.id,
+          title: t.title,
+          projectId: t.projectId,
+          projectName: t.project?.name ?? null,
+          pendingMinutes,
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.error(`${TAG} Stale-pending alert threw:`, err);
+    }
+
     // ── 3. Start queued server-direct tasks on servers with capacity ─────────
-    // Per-task sessions allow parallel execution — no idle check needed.
-    // Dispatch any queued task as long as the server's usage is under threshold.
+    // Dispatch any queued task into the server's long-lived Claude tmux session
+    // as long as the server's usage is under threshold.
     // Servers confirmed offline this cycle are skipped.
     let serversWithQueue: {
       id: string;
@@ -1370,6 +1806,7 @@ function startPoller() {
       port: number;
       username: string;
       sshKeyPath: string;
+      tmuxSession: string;
       claudePermissionMode: string;
       claudeSessionPct: number | null;
       claudeWeekPct: number | null;
@@ -1392,6 +1829,7 @@ function startPoller() {
           port: true,
           username: true,
           sshKeyPath: true,
+          tmuxSession: true,
           claudePermissionMode: true,
           claudeSessionPct: true,
           claudeWeekPct: true,
@@ -1479,6 +1917,7 @@ function startPoller() {
           taskId: nextTask.id,
           serverId: srv.id,
           sshConfig: { host: srv.host, port: srv.port, username: srv.username, sshKeyPath: srv.sshKeyPath },
+          tmuxSession: srv.tmuxSession,
           permissionMode: srv.claudePermissionMode as ClaudePermissionMode,
           task: { title: nextTask.title, description: nextTask.description, projectName: nextTask.project.name },
           logText: `Auto-started from queue on server "${srv.name}" (${srv.host}) — mode: ${srv.claudePermissionMode}`,
@@ -1521,6 +1960,7 @@ function startPoller() {
       autoPauseEnabled: boolean;
       pausedDueToUsage: boolean;
       maxConcurrentTasks: number;
+      cooldownUntil: Date | null;
       server: {
         host: string;
         port: number;
@@ -1533,7 +1973,11 @@ function startPoller() {
       idleAgentsWithQueue = await prisma.agent.findMany({
         where: {
           tasks: { some: { status: "queued" } },
-          AND: { tasks: { none: { status: "running" } } },
+          AND: [
+            { tasks: { none: { status: "running" } } },
+            // Skip agents still within their post-completion cooldown window.
+            { OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: new Date() } }] },
+          ],
           // Skip agents already handled by the completion loop above,
           // and agents confirmed offline this cycle.
           NOT: { id: { in: [...byAgent.keys(), ...offlineAgentIds] } },
@@ -1551,6 +1995,8 @@ function startPoller() {
           autoPauseEnabled: true,
           pausedDueToUsage: true,
           maxConcurrentTasks: true,
+          tags: true,
+          cooldownUntil: true,
           server: {
             select: { host: true, port: true, username: true, sshKeyPath: true },
           },
@@ -1651,10 +2097,22 @@ function startPoller() {
               OR: [{ retryAfter: null }, { retryAfter: { lte: new Date() } }],
             },
             orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
-            include: { project: { select: { name: true } } },
+            select: {
+              id: true, title: true, description: true, priority: true,
+              requiredTags: true,
+              retryAfter: true, blockedByCount: true,
+              project: { select: { name: true } },
+            },
           });
 
           if (!nextTask) break;
+
+          // Skip tasks whose required capability tags are not met by this agent.
+          const agentTagSet = new Set((agent as { tags?: string[] }).tags ?? []);
+          if (nextTask.requiredTags.some((t) => !agentTagSet.has(t))) {
+            console.log(`${TAG} Task ${nextTask.id} ("${nextTask.title}"): skipped — agent missing required tags [${nextTask.requiredTags.filter((t) => !agentTagSet.has(t)).join(", ")}]`);
+            break;
+          }
 
           if (shouldSkipDueToBackoff(nextTask.id, backoff)) {
             console.log(
@@ -1730,6 +2188,59 @@ function startPoller() {
       } catch (err) {
         console.error(`${TAG} Auto-recovery sweep threw:`, err);
       }
+
+      // ── 6b. Orphaned per-task session cleanup ──────────────────────────────
+      // Per-task tmux sessions (claude_<taskId>) must be killed when their task
+      // reaches a terminal state.  Several failure modes leave them alive:
+      //   • killTaskTmuxSession SSH error (.catch swallowed, no retry)
+      //   • Manual PUT /status transition — that route has no SSH config and
+      //     never calls killTaskTmuxSession
+      //   • Poller crash between the DB write and the kill call
+      //
+      // This sweep finds every terminal task with taskTmuxSession still set,
+      // kills the session idempotently (tmux kill-session ... || true), then
+      // clears the DB field so the task won't appear again next sweep.
+      //
+      // Long-lived agent sessions (claude-agent-1, etc.) use a hyphen separator
+      // and are never recorded in taskTmuxSession, so they are never touched here.
+      try {
+        const orphanedSessions = await prisma.task.findMany({
+          where: {
+            taskTmuxSession: { not: null },
+            status: { in: ["completed", "failed", "needs_review", "archived"] },
+          },
+          select: {
+            id: true,
+            status: true,
+            taskTmuxSession: true,
+            server: { select: { host: true, port: true, username: true, sshKeyPath: true } },
+            agent: { select: { server: { select: { host: true, port: true, username: true, sshKeyPath: true } } } },
+          },
+          take: 100,
+        });
+
+        if (orphanedSessions.length > 0) {
+          console.log(`${TAG} Orphaned session cleanup: ${orphanedSessions.length} terminal task(s) still have taskTmuxSession set`);
+          for (const t of orphanedSessions) {
+            const sshCfg = t.server ?? t.agent?.server ?? null;
+            if (sshCfg) {
+              await killTaskTmuxSession(sshCfg, t.id).catch(() => {});
+            }
+            // Clear the field so this task won't re-appear in future sweeps.
+            // If this update fails the sweep will simply retry the kill next cycle
+            // (killTaskTmuxSession is idempotent — tmux kill-session ... || true).
+            await prisma.task.update({
+              where: { id: t.id },
+              data: { taskTmuxSession: null },
+            }).catch((err) => {
+              console.error(`${TAG} Orphaned session cleanup: failed to clear taskTmuxSession for task ${t.id}:`, err);
+            });
+            console.log(`${TAG} Orphaned session cleanup: killed session for task "${t.id}" (${t.status})`);
+          }
+        }
+      } catch (err) {
+        console.error(`${TAG} Orphaned session cleanup threw:`, err);
+      }
     }
 
     // ── 7. Project progress reconciliation (every 10 cycles ≈ 10 min) ────────
@@ -1741,7 +2252,7 @@ function startPoller() {
       }
     }
 
-    // ── 8. Nightly log archival (1 AM UTC, once per day) ─────────────────────
+    // ── 8. Nightly log archival + table pruning (1 AM UTC, once per day) ────
     if (shouldRunNightlyArchival(g._lastArchivalDate ?? null)) {
       try {
         const { archived } = await archiveOldLogs();
@@ -1751,6 +2262,11 @@ function startPoller() {
         }
       } catch (err) {
         console.error(`${TAG} Nightly log archival threw:`, err);
+      }
+      try {
+        await pruneHighVolumeTables();
+      } catch (err) {
+        console.error(`${TAG} Nightly table pruning threw:`, err);
       }
     }
 

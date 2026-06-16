@@ -31,7 +31,13 @@ import {
   detectCompletionBlock,
 } from "@/lib/usage-parser";
 import { buildDispatchPrompt, type DispatchTask } from "@/lib/prompt-sanitiser";
-import { COMPLETION_SCAN_LINES } from "@/lib/constants";
+import { COMPLETION_SCAN_LINES, RUN_DIR } from "@/lib/constants";
+import {
+  buildWrapperScript,
+  claudeFlagsForMode,
+  promptFilePath,
+  wrapperScriptPath,
+} from "@/lib/wrapper-script";
 
 export type { ClaudeUsageParsed };
 
@@ -577,6 +583,89 @@ export async function killTaskTmuxSession(
   } catch { /* non-fatal */ }
 }
 
+// ─── Wrapper-based task session (durable completion) ─────────────────────────
+
+export interface WrappedSessionResult {
+  success: boolean;
+  sessionName: string;
+  error?: string;
+}
+
+/**
+ * Creates an isolated tmux session for a task and runs a wrapper script inside
+ * it.  The wrapper invokes Claude in non-interactive print mode (`claude --print`)
+ * and writes a JSON done-file when Claude exits, enabling durable file-based
+ * completion detection instead of fragile pane-scanning.
+ *
+ * Steps performed via a single SSH chain:
+ *   1. mkdir -p /tmp/workerai-runs
+ *   2. Write the task prompt to <runId>.prompt (base64-encoded for safety)
+ *   3. Write the wrapper script to wrapper_<runId>.sh and chmod +x
+ *   4. Create the tmux session (claude_<taskId>)
+ *   5. Start the wrapper inside the session
+ *
+ * Returns the session name on success so callers can store it in taskTmuxSession.
+ */
+export async function createAndLaunchWrappedSession(
+  config: SSHConfig,
+  opts: {
+    taskId: string;
+    /** Empty string for server-direct tasks. */
+    agentId: string;
+    runId: string;
+    mode: ClaudePermissionMode;
+    promptText: string;
+    workDir?: string;
+  },
+): Promise<WrappedSessionResult> {
+  const sessionName = taskTmuxSessionName(opts.taskId);
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+
+  const flags   = claudeFlagsForMode(opts.mode);
+  const script  = buildWrapperScript({
+    taskId:      opts.taskId,
+    agentId:     opts.agentId,
+    runId:       opts.runId,
+    claudeFlags: flags,
+    workDir:     opts.workDir,
+  });
+
+  const promptFile  = promptFilePath(opts.runId);
+  const scriptFile  = wrapperScriptPath(opts.runId);
+
+  // Base64-encode both the prompt and wrapper to avoid quoting issues over SSH.
+  const promptB64 = Buffer.from(opts.promptText, "utf8").toString("base64");
+  const scriptB64 = Buffer.from(script, "utf8").toString("base64");
+
+  const cmd = [
+    `mkdir -p "${RUN_DIR}"`,
+    // Write prompt file
+    `printf '%s' '${promptB64}' | base64 -d > "${promptFile}"`,
+    // Write and permission the wrapper
+    `printf '%s' '${scriptB64}' | base64 -d > "${scriptFile}"`,
+    `chmod +x "${scriptFile}"`,
+    // Create the tmux session and start the wrapper
+    `tmux new-session -d -s ${sessionName}`,
+    `tmux send-keys -t ${sessionName} '${scriptFile}' Enter`,
+  ].join(" && ");
+
+  try {
+    await execSSH(ssh, cmd, 20_000);
+    return { success: true, sessionName };
+  } catch (err) {
+    return {
+      success: false,
+      sessionName,
+      error: `Failed to create wrapped session: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 // ─── Detect if Claude is idle (waiting for input) ────────────────────────────
 
 export interface ClaudeIdleResult {
@@ -713,9 +802,10 @@ export async function detectTaskCompletion(
     sshKeyPath: config.sshKeyPath,
   };
 
-  // Capture enough scrollback to cover from outputOffset onward.
+  // Capture enough scrollback to cover from outputOffset onward plus Claude's response.
+  // Use a 500-line window past the offset (up from 200) so longer responses are included.
   const captureDepth = (outputOffset !== undefined && outputOffset > 0)
-    ? Math.min(outputOffset + 200, 5000)
+    ? Math.min(outputOffset + 500, 10_000)
     : COMPLETION_SCAN_LINES;
 
   try {
@@ -744,7 +834,16 @@ export async function detectTaskCompletion(
     let scanText: string;
     if (outputOffset !== undefined && outputOffset > 0) {
       const lines = pane.split("\n");
-      scanText = lines.length > outputOffset ? lines.slice(outputOffset).join("\n") : "";
+      if (lines.length > outputOffset) {
+        scanText = lines.slice(outputOffset).join("\n");
+      } else {
+        // Offset exceeds captured lines — the pane grew less than expected
+        // (e.g., Claude wrote a very short response). Fall back to the last
+        // 100 lines: the completion block is always near the end of Claude's
+        // response, and the nonce+taskId match prevents false-positives from
+        // the prompt template which sits further back in the pane.
+        scanText = lines.slice(-100).join("\n");
+      }
     } else {
       scanText = pane;
     }
@@ -856,19 +955,21 @@ export async function sendTaskToTmux(
   config: SSHConfig,
   task: DispatchTask,
   tmuxSession: string,
+  envVars?: Record<string, string>,
 ): Promise<{ success: boolean; outputOffset?: number; error?: string }> {
   const promptText = buildDispatchPrompt(task);
   const promptLineCount = promptText.split("\n").length;
 
+  const ssh = {
+    host: config.host,
+    port: config.port,
+    username: config.username,
+    sshKeyPath: config.sshKeyPath,
+  };
+
   // Capture pre-dispatch line count so we can skip old content when checking completion.
   let outputOffset: number | undefined;
   try {
-    const ssh = {
-      host: config.host,
-      port: config.port,
-      username: config.username,
-      sshKeyPath: config.sshKeyPath,
-    };
     const { stdout } = await execSSH(
       ssh,
       `tmux capture-pane -t ${tmuxSession} -p -S -${COMPLETION_SCAN_LINES} 2>/dev/null | wc -l`,
@@ -876,10 +977,24 @@ export async function sendTaskToTmux(
     );
     const preLines = parseInt(stdout.trim(), 10);
     if (!isNaN(preLines)) {
-      // +40 safety buffer covers terminal line-wrapping of the prompt text.
-      outputOffset = preLines + promptLineCount + 40;
+      outputOffset = preLines + promptLineCount + 5;
     }
   } catch { /* non-fatal — proceed without offset */ }
+
+  // Inject task-specific env vars before the prompt so Claude can read them.
+  if (envVars && Object.keys(envVars).length > 0) {
+    const exportCmd = Object.entries(envVars)
+      .map(([k, v]) => {
+        const escaped = v.replace(/'/g, "'\\''");
+        return `export ${k}='${escaped}'`;
+      })
+      .join(" && ");
+    await execSSH(
+      ssh,
+      `tmux send-keys -t ${tmuxSession} ${JSON.stringify(exportCmd)} Enter`,
+      5_000,
+    ).catch(() => { /* non-fatal */ });
+  }
 
   const result = await sendRawPromptToTmux(config, promptText, tmuxSession);
   return { ...result, outputOffset };

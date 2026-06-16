@@ -620,3 +620,103 @@ export async function emitDiskFullNotification(
     console.warn("[notification] Disk-full webhook error:", err);
   }
 }
+
+// ─── Stale-pending task ───────────────────────────────────────────────────────
+
+export interface StalePendingPayload {
+  event: "task.stale_pending";
+  taskId: string;
+  title: string;
+  projectId: string;
+  projectName: string | null;
+  pendingMinutes: number;
+  timestamp: string;
+}
+
+function formatDiscordStalePending(p: StalePendingPayload): object {
+  return {
+    embeds: [
+      {
+        title: `⏳ Task Stale (pending ${p.pendingMinutes}m): ${p.title}`,
+        color: 0xf59e0b,
+        fields: [
+          { name: "Project", value: p.projectName ?? "(none)", inline: true },
+          { name: "Pending for", value: `${p.pendingMinutes} minutes`, inline: true },
+        ],
+        footer: { text: `taskId: ${p.taskId}` },
+        timestamp: p.timestamp,
+      },
+    ],
+  };
+}
+
+function formatSlackStalePending(p: StalePendingPayload): object {
+  return {
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `:hourglass_flowing_sand: *Task Stale (pending ${p.pendingMinutes}m)*\n${p.title}`,
+        },
+      },
+      {
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: [
+              p.projectName && `Project: *${p.projectName}*`,
+              `taskId: \`${p.taskId}\``,
+            ].filter(Boolean).join(" · "),
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Fire-and-forget stale-pending webhook alert. Call with `.catch(() => {})`.
+ */
+export async function emitStalePendingNotification(opts: {
+  taskId: string;
+  title: string;
+  projectId: string;
+  projectName: string | null;
+  pendingMinutes: number;
+}): Promise<void> {
+  try {
+    const cfg = await getWebhookConfig();
+    if (!cfg) return;
+
+    const full: StalePendingPayload = {
+      event: "task.stale_pending",
+      ...opts,
+      timestamp: new Date().toISOString(),
+    };
+
+    let body: string;
+    if (cfg.url.includes("discord.com/api/webhooks")) {
+      body = JSON.stringify(formatDiscordStalePending(full));
+    } else if (cfg.url.includes("hooks.slack.com") || cfg.url.includes("slack.com/services")) {
+      body = JSON.stringify(formatSlackStalePending(full));
+    } else {
+      body = JSON.stringify(full);
+    }
+
+    const tsMs = Date.now();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": "WorkerAI-Webhook/1.0",
+      "X-Webhook-Event": "task.stale_pending",
+      "X-Webhook-Timestamp": String(tsMs),
+    };
+    if (cfg.secret) {
+      headers["X-Webhook-Signature"] = `sha256=${signPayload(body, cfg.secret, tsMs)}`;
+    }
+    await fireWebhook(cfg, body, headers, "task.stale_pending");
+  } catch (err) {
+    console.warn("[notification] Stale-pending webhook error:", err);
+  }
+}
