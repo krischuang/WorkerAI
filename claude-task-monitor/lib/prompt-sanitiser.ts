@@ -16,7 +16,6 @@ import {
   COMPLETION_BLOCK_END,
   VALIDATION_BLOCK_START,
   VALIDATION_BLOCK_END,
-  AGENT_DATABASE_URL,
 } from "@/lib/constants";
 
 /** Encode all XML special characters so user content cannot break out of its XML fence. */
@@ -63,7 +62,8 @@ export function buildDispatchPrompt(task: DispatchTask): string {
 
   if (task.projectName?.trim()) {
     lines.push(
-      `Find the directory for project "${task.projectName.trim()}", cd into it, then complete the task.`,
+      "Find the directory for the project named in the tag below, cd into it, then complete the task.",
+      wrapInTag("project_name", task.projectName.trim()),
       ""
     );
   }
@@ -108,29 +108,6 @@ export function buildDispatchPrompt(task: DispatchTask): string {
     `nonce: ${task.nonce}`,
     COMPLETION_BLOCK_END,
   );
-
-  // DB self-update: give Claude a direct way to finalize the task status.
-  // AGENT_DATABASE_URL must be set to the DB host reachable from agent servers.
-  if (AGENT_DATABASE_URL) {
-    const db = AGENT_DATABASE_URL;
-    const id = task.taskId;
-    lines.push(
-      "",
-      "After printing the block above, finalize this task in the WorkerAI database by",
-      "running ONE of the following psql commands (choose based on your outcome):",
-      "",
-      "Completed successfully:",
-      `  psql "${db}" -c "UPDATE \\"Task\\" SET status = 'completed', \\"updatedAt\\" = NOW() WHERE id = '${id}';"`,
-      "",
-      "Could not complete:",
-      `  psql "${db}" -c "UPDATE \\"Task\\" SET status = 'failed', \\"updatedAt\\" = NOW() WHERE id = '${id}';"`,
-      "",
-      "Uncertain / needs human review:",
-      `  psql "${db}" -c "UPDATE \\"Task\\" SET status = 'needs_review', \\"updatedAt\\" = NOW() WHERE id = '${id}';"`,
-      "",
-      "(If psql is unavailable or fails, the WorkerAI monitor will reconcile status from the block above.)",
-    );
-  }
 
   return lines.join("\n");
 }

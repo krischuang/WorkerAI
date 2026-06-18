@@ -148,8 +148,8 @@ function buildReviewPrompt(
     "",
     xmlList("open_debt_items", signals.debtItems.map((d) => `${d.title} (${d.category}, ${d.severity})`)),
     "",
-    "Database connection string:",
-    `DATABASE_URL="${dbUrl}"`,
+    "Database connection string (restricted role — INSERT on TaskSuggestion only):",
+    dbUrl ? `CLAUDE_SCAN_DB_URL="${dbUrl}"` : "(no restricted DB URL configured — skip database operations)",
     "",
     `Table: "TaskSuggestion"`,
     "Columns to populate for each suggestion:",
@@ -233,7 +233,9 @@ export async function runImprovementReview(
   });
 
   const ssh: SSHConfig = { host: server.host, port: server.port, username: server.username, sshKeyPath: server.sshKeyPath };
-  const dbUrl = process.env.CLAUDE_SCAN_DB_URL ?? process.env.DATABASE_URL ?? "";
+  // Use a restricted DB URL with minimum write permissions (INSERT on TaskSuggestion only).
+  // Never fall back to DATABASE_URL — admin credentials must not reach agent prompts.
+  const dbUrl = process.env.CLAUDE_SCAN_DB_URL ?? "";
   const prompt = buildReviewPrompt(projectId, scan.id, project.name, project, signals, dbUrl);
 
   type LockOutcome =
