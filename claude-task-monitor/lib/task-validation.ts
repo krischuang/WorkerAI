@@ -6,6 +6,8 @@
  *   POST   /api/tasks              → validateTaskCreate
  *   PUT    /api/tasks/[id]         → validateTaskUpdate
  *   PUT    /api/tasks/[id]/status  → validateStatusUpdate
+ *   POST   /api/agents             → validateTmuxSession, validateWorkDir
+ *   PUT    /api/agents/[id]        → validateTmuxSession, validateWorkDir
  */
 
 import { Priority, TaskStatus, CostLevel, TaskType } from "@/app/generated/prisma/enums";
@@ -18,6 +20,44 @@ const VALID_COST_LEVELS = new Set<string>(Object.values(CostLevel));
 const VALID_TASK_TYPES  = new Set<string>(Object.values(TaskType));
 
 export { VALID_PRIORITIES, VALID_STATUSES, VALID_COST_LEVELS, VALID_TASK_TYPES };
+
+// ─── tmuxSession and workDir validators ──────────────────────────────────────
+
+/** Allowed tmux session name characters: alphanumeric, dot, underscore, hyphen. Max 64 chars. */
+export const TMUX_SESSION_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+
+/** Allowed working directory: absolute path, no quotes, no shell metacharacters. Max 255 chars. */
+export const WORK_DIR_PATTERN = /^\/[a-zA-Z0-9._\-/]{0,254}$/;
+
+/**
+ * Validates a tmux session name.
+ * Rejects any value that could be used for command injection when the name is
+ * interpolated into shell commands like `tmux has-session -t <session>`.
+ */
+export function validateTmuxSession(value: unknown): ValidationError | null {
+  if (typeof value !== "string" || !TMUX_SESSION_PATTERN.test(value)) {
+    return {
+      field: "tmuxSession",
+      message: "tmuxSession must contain only alphanumeric characters, dots, underscores, or hyphens (max 64 chars)",
+    };
+  }
+  return null;
+}
+
+/**
+ * Validates a working directory path.
+ * Rejects relative paths, quotes, and shell metacharacters to prevent
+ * command injection when the value is used in shell scripts or SSH commands.
+ */
+export function validateWorkDir(value: unknown): ValidationError | null {
+  if (typeof value !== "string" || !WORK_DIR_PATTERN.test(value)) {
+    return {
+      field: "workDir",
+      message: "workDir must be an absolute path containing only alphanumeric characters, dots, hyphens, underscores, or slashes (max 255 chars)",
+    };
+  }
+  return null;
+}
 
 /** Valid range for timeoutMinutes: 1 – 1440 (1 minute to 24 hours). */
 export const TIMEOUT_MINUTES_MIN = 1;

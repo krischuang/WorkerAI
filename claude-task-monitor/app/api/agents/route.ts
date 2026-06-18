@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
+import { validateTmuxSession, validateWorkDir } from "@/lib/task-validation";
 
 export async function GET(request: NextRequest) {
   try {
@@ -58,6 +59,12 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const tmuxErr = validateTmuxSession(tmuxSession);
+    if (tmuxErr) return NextResponse.json({ error: tmuxErr.message }, { status: 400 });
+
+    const workDirErr = validateWorkDir(workDir);
+    if (workDirErr) return NextResponse.json({ error: workDirErr.message }, { status: 400 });
 
     const server = await prisma.server.findUnique({ where: { id: serverId } });
     if (!server) {

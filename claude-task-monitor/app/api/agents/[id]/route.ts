@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
+import { validateTmuxSession, validateWorkDir } from "@/lib/task-validation";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -39,6 +40,16 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       if (!Array.isArray(tags) || tags.some((t) => typeof t !== "string" || t.trim() === "")) {
         return NextResponse.json({ error: "tags must be an array of non-empty strings" }, { status: 400 });
       }
+    }
+
+    if (tmuxSession !== undefined) {
+      const tmuxErr = validateTmuxSession(tmuxSession);
+      if (tmuxErr) return NextResponse.json({ error: tmuxErr.message }, { status: 400 });
+    }
+
+    if (workDir !== undefined) {
+      const workDirErr = validateWorkDir(workDir);
+      if (workDirErr) return NextResponse.json({ error: workDirErr.message }, { status: 400 });
     }
 
     const agent = await prisma.agent.update({
