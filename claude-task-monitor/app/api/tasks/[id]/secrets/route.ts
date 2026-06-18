@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { encryptSecret } from "@/lib/task-secrets";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -14,8 +15,11 @@ export async function GET(_req: NextRequest, ctx: Ctx): Promise<NextResponse> {
   return NextResponse.json(secrets);
 }
 
-export async function POST(req: NextRequest, ctx: Ctx): Promise<NextResponse> {
+export async function POST(req: NextRequest, ctx: Ctx): Promise<NextResponse | Response> {
   const { id } = await ctx.params;
+
+  const rl = apiRateLimit(`task:secrets:${id}`, 20, 60_000);
+  if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
 
   if (!process.env.TASK_SECRET_KEY) {
     return NextResponse.json(

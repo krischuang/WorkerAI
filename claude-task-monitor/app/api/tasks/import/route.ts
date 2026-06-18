@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { VALID_PRIORITIES, VALID_COST_LEVELS, VALID_TASK_TYPES } from "@/lib/task-validation";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import type { NextRequest } from "next/server";
 
 // ── CSV parser (RFC 4180) ─────────────────────────────────────────────────────
@@ -72,6 +73,9 @@ function parseCSV(text: string): string[][] {
  */
 export async function POST(request: NextRequest) {
   try {
+    const rl = apiRateLimit("task:import", 5, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
     const { searchParams } = new URL(request.url);
     const projectId = searchParams.get("projectId");
 

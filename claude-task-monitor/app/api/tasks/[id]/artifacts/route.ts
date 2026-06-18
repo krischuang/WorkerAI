@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import fs from "fs";
 import path from "path";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 
 // Max upload size: 50 MB
 const MAX_BYTES = 50 * 1024 * 1024;
@@ -53,8 +54,11 @@ async function getTotalCapMb(): Promise<number> {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TOTAL_CAP_MB;
 }
 
-export async function POST(req: NextRequest, ctx: Ctx): Promise<NextResponse> {
+export async function POST(req: NextRequest, ctx: Ctx): Promise<NextResponse | Response> {
   const { id } = await ctx.params;
+
+  const rl = apiRateLimit(`task:artifacts:${id}`, 10, 60_000);
+  if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
 
   const task = await prisma.task.findUnique({ where: { id }, select: { id: true } });
   if (!task) return NextResponse.json({ error: "Task not found" }, { status: 404 });
