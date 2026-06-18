@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
+import { emitAudit } from "@/lib/audit";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -13,6 +15,9 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function POST(_req: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+
+    const rl = apiRateLimit(`task:clone:${id}`, 10, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
 
     const source = await prisma.task.findUnique({
       where: { id },
@@ -45,6 +50,14 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
         status:            "pending",
       },
       select: { id: true, title: true },
+    });
+
+    await emitAudit({
+      entityType: "Task",
+      entityId: clone.id,
+      eventType: "task.cloned",
+      actorType: "user",
+      payload: { sourceTaskId: id },
     });
 
     return Response.json(clone, { status: 201 });
