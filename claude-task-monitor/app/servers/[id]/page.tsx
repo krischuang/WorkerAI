@@ -5,23 +5,6 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { BackLink, LoadingState, Modal, Btn, ModalActions, FormField, inputCls } from "@/app/_components/ui";
 
-interface ClaudeUsageParsed {
-  sessionPct?: number;
-  sessionResets?: string;
-  weekPct?: number;
-  weekResets?: string;
-}
-
-type ClaudeUsageStatus = "ok" | "auth_required" | "rate_limited" | "offline" | "error";
-
-interface UsageData {
-  success: boolean;
-  status: ClaudeUsageStatus;
-  rawOutput: string;
-  parsed: ClaudeUsageParsed;
-  error?: string;
-}
-
 interface CommandLog {
   id: string;
   command: string;
@@ -84,14 +67,6 @@ interface CommandOutput {
   errorMessage: string | null;
 }
 
-interface TerminalEntry {
-  id: number;
-  command: string;
-  status: "running" | "success" | "failed";
-  output?: string;
-  errorMessage?: string | null;
-}
-
 const CHECK_GROUPS = [
   { label: "System Info", commands: ["whoami", "hostname", "uptime", "df -h", "free -m"] as const },
   { label: "Node.js", commands: ["node -v", "npm -v"] as const },
@@ -149,24 +124,6 @@ export default function ServerDetailPage() {
   const [logsInitialized, setLogsInitialized] = useState(false);
   const logsSectionRef = useRef<HTMLElement>(null);
 
-  // Claude Usage state
-  const [usageData, setUsageData] = useState<UsageData | null>(null);
-  const [usageLoading, setUsageLoading] = useState(false);
-  const [usageFetchedAt, setUsageFetchedAt] = useState<Date | null>(null);
-  const usageAutoFetchedRef = useRef(false);
-
-  // Terminal state
-  const [termInput, setTermInput] = useState("");
-  const [termRunning, setTermRunning] = useState(false);
-  const [termElapsed, setTermElapsed] = useState(0);
-  const [termHistory, setTermHistory] = useState<TerminalEntry[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const termBottomRef = useRef<HTMLDivElement>(null);
-  const termInputRef = useRef<HTMLInputElement>(null);
-  const termCounter = useRef(0);
-  const elapsedTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-
   const loadServer = useCallback(() => {
     fetch(`/api/servers/${id}`)
       .then((r) => {
@@ -184,21 +141,6 @@ export default function ServerDetailPage() {
           sshKeyPath: data.sshKeyPath,
           claudePermissionMode: data.claudePermissionMode ?? "workspace_write",
         });
-        // Seed usage display from persisted DB fields (no wait needed on page load)
-        if (data.claudeUsageFetchedAt && !usageAutoFetchedRef.current) {
-          setUsageData({
-            success: true,
-            status: "ok",
-            rawOutput: data.claudeUsageRaw ?? "",
-            parsed: {
-              sessionPct:    data.claudeSessionPct ?? undefined,
-              sessionResets: data.claudeSessionResets ?? undefined,
-              weekPct:       data.claudeWeekPct ?? undefined,
-              weekResets:    data.claudeWeekResets ?? undefined,
-            },
-          });
-          setUsageFetchedAt(new Date(data.claudeUsageFetchedAt));
-        }
       });
   }, [id, router]);
 
@@ -266,49 +208,6 @@ export default function ServerDetailPage() {
     obs.observe(el);
     return () => obs.disconnect();
   }, [logsInitialized, loadLogs]);
-
-  // Auto-fetch Claude usage once if there is no persisted data yet
-  useEffect(() => {
-    if (server?.status === "connected" && !usageAutoFetchedRef.current && !server.claudeUsageFetchedAt) {
-      usageAutoFetchedRef.current = true;
-      fetchClaudeUsage();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server?.status]);
-
-  async function fetchClaudeUsage() {
-    setUsageLoading(true);
-    try {
-      const res = await fetch(`/api/servers/${id}/claude-usage`, { method: "POST" });
-      let result: UsageData = await res.json();
-      // If auth_required on first attempt, wait and retry once — it may be a
-      // transient false positive from stale pane content after a session restart.
-      if (!result.success && result.status === "auth_required") {
-        await new Promise<void>((resolve) => setTimeout(resolve, 4_000));
-        const retryRes = await fetch(`/api/servers/${id}/claude-usage`, { method: "POST" });
-        const retryResult: UsageData = await retryRes.json();
-        if (retryResult.success || retryResult.status !== "auth_required") {
-          result = retryResult;
-        }
-      }
-      setUsageData(result);
-      setUsageFetchedAt(new Date());
-    } catch {
-      setUsageData({
-        success: false,
-        status: "error",
-        rawOutput: "",
-        parsed: {},
-        error: "Request failed — check the server connection.",
-      });
-    } finally {
-      setUsageLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    termBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [termHistory]);
 
   async function launchClaudeSession() {
     setLaunching(true);
@@ -402,87 +301,7 @@ export default function ServerDetailPage() {
     loadServer();
   }
 
-  async function handleTermSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const cmd = termInput.trim();
-    if (!cmd) return;
-
-    const entryId = ++termCounter.current;
-    setTermHistory((prev) => [...prev, { id: entryId, command: cmd, status: "running" }]);
-    setTermInput("");
-    setHistoryIndex(-1);
-    setTermRunning(true);
-    setTermElapsed(0);
-    elapsedTimer.current = setInterval(() => setTermElapsed((s) => s + 1), 1000);
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    function stopTimer() {
-      if (elapsedTimer.current) clearInterval(elapsedTimer.current);
-      setTermRunning(false);
-      setTermElapsed(0);
-      abortRef.current = null;
-    }
-
-    try {
-      const res = await fetch(`/api/servers/${id}/exec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: cmd }),
-        signal: controller.signal,
-      });
-      const result = await res.json();
-      setTermHistory((prev) =>
-        prev.map((e) =>
-          e.id === entryId
-            ? { ...e, status: result.status, output: result.output, errorMessage: result.errorMessage }
-            : e
-        )
-      );
-    } catch (err) {
-      const cancelled = err instanceof DOMException && err.name === "AbortError";
-      setTermHistory((prev) =>
-        prev.map((e) =>
-          e.id === entryId
-            ? {
-                ...e,
-                status: "failed" as const,
-                errorMessage: cancelled ? "Cancelled" : String(err),
-              }
-            : e
-        )
-      );
-    } finally {
-      stopTimer();
-      loadServer();
-      if (logsInitialized) loadLogs();
-      termInputRef.current?.focus();
-    }
-  }
-
-  function handleForceStop() {
-    abortRef.current?.abort();
-  }
-
-  function handleTermKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    const cmds = termHistory.map((h) => h.command);
-    if (e.key === "ArrowUp") {
-      e.preventDefault();
-      const nextIdx = Math.min(historyIndex + 1, cmds.length - 1);
-      setHistoryIndex(nextIdx);
-      setTermInput(cmds[cmds.length - 1 - nextIdx] ?? "");
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      const nextIdx = Math.max(historyIndex - 1, -1);
-      setHistoryIndex(nextIdx);
-      setTermInput(nextIdx === -1 ? "" : (cmds[cmds.length - 1 - nextIdx] ?? ""));
-    }
-  }
-
   if (!server) return <LoadingState />;
-
-  const promptLabel = `${server.username}@${server.host}`;
 
 
   return (
@@ -646,206 +465,6 @@ export default function ServerDetailPage() {
             </div>
           )}
         </div>
-      </section>
-
-      {/* ── Claude Usage ── */}
-      <section className="mb-6">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Claude Usage</h2>
-          <div className="flex items-center gap-3">
-            {usageFetchedAt && (
-              <span className="text-xs text-zinc-500">
-                fetched {usageFetchedAt.toLocaleTimeString()}
-              </span>
-            )}
-            <Btn
-              variant="secondary"
-              size="sm"
-              disabled={usageLoading}
-              onClick={fetchClaudeUsage}
-            >
-              {usageLoading ? "Fetching…" : "Refresh"}
-            </Btn>
-          </div>
-        </div>
-
-        {/* Status banners */}
-        {usageData && !usageData.success && usageData.status === "auth_required" && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3 text-sm text-amber-800">
-            <span className="font-semibold">Claude CLI is not authenticated.</span>{" "}
-            If Claude was recently restarted this may be a transient glitch — try{" "}
-            <button
-              onClick={fetchClaudeUsage}
-              disabled={usageLoading}
-              className="underline font-semibold disabled:opacity-50"
-            >
-              refreshing again
-            </button>
-            . If it persists, SSH in and run{" "}
-            <code className="font-mono bg-amber-100 px-1 rounded">claude login</code>.
-          </div>
-        )}
-        {usageData && !usageData.success && usageData.status === "offline" && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3 text-sm text-amber-800">
-            <p className="font-semibold mb-1.5">tmux session not found.</p>
-            <p className="mb-1">Run once on the server to set it up:</p>
-            <pre className="bg-amber-100 rounded p-2 text-xs font-mono whitespace-pre-wrap">
-              {`tmux new-session -d -s claude\ntmux send-keys -t claude 'claude' Enter`}
-            </pre>
-          </div>
-        )}
-        {usageData && !usageData.success && usageData.status === "rate_limited" && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3 text-sm text-amber-800">
-            <span className="font-semibold">Rate limited.</span> Wait a moment and try again.
-          </div>
-        )}
-
-        <div className="bg-zinc-950 rounded-xl border border-zinc-800 overflow-hidden">
-          {/* ── Usage meters ── */}
-          {usageData?.success && (() => {
-            const { sessionPct, sessionResets, weekPct, weekResets } = usageData.parsed;
-            const meters = [
-              { label: "Current session", pct: sessionPct, resets: sessionResets },
-              { label: "Current week", pct: weekPct, resets: weekResets },
-            ].filter((m) => m.pct !== undefined);
-
-            if (meters.length === 0) return null;
-
-            return (
-              <div className="grid grid-cols-2 gap-px bg-zinc-800 border-b border-zinc-800">
-                {meters.map(({ label, pct, resets }) => {
-                  const p = pct ?? 0;
-                  const barColor =
-                    p >= 90 ? "bg-red-500" :
-                    p >= 70 ? "bg-amber-500" :
-                    "bg-green-500";
-                  return (
-                    <div key={label} className="bg-zinc-900 px-4 py-3">
-                      <p className="text-xs text-zinc-500 font-mono mb-2">{label}</p>
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <div className="flex-1 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all ${barColor}`}
-                            style={{ width: `${Math.min(p, 100)}%` }}
-                          />
-                        </div>
-                        <span className={`text-xs font-mono tabular-nums ${
-                          p >= 90 ? "text-red-400" : p >= 70 ? "text-amber-400" : "text-zinc-300"
-                        }`}>{p}%</span>
-                      </div>
-                      {resets && (
-                        <p className="text-xs text-zinc-500 font-mono">Resets {resets}</p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-
-          {/* Empty / loading state when no meters to show */}
-          {(!usageData || (usageData.success && !usageData.parsed.sessionPct && !usageData.parsed.weekPct)) && (
-            <div className="px-4 py-4 text-xs font-mono text-zinc-600 dark:text-zinc-400 min-h-[56px]">
-              {usageLoading
-                ? "Sending /usage to the Claude tmux session…"
-                : !usageData
-                  ? server.status === "connected" ? "Loading…" : "Test the SSH connection above to fetch Claude usage."
-                  : null}
-            </div>
-          )}
-
-          {/* Error footer */}
-          {usageData && !usageData.success &&
-            usageData.status !== "auth_required" &&
-            usageData.status !== "offline" &&
-            usageData.status !== "rate_limited" &&
-            usageData.error && (
-            <div className="px-4 py-3 text-xs text-red-400 font-mono min-h-[56px]">
-              {usageData.error}
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* ── Terminal ── */}
-      <section className="mb-8">
-        <h2 className="font-semibold text-zinc-900 dark:text-zinc-100 mb-3">Terminal</h2>
-        <div className="bg-zinc-950 rounded-xl overflow-hidden border border-zinc-800">
-          {/* title bar */}
-          <div className="flex items-center gap-2 px-4 py-2 bg-zinc-900 border-b border-zinc-800">
-            <span className="w-2.5 h-2.5 rounded-full bg-zinc-600" />
-            <span className="w-2.5 h-2.5 rounded-full bg-zinc-600" />
-            <span className="w-2.5 h-2.5 rounded-full bg-zinc-600" />
-            <span className="ml-2 text-xs text-zinc-500 font-mono flex-1">{promptLabel}</span>
-            {termRunning && (
-              <button
-                onClick={handleForceStop}
-                className="text-xs text-red-400 hover:text-red-300 border border-red-800 hover:border-red-600 px-2.5 py-1 rounded font-mono transition-colors"
-              >
-                ■ stop
-              </button>
-            )}
-          </div>
-
-          {/* output history */}
-          <div className="px-4 py-3 min-h-[120px] max-h-80 overflow-y-auto space-y-3 font-mono text-xs">
-            {termHistory.length === 0 && (
-              <p className="text-zinc-600 dark:text-zinc-400">Type a command below to run it on the server.</p>
-            )}
-            {termHistory.map((entry) => (
-              <div key={entry.id}>
-                <div className="flex items-start gap-2">
-                  <span className="text-green-500 shrink-0 select-none">$</span>
-                  <span className="text-zinc-200">{entry.command}</span>
-                  {entry.status === "running" && (
-                    <span className="text-zinc-500 ml-2 tabular-nums">
-                      {termElapsed}s…
-                    </span>
-                  )}
-                </div>
-                {entry.status !== "running" && (
-                  <pre
-                    className={`mt-1 ml-4 whitespace-pre-wrap break-all leading-relaxed ${
-                      entry.status === "success" ? "text-zinc-300" : "text-red-400"
-                    }`}
-                  >
-                    {entry.status === "success"
-                      ? entry.output || "(no output)"
-                      : entry.errorMessage || entry.output || "(error)"}
-                  </pre>
-                )}
-              </div>
-            ))}
-            <div ref={termBottomRef} />
-          </div>
-
-          {/* input row */}
-          <form
-            onSubmit={handleTermSubmit}
-            className="flex items-center gap-2 px-4 py-3 border-t border-zinc-800 bg-zinc-900"
-          >
-            <span className="text-green-500 font-mono text-xs shrink-0 select-none">$</span>
-            <input
-              ref={termInputRef}
-              value={termInput}
-              onChange={(e) => setTermInput(e.target.value)}
-              onKeyDown={handleTermKeyDown}
-              disabled={termRunning}
-              placeholder="enter command…"
-              spellCheck={false}
-              autoComplete="off"
-              className="flex-1 bg-transparent text-zinc-100 font-mono text-xs placeholder:text-zinc-600 dark:text-zinc-400 focus:outline-none disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={termRunning || termInput.trim() === ""}
-              className="text-xs text-zinc-400 hover:text-zinc-100 disabled:opacity-30 transition-colors px-2 py-1 border border-zinc-700 rounded font-mono"
-            >
-              {termRunning ? `${termElapsed}s` : "run"}
-            </button>
-          </form>
-        </div>
-        <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-1.5">↑ ↓ to navigate history</p>
       </section>
 
       {/* ── Environment Checks ── */}
