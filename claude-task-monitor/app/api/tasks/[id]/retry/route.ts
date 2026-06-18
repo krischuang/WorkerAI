@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { emitAudit } from "@/lib/audit";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -42,10 +43,14 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
       );
     }
 
+    const previousStatus = task.status;
+
     await prisma.task.update({
       where: { id },
       data: { status: "queued", retryAfter: null },
     });
+
+    emitAudit({ entityType: "Task", entityId: id, eventType: "task.retried", actorType: "user", payload: { previousStatus, newStatus: "queued" } }).catch(() => {});
 
     return Response.json({ success: true });
   } catch (err) {

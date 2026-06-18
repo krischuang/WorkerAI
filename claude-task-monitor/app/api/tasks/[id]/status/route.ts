@@ -7,6 +7,7 @@ import type { NextRequest } from "next/server";
 import type { $Enums } from "@/app/generated/prisma/client";
 import { recalculateProjectProgress } from "@/lib/project-progress";
 import { emitNotification } from "@/lib/notification";
+import { emitAudit } from "@/lib/audit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -39,6 +40,8 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       return Response.json({ error: transitionErr.message }, { status: 422 });
     }
 
+    const previousStatus = current.status;
+
     const task = await prisma.task.update({
       where: { id },
       data: { status: status as $Enums.TaskStatus },
@@ -49,6 +52,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     if (status === "completed" || status === "failed") {
       emitNotification(id, status === "completed" ? "task.completed" : "task.failed").catch(() => {});
     }
+    emitAudit({ entityType: "Task", entityId: id, eventType: "task.status_changed", actorType: "user", payload: { previousStatus, newStatus: status } }).catch(() => {});
     return Response.json(task);
   } catch (err) {
     return serverError("tasks/[id]/status PUT", err);

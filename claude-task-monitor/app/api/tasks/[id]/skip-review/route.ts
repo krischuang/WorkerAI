@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { emitAudit } from "@/lib/audit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -15,10 +16,14 @@ export async function POST(_request: NextRequest, ctx: Ctx) {
       return NextResponse.json({ error: "Task has no pending review" }, { status: 400 });
     }
 
+    const previousStatus = task.reviewStatus;
+
     const updated = await prisma.task.update({
       where: { id },
       data: { reviewStatus: "skipped", reviewCompletedAt: new Date() },
     });
+
+    emitAudit({ entityType: "Task", entityId: id, eventType: "task.review_skipped", actorType: "user", payload: { previousStatus, newStatus: "skipped" } }).catch(() => {});
 
     return NextResponse.json({ id: updated.id, reviewStatus: updated.reviewStatus });
   } catch (err) {
