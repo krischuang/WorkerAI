@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
     const res = NextResponse.json({ requiresOtp: true });
     res.cookies.set(ADMIN_OTP_PENDING_COOKIE, pendingToken, {
       httpOnly: true,
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: ADMIN_OTP_PENDING_MAX_AGE,
       path: "/",
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
   const res = NextResponse.json({ ok: true });
   res.cookies.set(ADMIN_COOKIE, token, {
     httpOnly: true,
-    secure: false,
+    secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
     maxAge: ADMIN_COOKIE_MAX_AGE,
     path: "/",
