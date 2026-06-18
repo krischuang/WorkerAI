@@ -13,7 +13,11 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
       where: { id },
       include: {
         tasks: {
-          include: { _count: { select: { executionLogs: true } } },
+          include: {
+            _count: { select: { executionLogs: true } },
+            agent: { select: { id: true, name: true } },
+            server: { select: { id: true, name: true } },
+          },
           orderBy: [{ priority: "asc" }, { createdAt: "desc" }],
         },
       },
