@@ -142,8 +142,11 @@ export async function middleware(request: NextRequest) {
 
     const adminPassword = process.env.ADMIN_PASSWORD;
     if (!adminPassword) {
-      console.warn("[admin-auth] ADMIN_PASSWORD is not set — admin routes are unprotected");
-      return NextResponse.next();
+      console.error("[SECURITY] ADMIN_PASSWORD missing - admin endpoints disabled");
+      return new NextResponse(
+        JSON.stringify({ error: "Admin access unavailable: server configuration error" }),
+        { status: 503, headers: { "content-type": "application/json" } },
+      );
     }
 
     const expected = await adminCookieToken(adminPassword);
