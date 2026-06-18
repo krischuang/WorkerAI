@@ -16,6 +16,32 @@ import {
 
 const WS_PORT = Number(process.env.WS_PORT ?? 3099);
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const AUTH_COOKIE = "__auth";
+
+/** Parse a raw Cookie header into a name→value map. */
+function parseCookies(cookieHeader: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of cookieHeader.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (name) out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * SHA-256 token derived from AUTH_SECRET — identical to the implementation
+ * in middleware.ts so the same cookie value is accepted by both.
+ */
+async function cookieToken(secret: string): Promise<string> {
+  const data = new TextEncoder().encode(`auth:${secret}`);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 const rateLimitStore = makeStore();
 
@@ -117,6 +143,23 @@ wss.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
   // Release the slot when this socket closes for any reason.
   // "close" always fires after "error" in the ws library, so one listener suffices.
   ws.once("close", () => recordRelease(clientIp, rateLimitStore));
+
+  // ── Session cookie authentication ──────────────────────────────────────────
+  // Verify the __auth cookie before opening any SSH connection.  This mirrors
+  // the check in middleware.ts so only logged-in operators can use the terminal.
+  // When AUTH_SECRET is unset (first-time setup) we warn and allow through,
+  // matching the behaviour of the Next.js middleware.
+  const authSecret = process.env.AUTH_SECRET;
+  if (authSecret) {
+    const cookies = parseCookies(req.headers.cookie ?? "");
+    const expected = await cookieToken(authSecret);
+    if (cookies[AUTH_COOKIE] !== expected) {
+      ws.close(1008, "Unauthorized");
+      return;
+    }
+  } else {
+    console.warn("[ws-server] AUTH_SECRET is not set — WebSocket connections are unauthenticated");
+  }
 
   const url = new URL(req.url ?? "/", `http://localhost:${WS_PORT}`);
   const serverId = url.searchParams.get("serverId");
