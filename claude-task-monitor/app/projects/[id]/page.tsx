@@ -121,6 +121,8 @@ interface Task {
   estimatedCostLevel: string;
   createdAt: string;
   _count: { executionLogs: number };
+  agent: { id: string; name: string } | null;
+  server: { id: string; name: string } | null;
 }
 
 interface Project {
@@ -483,6 +485,7 @@ interface ImprovementReviewApiResult {
   ok: boolean;
   suggestionsGenerated?: number;
   tasksAutoCreated?: number;
+  tasksAssigned?: number;
   reason?: string;
 }
 
@@ -502,7 +505,7 @@ function ProjectObjectiveSection({ project, onProjectRefresh }: { project: Proje
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
-  const [lastReview, setLastReview] = useState<{ suggestionsGenerated: number; tasksAutoCreated: number } | null>(null);
+  const [lastReview, setLastReview] = useState<{ suggestionsGenerated: number; tasksAutoCreated: number; tasksAssigned: number } | null>(null);
 
   function startEditing() {
     setForm({
@@ -557,7 +560,7 @@ function ProjectObjectiveSection({ project, onProjectRefresh }: { project: Proje
       if (!res.ok || !data.ok) {
         setReviewError(data.reason ? `Could not run review: ${data.reason}` : "Could not run review");
       } else {
-        setLastReview({ suggestionsGenerated: data.suggestionsGenerated ?? 0, tasksAutoCreated: data.tasksAutoCreated ?? 0 });
+        setLastReview({ suggestionsGenerated: data.suggestionsGenerated ?? 0, tasksAutoCreated: data.tasksAutoCreated ?? 0, tasksAssigned: data.tasksAssigned ?? 0 });
         onProjectRefresh();
       }
     } catch {
@@ -593,7 +596,9 @@ function ProjectObjectiveSection({ project, onProjectRefresh }: { project: Proje
       {lastReview && (
         <p className="text-sm text-green-700 mb-3">
           Review complete — {lastReview.suggestionsGenerated} suggestion{lastReview.suggestionsGenerated === 1 ? "" : "s"} generated
-          {lastReview.tasksAutoCreated > 0 && `, ${lastReview.tasksAutoCreated} task${lastReview.tasksAutoCreated === 1 ? "" : "s"} auto-created`}.
+          {lastReview.tasksAutoCreated > 0 && `, ${lastReview.tasksAutoCreated} task${lastReview.tasksAutoCreated === 1 ? "" : "s"} created`}
+          {lastReview.tasksAssigned > 0 && `, ${lastReview.tasksAssigned} assigned to agent`}.
+          {lastReview.suggestionsGenerated === 0 && " No new improvements found."}
         </p>
       )}
 
@@ -1010,6 +1015,18 @@ export default function ProjectDetailPage() {
                       <span>{t.taskType}</span>
                       <span>cost: {t.estimatedCostLevel}</span>
                       <span>{t._count.executionLogs} logs</span>
+                      {t.agent && (
+                        <span className="inline-flex items-center gap-1 text-violet-700 dark:text-violet-400 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-violet-500 shrink-0" />
+                          {t.agent.name}
+                        </span>
+                      )}
+                      {!t.agent && t.server && (
+                        <span className="inline-flex items-center gap-1 text-blue-700 dark:text-blue-400 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+                          {t.server.name}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
