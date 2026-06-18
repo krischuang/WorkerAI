@@ -661,7 +661,7 @@ export async function launchClaudeInTmux(
     sshKeyPath: config.sshKeyPath,
   };
   const baseCommand = getClaudeLaunchCommand(mode);
-  const claudeCommand = workDir ? `HOME=${workDir} ${baseCommand}` : baseCommand;
+  const claudeCommand = workDir ? `HOME="${workDir}" ${baseCommand}` : baseCommand;
 
   // Verify the tmux session exists
   try {
@@ -747,7 +747,7 @@ export async function createAndLaunchTaskSession(
   };
 
   const baseCommand = getClaudeLaunchCommand(mode);
-  const claudeCommand = workDir ? `HOME=${workDir} ${baseCommand}` : baseCommand;
+  const claudeCommand = workDir ? `HOME="${workDir}" ${baseCommand}` : baseCommand;
 
   try {
     const cmd = [
