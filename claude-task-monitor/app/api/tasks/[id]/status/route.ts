@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { validateStatusUpdate } from "@/lib/task-validation";
 import { validateTransition } from "@/lib/task-transitions";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import type { NextRequest } from "next/server";
 import type { $Enums } from "@/app/generated/prisma/client";
 import { recalculateProjectProgress } from "@/lib/project-progress";
@@ -12,6 +13,12 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function PUT(request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+
+    // Cap at 10 status updates per minute per task to prevent state-machine
+    // thrashing, excessive DB writes, and webhook quota exhaustion.
+    const rl = apiRateLimit(`task:status:${id}`, 10, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
     const { status } = await request.json();
 
     const validationErr = validateStatusUpdate(status);
