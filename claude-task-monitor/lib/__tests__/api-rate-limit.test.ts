@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   checkApiLimit,
   recordApiRequest,
+  extractRequestIp,
   ApiRateLimitStore,
 } from "../api-rate-limit";
 
@@ -185,5 +186,79 @@ describe("checkApiLimit + recordApiRequest — end-to-end", () => {
     expect(checkApiLimit("x", max, windowMs, 1001, store).limited).toBe(true);
     // "y" is untouched
     expect(checkApiLimit("y", max, windowMs, 1001, store).limited).toBe(false);
+  });
+});
+
+// ─── extractRequestIp — X-Forwarded-For spoofing prevention ──────────────────
+
+function makeReq(headers: Record<string, string | undefined>) {
+  return {
+    headers: {
+      get(key: string) {
+        return headers[key.toLowerCase()] ?? null;
+      },
+    },
+  };
+}
+
+describe("extractRequestIp — trusted proxy handling", () => {
+  const savedEnv = process.env.TRUSTED_PROXY_IPS;
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env.TRUSTED_PROXY_IPS;
+    } else {
+      process.env.TRUSTED_PROXY_IPS = savedEnv;
+    }
+  });
+
+  it("ignores X-Forwarded-For when TRUSTED_PROXY_IPS is not set", () => {
+    delete process.env.TRUSTED_PROXY_IPS;
+    const req = makeReq({
+      "x-forwarded-for": "1.2.3.4",
+      "x-real-ip": "10.0.0.1",
+    });
+    // Must use X-Real-IP, not the spoofed X-Forwarded-For value
+    expect(extractRequestIp(req)).toBe("10.0.0.1");
+  });
+
+  it("ignores X-Forwarded-For even when set, if TRUSTED_PROXY_IPS is absent", () => {
+    delete process.env.TRUSTED_PROXY_IPS;
+    const req = makeReq({ "x-forwarded-for": "attacker-ip" });
+    expect(extractRequestIp(req)).toBe("127.0.0.1");
+  });
+
+  it("honours X-Forwarded-For when source IP is a trusted proxy", () => {
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
+    const req = makeReq({
+      "x-forwarded-for": "203.0.113.5",
+      "x-real-ip": "10.0.0.1",
+    });
+    expect(extractRequestIp(req)).toBe("203.0.113.5");
+  });
+
+  it("ignores X-Forwarded-For when source IP is NOT a trusted proxy", () => {
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1";
+    const req = makeReq({
+      "x-forwarded-for": "spoofed-ip",
+      "x-real-ip": "192.168.99.99",
+    });
+    // Source 192.168.99.99 is not trusted — fall back to X-Real-IP
+    expect(extractRequestIp(req)).toBe("192.168.99.99");
+  });
+
+  it("supports multiple trusted proxy IPs", () => {
+    process.env.TRUSTED_PROXY_IPS = "10.0.0.1, 10.0.0.2";
+    const req = makeReq({
+      "x-forwarded-for": "203.0.113.7",
+      "x-real-ip": "10.0.0.2",
+    });
+    expect(extractRequestIp(req)).toBe("203.0.113.7");
+  });
+
+  it("falls back to 127.0.0.1 when no IP headers are present", () => {
+    delete process.env.TRUSTED_PROXY_IPS;
+    const req = makeReq({});
+    expect(extractRequestIp(req)).toBe("127.0.0.1");
   });
 });
