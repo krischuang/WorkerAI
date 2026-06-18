@@ -424,3 +424,11 @@ Set in `.env`. `prisma/seed.ts` requires `import "dotenv/config"` at the top bec
 ## Known Limitations
 
 - **Usage data is cached** — the task execution gate reads usage from the DB, not from a live SSH check. Refresh usage from the server/agent detail page before running if the cached data is stale (>10 min warning shown).
+
+- **In-memory rate limiter resets on server restart** — the sliding-window rate limiter (`lib/api-rate-limit.ts`) stores all buckets in a `globalThis` Map. A server restart (deployment, crash, process kill) wipes all in-progress windows, including the `admin-login` brute-force guard (10 attempts / 15 min).
+
+  **Mitigations in place:**
+  1. **Persistent admin-login bucket** — the `admin-login` bucket is saved to `SystemConfig` (key `rl_bucket_admin-login`) after every admitted login attempt and restored on startup via `instrumentation.node.ts`. This preserves attempt history across restarts for the most security-sensitive limiter.
+  2. **`RESTART_LOCKOUT_MINUTES` env var** — set this to a positive integer (e.g. `5`) to impose a mandatory post-restart cooldown on the admin-login endpoint. Any login attempt within that many minutes of startup will be rate-limited, even if the persisted bucket had spare capacity. A warning is logged on startup when this is active.
+
+  **Remaining gap:** all other rate-limit keys (server exec, task run, etc.) still reset on restart. For a fully restart-resilient limiter, move counters to a dedicated PostgreSQL table. The `admin-login` key is the only one where restart-reset creates a meaningful security risk for this single-user app.

@@ -141,6 +141,52 @@ export function extractRequestIp(
   return "127.0.0.1";
 }
 
+// ─── Admin-login bucket persistence helpers ───────────────────────────────────
+
+/** The rate-limit store key used by the admin-login brute-force guard. */
+export const ADMIN_LOGIN_RATE_KEY = "admin-login";
+
+/** Admin-login sliding-window parameters (must match the call in /api/admin/login). */
+export const ADMIN_LOGIN_MAX = 10;
+export const ADMIN_LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+/**
+ * Returns the current in-window timestamps for the admin-login bucket.
+ * Used to persist the bucket to SystemConfig for crash resilience.
+ */
+export function getAdminLoginBucket(): number[] {
+  const store = getApiRateLimitStore();
+  const windowStart = Date.now() - ADMIN_LOGIN_WINDOW_MS;
+  return (store.get(ADMIN_LOGIN_RATE_KEY) ?? []).filter((t) => t > windowStart);
+}
+
+/**
+ * Overwrites the admin-login bucket with the supplied timestamps.
+ * Called on startup to restore a previously persisted bucket.
+ */
+export function setAdminLoginBucket(timestamps: number[]): void {
+  const store = getApiRateLimitStore();
+  store.set(ADMIN_LOGIN_RATE_KEY, timestamps);
+}
+
+/**
+ * Injects synthetic timestamps so that any login attempt within the next
+ * `lockoutMs` milliseconds will be rate-limited.
+ *
+ * Works by pre-filling the bucket to ADMIN_LOGIN_MAX with timestamps placed
+ * at (now - ADMIN_LOGIN_WINDOW_MS + lockoutMs), which expire exactly
+ * `lockoutMs` from now.  Any existing in-window timestamps are preserved.
+ */
+export function applyAdminLoginRestartLockout(lockoutMs: number): void {
+  const now = Date.now();
+  const existing = getAdminLoginBucket();
+  const needed = Math.max(0, ADMIN_LOGIN_MAX - existing.length);
+  if (needed === 0) return; // already at capacity
+  const ts = now - ADMIN_LOGIN_WINDOW_MS + lockoutMs;
+  const synthetic = Array.from({ length: needed }, () => ts);
+  setAdminLoginBucket([...existing, ...synthetic]);
+}
+
 // ─── rate_limit_enabled SystemConfig cache ────────────────────────────────────
 
 const RL_ENABLED_KEY = "_rateLimitEnabled";

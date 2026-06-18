@@ -81,7 +81,11 @@ async function multiTaskSecretValues(taskIds: string[]): Promise<string[]> {
   return all.flat().map(r => r.value);
 }
 import { runDueScheduledTasks } from "./lib/scheduled-task-service";
-import { setRateLimitEnabled } from "./lib/api-rate-limit";
+import {
+  setRateLimitEnabled,
+  setAdminLoginBucket,
+  applyAdminLoginRestartLockout,
+} from "./lib/api-rate-limit";
 import { runSelfHealingCycle } from "./lib/self-healing/self-healing-cycle";
 
 const TAG = "[usage-poller]";
@@ -133,6 +137,35 @@ if (!g._usagePollerStarted) {
       if (row) setRateLimitEnabled(row.value !== "false");
     })
     .catch(() => { /* leave default (true) if DB is not yet ready */ });
+
+  // ── Admin-login rate-limit crash resilience ─────────────────────────────
+  // Restore any previously persisted admin-login bucket so a server restart
+  // cannot be used to reset brute-force attempt counters.
+  // If RESTART_LOCKOUT_MINUTES is set, also impose a minimum post-restart
+  // cooldown so the first login attempt after restart is blocked until the
+  // window expires, closing the tiny gap that exists before the bucket is
+  // fully restored from DB.
+  prisma.systemConfig.findUnique({ where: { key: "rl_bucket_admin-login" } })
+    .then((row) => {
+      if (row) {
+        try {
+          const parsed: unknown = JSON.parse(row.value);
+          if (Array.isArray(parsed)) {
+            setAdminLoginBucket(parsed as number[]);
+          }
+        } catch { /* ignore corrupt entry */ }
+      }
+      const lockoutMin = Number(process.env.RESTART_LOCKOUT_MINUTES ?? "0");
+      if (lockoutMin > 0) {
+        const lockoutMs = lockoutMin * 60_000;
+        applyAdminLoginRestartLockout(lockoutMs);
+        console.warn(
+          `[startup] RESTART_LOCKOUT_MINUTES=${lockoutMin}: admin-login locked out ` +
+          `for ${lockoutMin} min after restart (crash-resilience mitigation).`,
+        );
+      }
+    })
+    .catch(() => { /* non-fatal — in-memory default is still active */ });
 
   startPoller();
 }
