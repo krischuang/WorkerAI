@@ -31,6 +31,7 @@ export interface ImprovementReviewResult {
   scanId: string;
   suggestionsGenerated: number;
   tasksAutoCreated: number;
+  tasksAssigned: number;
 }
 
 export type ImprovementReviewError =
@@ -278,45 +279,77 @@ export async function runImprovementReview(
     data: { status: "completed", findingsCount: suggestionsInserted, completedAt },
   });
 
-  // ── Auto-convert eligible suggestions when autonomousMode >= 2 ─────────────────────────────
+  // ── Convert suggestions to tasks ──────────────────────────────────────────────────────────
+  // Manual triggers always convert (regardless of autonomousMode) so that clicking
+  // "Run Improvement Review" always produces visible task tickets.
+  // Automated triggers still require autonomousMode >= 2.
+  const isManual = opts?.triggeredBy === "manual";
+  const shouldConvert = isManual || project.autonomousMode >= 2;
+
   let tasksAutoCreated = 0;
-  if (project.autonomousMode >= 2 && suggestionsInserted > 0) {
+  const createdTaskIds: string[] = [];
+
+  if (shouldConvert && suggestionsInserted > 0) {
     const pending = await prisma.taskSuggestion.findMany({
       where: { projectId, sourceId: scan.id, sourceType: "scan", status: "pending_review" },
       take: MAX_AUTO_CONVERT,
     });
 
     for (const suggestion of pending) {
-      // Suggestions don't carry a riskLevel themselves — classify from the same fields the
-      // resulting Task would be classified from, so the gate matches what autoAssignQueuedTasks
-      // will later re-check before dispatch.
       const risk = classifyTaskRisk({ title: suggestion.title, description: suggestion.description, taskType: suggestion.taskType });
 
-      if (risk === "high" && !(project.autonomousMode >= 4 && project.allowHighRiskAutonomy)) {
+      if (risk === "high" && !(project.allowHighRiskAutonomy && (isManual || project.autonomousMode >= 4))) {
         await emitAudit({
           entityType: "project",
           entityId: projectId,
           eventType: "improvement_review.suggestion_skipped",
-          actorType: "system",
+          actorType: isManual ? "user" : "system",
           payload: { suggestionId: suggestion.id, reason: "high_risk_requires_explicit_opt_in" },
         });
         continue;
       }
 
-      const result = await approveSuggestion(suggestion.id, { isAutonomous: true });
-      if (result.ok) tasksAutoCreated++;
+      const result = await approveSuggestion(suggestion.id, { isAutonomous: !isManual });
+      if (result.ok) {
+        tasksAutoCreated++;
+        createdTaskIds.push(result.taskId);
+      }
     }
   }
 
+  // ── Assign created tasks to the agent that ran the review ─────────────────────────────────
+  // When triggered manually, immediately queue the new tasks to the agent/server session
+  // that performed the review rather than waiting for the background poller.
+  let tasksAssigned = 0;
+  if (isManual && createdTaskIds.length > 0 && session.agentId) {
+    for (const taskId of createdTaskIds) {
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { agentId: session.agentId, status: "queued" },
+      });
+      tasksAssigned++;
+    }
+  } else if (isManual && createdTaskIds.length > 0 && !session.agentId) {
+    // No agent session; assign to the server so the poller can dispatch
+    for (const taskId of createdTaskIds) {
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { serverId: session.serverId, status: "queued" },
+      });
+      tasksAssigned++;
+    }
+  }
+
+  const cycleComplete = suggestionsInserted === 0 || shouldConvert;
   const cycle = await prisma.improvementCycle.create({
     data: {
       projectId,
-      status: suggestionsInserted === 0 ? "completed" : (project.autonomousMode >= 2 ? "completed" : "awaiting_approval"),
+      status: cycleComplete ? "completed" : "awaiting_approval",
       automationLevel: project.autonomousMode,
       scanId: scan.id,
       suggestionsGenerated: suggestionsInserted,
       tasksCreated: tasksAutoCreated,
-      completedAt: project.autonomousMode >= 2 || suggestionsInserted === 0 ? completedAt : null,
+      completedAt: cycleComplete ? completedAt : null,
     },
   });
 
@@ -324,11 +357,11 @@ export async function runImprovementReview(
     entityType: "project",
     entityId: projectId,
     eventType: "improvement_review.completed",
-    actorType: opts?.triggeredBy === "manual" ? "user" : "system",
-    payload: { cycleId: cycle.id, scanId: scan.id, suggestionsInserted, tasksAutoCreated, triggeredBy: opts?.triggeredBy ?? "auto" },
+    actorType: isManual ? "user" : "system",
+    payload: { cycleId: cycle.id, scanId: scan.id, suggestionsInserted, tasksAutoCreated, tasksAssigned, triggeredBy: opts?.triggeredBy ?? "auto" },
   });
 
-  return { ok: true, cycleId: cycle.id, scanId: scan.id, suggestionsGenerated: suggestionsInserted, tasksAutoCreated };
+  return { ok: true, cycleId: cycle.id, scanId: scan.id, suggestionsGenerated: suggestionsInserted, tasksAutoCreated, tasksAssigned };
 }
 
 /**
