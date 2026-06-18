@@ -7,8 +7,8 @@
  * This mitigates prompt-injection attacks where a task title or description
  * contains phrases like "Ignore all previous instructions…".
  *
- * Defence-in-depth: closing-tag sequences are replaced inside user content
- * so a payload cannot break out of its XML fence.
+ * Defence-in-depth: user content is fully XML-entity-encoded before being
+ * placed inside XML tags, preventing any XML container breakout attack.
  */
 
 import {
@@ -19,13 +19,18 @@ import {
   AGENT_DATABASE_URL,
 } from "@/lib/constants";
 
-/** Replace any </tag> in user content so it cannot close its containing XML fence. */
-function escapeForTag(tag: string, content: string): string {
-  return content.replace(new RegExp(`</${tag}>`, "gi"), `[/${tag}]`);
+/** Encode all XML special characters so user content cannot break out of its XML fence. */
+function escapeXml(content: string): string {
+  return content
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function wrapInTag(tag: string, content: string): string {
-  return `<${tag}>\n${escapeForTag(tag, content)}\n</${tag}>`;
+  return `<${tag}>\n${escapeXml(content)}\n</${tag}>`;
 }
 
 // ── Dispatch prompt ───────────────────────────────────────────────────────────
