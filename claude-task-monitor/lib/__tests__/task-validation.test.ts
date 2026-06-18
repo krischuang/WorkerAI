@@ -16,6 +16,10 @@ import {
   VALID_STATUSES,
   VALID_COST_LEVELS,
   VALID_TASK_TYPES,
+  TIMEOUT_MINUTES_MIN,
+  TIMEOUT_MINUTES_MAX,
+  MAX_RETRIES_MIN,
+  MAX_RETRIES_MAX,
 } from "../task-validation";
 
 // ─── validateTaskCreate ───────────────────────────────────────────────────────
@@ -161,6 +165,164 @@ describe("validateTaskCreate — enum fields", () => {
     expect(
       validateTaskCreate({ projectId: "p", title: "T", priority: null, status: null })
     ).toBeNull();
+  });
+});
+
+// ─── validateTaskCreate — timeoutMinutes ─────────────────────────────────────
+
+describe("validateTaskCreate — timeoutMinutes", () => {
+  const base = { projectId: "p", title: "T" };
+
+  it("accepts a valid timeoutMinutes (60)", () => {
+    expect(validateTaskCreate({ ...base, timeoutMinutes: 60 })).toBeNull();
+  });
+
+  it("accepts the minimum value (1)", () => {
+    expect(validateTaskCreate({ ...base, timeoutMinutes: TIMEOUT_MINUTES_MIN })).toBeNull();
+  });
+
+  it("accepts the maximum value (1440)", () => {
+    expect(validateTaskCreate({ ...base, timeoutMinutes: TIMEOUT_MINUTES_MAX })).toBeNull();
+  });
+
+  it("rejects 0 (below minimum)", () => {
+    const err = validateTaskCreate({ ...base, timeoutMinutes: 0 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+  });
+
+  it("rejects a negative value", () => {
+    const err = validateTaskCreate({ ...base, timeoutMinutes: -1 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+  });
+
+  it("rejects a value above the maximum (99999)", () => {
+    const err = validateTaskCreate({ ...base, timeoutMinutes: 99999 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+    expect(err!.message).toMatch(/1440/);
+  });
+
+  it("rejects NaN", () => {
+    const err = validateTaskCreate({ ...base, timeoutMinutes: NaN });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+  });
+
+  it("rejects a float value", () => {
+    const err = validateTaskCreate({ ...base, timeoutMinutes: 30.5 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+  });
+
+  it("rejects a string value", () => {
+    const err = validateTaskCreate({ ...base, timeoutMinutes: "sixty" });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+  });
+
+  it("ignores null (not provided)", () => {
+    expect(validateTaskCreate({ ...base, timeoutMinutes: null })).toBeNull();
+  });
+
+  it("ignores undefined (not provided)", () => {
+    expect(validateTaskCreate({ ...base, timeoutMinutes: undefined })).toBeNull();
+  });
+});
+
+// ─── validateTaskCreate — maxRetries ─────────────────────────────────────────
+
+describe("validateTaskCreate — maxRetries", () => {
+  const base = { projectId: "p", title: "T" };
+
+  it("accepts 0 (minimum)", () => {
+    expect(validateTaskCreate({ ...base, maxRetries: MAX_RETRIES_MIN })).toBeNull();
+  });
+
+  it("accepts the maximum value (10)", () => {
+    expect(validateTaskCreate({ ...base, maxRetries: MAX_RETRIES_MAX })).toBeNull();
+  });
+
+  it("accepts a mid-range value (3)", () => {
+    expect(validateTaskCreate({ ...base, maxRetries: 3 })).toBeNull();
+  });
+
+  it("rejects a negative value (-1)", () => {
+    const err = validateTaskCreate({ ...base, maxRetries: -1 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("maxRetries");
+  });
+
+  it("rejects a value above the maximum (11)", () => {
+    const err = validateTaskCreate({ ...base, maxRetries: 11 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("maxRetries");
+    expect(err!.message).toMatch(/10/);
+  });
+
+  it("rejects NaN", () => {
+    const err = validateTaskCreate({ ...base, maxRetries: NaN });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("maxRetries");
+  });
+
+  it("rejects a float value (1.5)", () => {
+    const err = validateTaskCreate({ ...base, maxRetries: 1.5 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("maxRetries");
+  });
+
+  it("ignores null (not provided)", () => {
+    expect(validateTaskCreate({ ...base, maxRetries: null })).toBeNull();
+  });
+});
+
+// ─── validateTaskUpdate — timeoutMinutes and maxRetries ───────────────────────
+
+describe("validateTaskUpdate — numeric fields", () => {
+  it("accepts valid timeoutMinutes on update", () => {
+    expect(validateTaskUpdate({ timeoutMinutes: 120 })).toBeNull();
+  });
+
+  it("rejects out-of-range timeoutMinutes on update", () => {
+    const err = validateTaskUpdate({ timeoutMinutes: 9999 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+  });
+
+  it("rejects negative timeoutMinutes on update", () => {
+    const err = validateTaskUpdate({ timeoutMinutes: -5 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("timeoutMinutes");
+  });
+
+  it("accepts valid maxRetries on update", () => {
+    expect(validateTaskUpdate({ maxRetries: 5 })).toBeNull();
+  });
+
+  it("rejects out-of-range maxRetries on update (above max)", () => {
+    const err = validateTaskUpdate({ maxRetries: 100 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("maxRetries");
+  });
+
+  it("rejects negative maxRetries on update", () => {
+    const err = validateTaskUpdate({ maxRetries: -1 });
+    expect(err).not.toBeNull();
+    expect(err!.field).toBe("maxRetries");
+  });
+
+  it("ignores null timeoutMinutes on update", () => {
+    expect(validateTaskUpdate({ timeoutMinutes: null })).toBeNull();
+  });
+
+  it("ignores null maxRetries on update", () => {
+    expect(validateTaskUpdate({ maxRetries: null })).toBeNull();
+  });
+
+  it("passes an empty update body (no numeric fields)", () => {
+    expect(validateTaskUpdate({})).toBeNull();
   });
 });
 

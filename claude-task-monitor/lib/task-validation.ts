@@ -19,10 +19,19 @@ const VALID_TASK_TYPES  = new Set<string>(Object.values(TaskType));
 
 export { VALID_PRIORITIES, VALID_STATUSES, VALID_COST_LEVELS, VALID_TASK_TYPES };
 
+/** Valid range for timeoutMinutes: 1 – 1440 (1 minute to 24 hours). */
+export const TIMEOUT_MINUTES_MIN = 1;
+export const TIMEOUT_MINUTES_MAX = 1440;
+
+/** Valid range for maxRetries: 0 – 10. */
+export const MAX_RETRIES_MIN = 0;
+export const MAX_RETRIES_MAX = 10;
+
 // ─── Task create (POST /api/tasks) ────────────────────────────────────────────
 
 export function validateTaskCreate(body: Record<string, unknown>): ValidationError | null {
-  const { projectId, title, description, priority, status, estimatedCostLevel, taskType } = body;
+  const { projectId, title, description, priority, status, estimatedCostLevel, taskType,
+          timeoutMinutes, maxRetries } = body;
 
   if (!projectId || !title) {
     return { field: "projectId/title", message: "projectId and title are required" };
@@ -33,13 +42,16 @@ export function validateTaskCreate(body: Record<string, unknown>): ValidationErr
   if (description != null && typeof description === "string" && description.length > 10_000) {
     return { field: "description", message: "description must be 10 000 characters or fewer" };
   }
+  const numErr = _validateNumericFields({ timeoutMinutes, maxRetries });
+  if (numErr) return numErr;
   return _validateEnumFields({ priority, status, estimatedCostLevel, taskType });
 }
 
 // ─── Task update (PUT /api/tasks/[id]) ───────────────────────────────────────
 
 export function validateTaskUpdate(body: Record<string, unknown>): ValidationError | null {
-  const { title, description, priority, status, estimatedCostLevel, taskType } = body;
+  const { title, description, priority, status, estimatedCostLevel, taskType,
+          timeoutMinutes, maxRetries } = body;
 
   if (title != null && typeof title === "string" && title.length > 500) {
     return { field: "title", message: "title must be 500 characters or fewer" };
@@ -47,6 +59,8 @@ export function validateTaskUpdate(body: Record<string, unknown>): ValidationErr
   if (description != null && typeof description === "string" && description.length > 10_000) {
     return { field: "description", message: "description must be 10 000 characters or fewer" };
   }
+  const numErr = _validateNumericFields({ timeoutMinutes, maxRetries });
+  if (numErr) return numErr;
   return _validateEnumFields({ priority, status, estimatedCostLevel, taskType });
 }
 
@@ -62,6 +76,37 @@ export function validateStatusUpdate(status: unknown): ValidationError | null {
       message: `Invalid status "${status}". Must be one of: ${[...VALID_STATUSES].join(", ")}`,
     };
   }
+  return null;
+}
+
+// ─── Shared numeric field validator ──────────────────────────────────────────
+
+function _validateNumericFields(fields: {
+  timeoutMinutes?: unknown;
+  maxRetries?: unknown;
+}): ValidationError | null {
+  const { timeoutMinutes, maxRetries } = fields;
+
+  if (timeoutMinutes != null) {
+    const n = Number(timeoutMinutes);
+    if (!Number.isInteger(n) || n < TIMEOUT_MINUTES_MIN || n > TIMEOUT_MINUTES_MAX) {
+      return {
+        field: "timeoutMinutes",
+        message: `timeoutMinutes must be an integer between ${TIMEOUT_MINUTES_MIN} and ${TIMEOUT_MINUTES_MAX}`,
+      };
+    }
+  }
+
+  if (maxRetries != null) {
+    const n = Number(maxRetries);
+    if (!Number.isInteger(n) || n < MAX_RETRIES_MIN || n > MAX_RETRIES_MAX) {
+      return {
+        field: "maxRetries",
+        message: `maxRetries must be an integer between ${MAX_RETRIES_MIN} and ${MAX_RETRIES_MAX}`,
+      };
+    }
+  }
+
   return null;
 }
 
