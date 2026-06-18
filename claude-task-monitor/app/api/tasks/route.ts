@@ -35,6 +35,8 @@ export async function GET(request: Request) {
         orderBy: { startedAt: "desc" as const },
         take: 1,
       },
+      agent: { select: { id: true, name: true } },
+      server: { select: { id: true, name: true } },
     };
 
     const [tasks, total, completedCount] = await Promise.all([

@@ -46,6 +46,8 @@ interface Task {
   progressMessage: string | null;
   requiredTags: string[];
   project: { name: string; priority: string };
+  agent: { id: string; name: string } | null;
+  server: { id: string; name: string } | null;
   _count: { executionLogs: number };
   executionLogs: { startedAt: string; finishedAt: string | null; actualCostUsd: number | null; status: string }[];
 }
@@ -583,6 +585,24 @@ function TasksPageInner() {
                         <span>{task.project.name}</span>
                         <span>·</span>
                         <span className="capitalize">{task.taskType}</span>
+                        {task.agent && (
+                          <>
+                            <span>·</span>
+                            <span className="inline-flex items-center gap-1 text-violet-600 font-medium">
+                              <span className="w-1.5 h-1.5 rounded-full bg-violet-500 shrink-0" />
+                              {task.agent.name}
+                            </span>
+                          </>
+                        )}
+                        {!task.agent && task.server && (
+                          <>
+                            <span>·</span>
+                            <span className="inline-flex items-center gap-1 text-blue-600 font-medium">
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+                              {task.server.name}
+                            </span>
+                          </>
+                        )}
                         {task._count.executionLogs > 0 && (
                           <>
                             <span>·</span>
