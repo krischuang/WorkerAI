@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
   const res = NextResponse.json({ ok: true });
   res.cookies.set(AUTH_COOKIE, await cookieToken(secret), {
     httpOnly: true,
-    secure: false,   // app runs over plain HTTP on localhost
+    secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
     maxAge: COOKIE_MAX_AGE,
     path: "/",

@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
     const token = await adminCookieToken(adminPassword);
     const res = NextResponse.json({ ok: true });
     res.cookies.set(ADMIN_COOKIE, token, {
-      httpOnly: true, secure: false, sameSite: "strict",
+      httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict",
       maxAge: ADMIN_COOKIE_MAX_AGE, path: "/",
     });
     res.cookies.delete(ADMIN_OTP_PENDING_COOKIE);
@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
   const token = await adminCookieToken(adminPassword);
   const res = NextResponse.json({ ok: true });
   res.cookies.set(ADMIN_COOKIE, token, {
-    httpOnly: true, secure: false, sameSite: "strict",
+    httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict",
     maxAge: ADMIN_COOKIE_MAX_AGE, path: "/",
   });
   res.cookies.delete(ADMIN_OTP_PENDING_COOKIE);
