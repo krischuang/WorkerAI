@@ -19,6 +19,7 @@ import { resolveSessionForProject } from "@/lib/improvement-cycle-service";
 import { waitForClaudeIdle } from "@/lib/project-scan-service";
 import { approveSuggestion } from "@/lib/suggestion-service";
 import { classifyTaskRisk } from "@/lib/risk-classifier";
+import { selectBestAgent, type AgentCandidate } from "@/lib/agent-selector";
 import { IMPROVEMENT_SCAN_TIMEOUT_MS } from "@/lib/constants";
 
 const MAX_SIGNAL_ITEMS = 20;
@@ -317,26 +318,63 @@ export async function runImprovementReview(
     }
   }
 
-  // ── Assign created tasks to the agent that ran the review ─────────────────────────────────
-  // When triggered manually, immediately queue the new tasks to the agent/server session
-  // that performed the review rather than waiting for the background poller.
+  // ── Assign created tasks using the load-balanced agent selector ──────────────────────────
+  // When triggered manually, immediately queue each new task to the best available agent
+  // rather than always picking the session agent. Uses real-time queue-depth counts so the
+  // load is spread evenly across all eligible agents.
   let tasksAssigned = 0;
-  if (isManual && createdTaskIds.length > 0 && session.agentId) {
-    for (const taskId of createdTaskIds) {
-      await prisma.task.update({
-        where: { id: taskId },
-        data: { agentId: session.agentId, status: "queued" },
-      });
-      tasksAssigned++;
+  if (isManual && createdTaskIds.length > 0) {
+    const [agentRows, taskCountRows] = await Promise.all([
+      prisma.agent.findMany({
+        select: {
+          id: true, name: true, tags: true, status: true, healthScore: true,
+          activeTaskCount: true, maxConcurrentTasks: true,
+          claudeSessionPct: true, claudeWeekPct: true, pausedDueToUsage: true, cooldownUntil: true,
+        },
+      }),
+      prisma.task.groupBy({
+        by: ["agentId", "status"],
+        where: { agentId: { not: null }, status: { in: ["running", "queued"] } },
+        _count: { id: true },
+      }),
+    ]);
+
+    const runningByAgent = new Map<string, number>();
+    const queuedByAgent = new Map<string, number>();
+    for (const row of taskCountRows) {
+      if (!row.agentId) continue;
+      if (row.status === "running") runningByAgent.set(row.agentId, row._count.id);
+      if (row.status === "queued")  queuedByAgent.set(row.agentId, row._count.id);
     }
-  } else if (isManual && createdTaskIds.length > 0 && !session.agentId) {
-    // No agent session; assign to the server so the poller can dispatch
+
+    const now = new Date();
     for (const taskId of createdTaskIds) {
-      await prisma.task.update({
-        where: { id: taskId },
-        data: { serverId: session.serverId, status: "queued" },
-      });
-      tasksAssigned++;
+      const candidates: AgentCandidate[] = agentRows.map((a) => ({
+        id: a.id, name: a.name, tags: a.tags, status: a.status,
+        healthScore: a.healthScore, activeTaskCount: a.activeTaskCount,
+        maxConcurrentTasks: a.maxConcurrentTasks,
+        claudeSessionPct: a.claudeSessionPct, claudeWeekPct: a.claudeWeekPct,
+        pausedDueToUsage: a.pausedDueToUsage, cooldownUntil: a.cooldownUntil,
+        runningTaskCount: runningByAgent.get(a.id) ?? 0,
+        queuedTaskCount: queuedByAgent.get(a.id) ?? 0,
+      }));
+
+      const { agentId: bestAgentId } = selectBestAgent(candidates, { requiredTags: [] }, now);
+
+      if (bestAgentId) {
+        await prisma.task.update({ where: { id: taskId }, data: { agentId: bestAgentId, status: "queued" } });
+        // Update in-memory map so next task in this loop sees the updated queue depth.
+        queuedByAgent.set(bestAgentId, (queuedByAgent.get(bestAgentId) ?? 0) + 1);
+        tasksAssigned++;
+      } else if (session.agentId) {
+        // No eligible agent via selector — fall back to the session agent.
+        await prisma.task.update({ where: { id: taskId }, data: { agentId: session.agentId, status: "queued" } });
+        tasksAssigned++;
+      } else {
+        // No agent at all — assign to server so the poller can dispatch later.
+        await prisma.task.update({ where: { id: taskId }, data: { serverId: session.serverId, status: "queued" } });
+        tasksAssigned++;
+      }
     }
   }
 

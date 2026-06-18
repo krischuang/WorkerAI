@@ -638,13 +638,31 @@ export async function autoAssignQueuedTasks(maxBatch = 20): Promise<AutoAssignSu
 
   if (candidates.length === 0) return { assigned: 0, skipped: 0 };
 
-  const agentRows = await prisma.agent.findMany({
-    select: {
-      id: true, name: true, tags: true, status: true, healthScore: true,
-      activeTaskCount: true, maxConcurrentTasks: true,
-      claudeSessionPct: true, claudeWeekPct: true, pausedDueToUsage: true, cooldownUntil: true,
-    },
-  });
+  const [agentRows, taskCountRows] = await Promise.all([
+    prisma.agent.findMany({
+      select: {
+        id: true, name: true, tags: true, status: true, healthScore: true,
+        activeTaskCount: true, maxConcurrentTasks: true,
+        claudeSessionPct: true, claudeWeekPct: true, pausedDueToUsage: true, cooldownUntil: true,
+      },
+    }),
+    // Real-time workload: count tasks per agent broken down by status so the selector
+    // uses accurate queue depth instead of the potentially-stale activeTaskCount field.
+    prisma.task.groupBy({
+      by: ["agentId", "status"],
+      where: { agentId: { not: null }, status: { in: ["running", "queued"] } },
+      _count: { id: true },
+    }),
+  ]);
+
+  // Build per-agent workload maps from the grouped results.
+  const runningByAgent = new Map<string, number>();
+  const queuedByAgent = new Map<string, number>();
+  for (const row of taskCountRows) {
+    if (!row.agentId) continue;
+    if (row.status === "running") runningByAgent.set(row.agentId, row._count.id);
+    if (row.status === "queued")  queuedByAgent.set(row.agentId, row._count.id);
+  }
 
   const now = new Date();
   let assigned = 0;
@@ -681,6 +699,8 @@ export async function autoAssignQueuedTasks(maxBatch = 20): Promise<AutoAssignSu
       claudeWeekPct: a.claudeWeekPct,
       pausedDueToUsage: a.pausedDueToUsage,
       cooldownUntil: a.cooldownUntil,
+      runningTaskCount: runningByAgent.get(a.id) ?? 0,
+      queuedTaskCount: queuedByAgent.get(a.id) ?? 0,
     }));
 
     const { agentId, scores } = selectBestAgent(candidateAgents, { requiredTags: task.requiredTags }, now);
@@ -721,10 +741,9 @@ export async function autoAssignQueuedTasks(maxBatch = 20): Promise<AutoAssignSu
       });
     }
 
-    // Keep the in-memory candidate pool's capacity figure consistent across this batch so a
-    // second task in the same call doesn't get assigned to an agent that's now at capacity.
-    const agentRow = agentRows.find((a) => a.id === agentId);
-    if (agentRow) agentRow.activeTaskCount += 1;
+    // Keep in-memory workload maps consistent so a second task in the same batch
+    // sees the updated queue depth and doesn't over-assign to the same agent.
+    queuedByAgent.set(agentId, (queuedByAgent.get(agentId) ?? 0) + 1);
 
     assigned++;
 
