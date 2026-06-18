@@ -4,6 +4,11 @@
  *
  * All functions operate against the public GitHub REST API v3.
  * Set GITHUB_TOKEN env var to increase rate limits and access private repos.
+ *
+ * Security: Set GITHUB_ALLOWED_OWNERS (comma-separated list of GitHub org/user names)
+ * to restrict which repositories the system GitHub token may access.
+ * Requests for repositories owned by unlisted owners are rejected with a
+ * GitHubOwnerNotAllowedError before any network call is made.
  */
 
 const GITHUB_API = "https://api.github.com";
@@ -18,6 +23,40 @@ function repoOwnerAndName(repoUrl: string): { owner: string; repo: string } {
   const httpsMatch = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
   if (!httpsMatch) throw new Error(`Cannot parse GitHub repo URL: ${repoUrl}`);
   return { owner: httpsMatch[1], repo: httpsMatch[2].replace(/\.git$/, "") };
+}
+
+/** Thrown when a repository owner is not in the GITHUB_ALLOWED_OWNERS allowlist. */
+export class GitHubOwnerNotAllowedError extends Error {
+  readonly status = 403;
+  constructor(owner: string) {
+    super(`GitHub repository owner "${owner}" is not in the allowed owners list`);
+    this.name = "GitHubOwnerNotAllowedError";
+  }
+}
+
+/**
+ * Parse and return the configured allowed owner set.
+ * Returns null when GITHUB_ALLOWED_OWNERS is not set, which means no restriction.
+ * When set to a non-empty list, only those owners are permitted.
+ */
+function getAllowedOwners(): Set<string> | null {
+  const raw = process.env.GITHUB_ALLOWED_OWNERS ?? "";
+  const owners = raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return owners.length > 0 ? new Set(owners) : null;
+}
+
+/**
+ * Validate that the repository owner extracted from repoUrl is in the allowlist.
+ * Throws GitHubOwnerNotAllowedError if the allowlist is configured and the owner
+ * is not present. No-ops when GITHUB_ALLOWED_OWNERS is empty or unset.
+ */
+function assertOwnerAllowed(repoUrl: string): void {
+  const allowedOwners = getAllowedOwners();
+  if (!allowedOwners) return; // no restriction configured
+  const { owner } = repoOwnerAndName(repoUrl);
+  if (!allowedOwners.has(owner.toLowerCase())) {
+    throw new GitHubOwnerNotAllowedError(owner);
+  }
 }
 
 export interface GitHubFileContent {
@@ -46,6 +85,7 @@ export async function getFileContents(
   filePath: string,
   ref = "main",
 ): Promise<GitHubFileContent> {
+  assertOwnerAllowed(repoUrl);
   const { owner, repo } = repoOwnerAndName(repoUrl);
   const url = `${GITHUB_API}/repos/${owner}/${repo}/contents/${filePath}?ref=${encodeURIComponent(ref)}`;
   const res = await fetch(url, {
@@ -82,6 +122,7 @@ export async function listRepositoryTree(
   repoUrl: string,
   ref = "main",
 ): Promise<GitHubTreeEntry[]> {
+  assertOwnerAllowed(repoUrl);
   const { owner, repo } = repoOwnerAndName(repoUrl);
   const url = `${GITHUB_API}/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`;
   const res = await fetch(url, {
@@ -123,6 +164,7 @@ export async function upsertFile(opts: {
   committerName?: string;
   committerEmail?: string;
 }): Promise<{ commitSha: string; fileSha: string }> {
+  assertOwnerAllowed(opts.repoUrl);
   const { owner, repo } = repoOwnerAndName(opts.repoUrl);
   const branch = opts.branch ?? "main";
   const url = `${GITHUB_API}/repos/${owner}/${repo}/contents/${opts.filePath}`;
