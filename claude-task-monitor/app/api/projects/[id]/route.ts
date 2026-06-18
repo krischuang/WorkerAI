@@ -3,6 +3,7 @@ import { serverError } from "@/lib/api-error";
 import type { NextRequest } from "next/server";
 import { validateObjectiveUpdate } from "@/lib/project-objective-service";
 import { emitAudit } from "@/lib/audit";
+import { validateAutomationLevel } from "@/lib/task-validation";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -46,6 +47,16 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     const validationErr = validateObjectiveUpdate({ objective, successCriteria, constraints, nonGoals, improvementFocus, autonomousMode });
     if (validationErr) {
       return Response.json({ error: validationErr }, { status: 400 });
+    }
+
+    const autonomousModeErr = validateAutomationLevel(autonomousMode, "autonomousMode");
+    if (autonomousModeErr) {
+      return Response.json({ error: autonomousModeErr.message }, { status: 400 });
+    }
+
+    const improvementAutomationLevelErr = validateAutomationLevel(improvementAutomationLevel, "improvementAutomationLevel");
+    if (improvementAutomationLevelErr) {
+      return Response.json({ error: improvementAutomationLevelErr.message }, { status: 400 });
     }
 
     const editsObjectiveFields = [objective, successCriteria, constraints, nonGoals, improvementFocus].some((v) => v !== undefined);

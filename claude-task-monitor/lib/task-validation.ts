@@ -119,6 +119,39 @@ export function validateStatusUpdate(status: unknown): ValidationError | null {
   return null;
 }
 
+// ─── Automation / autonomousMode validator ────────────────────────────────────
+
+/** Valid automation levels: 0 (off) through 4 (full autonomous with high-risk). */
+export const AUTOMATION_LEVEL_MIN = 0;
+export const AUTOMATION_LEVEL_MAX = 4;
+
+/**
+ * Validates an automationLevel / autonomousMode value.
+ * Must be an integer in [0, 4]. Rejects NaN, decimals, negatives, and large integers.
+ */
+export function validateAutomationLevel(value: unknown, fieldName = "automationLevel"): ValidationError | null {
+  if (value === undefined || value === null) return null;
+  // Reject non-numeric types (strings, booleans, objects) at the type level.
+  if (typeof value !== "number") {
+    return {
+      field: fieldName,
+      message: `${fieldName} must be an integer between ${AUTOMATION_LEVEL_MIN} and ${AUTOMATION_LEVEL_MAX}`,
+    };
+  }
+  if (
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < AUTOMATION_LEVEL_MIN ||
+    value > AUTOMATION_LEVEL_MAX
+  ) {
+    return {
+      field: fieldName,
+      message: `${fieldName} must be an integer between ${AUTOMATION_LEVEL_MIN} and ${AUTOMATION_LEVEL_MAX}`,
+    };
+  }
+  return null;
+}
+
 // ─── Shared numeric field validator ──────────────────────────────────────────
 
 function _validateNumericFields(fields: {
