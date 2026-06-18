@@ -72,7 +72,7 @@ export const VALIDATION_BLOCK_START = "[WORKERAI_VALIDATION]";
 export const VALIDATION_BLOCK_END = "[/WORKERAI_VALIDATION]";
 
 /** Lines of tmux scrollback to capture when scanning for the completion block. */
-export const COMPLETION_SCAN_LINES = 1000;
+export const COMPLETION_SCAN_LINES = 200;
 
 /**
  * Lines of tmux scrollback to capture when polling for scan findings.
