@@ -1,6 +1,5 @@
 import * as path from "path";
 import * as os from "os";
-import * as fs from "fs";
 
 export type SshKeyPathResult =
   | { ok: true; resolved: string }
@@ -40,23 +39,12 @@ export function validateSshKeyPath(raw: unknown): SshKeyPathResult {
   const resolved = path.normalize(expanded);
 
   // Enforce home-directory boundary.
-  // Allow paths under the current user's home directory OR any user's home
-  // under /home/<username>/ — this handles the case where the process runs as
-  // root (os.homedir() = /root) but SSH keys live in /home/<user>/.ssh/.
-  // We verify that /home/<username> is an existing directory to prevent
-  // traversal attacks that land inside /home/ (e.g. ~/.ssh/../../etc/passwd
-  // normalises to /home/etc/passwd on systems where HOME is under /home/).
+  // The boundary is derived from the process's actual home directory (os.homedir())
+  // so that traversal attacks cannot escape via ../ even when HOME is a nested
+  // subdirectory (e.g. /home/ec2-user/claude-agents/agent-N).
   const home = os.homedir();
   const homeWithSep = home.endsWith(path.sep) ? home : home + path.sep;
   const isUnderCurrentHome = resolved === home || resolved.startsWith(homeWithSep);
-  const isUnderSystemHomes = (() => {
-    const parts = resolved.split(path.sep); // ["", "home", "<user>", ".ssh", ...]
-    // Require path to be under /home/<username>/.ssh/ to prevent traversal
-    // attacks where HOME is a subdirectory of /home/<username> (e.g.
-    // /home/ec2-user/claude-agents/agent-N) and .. escapes to sibling dirs.
-    if (parts[1] !== "home" || !parts[2] || parts[3] !== ".ssh" || parts.length < 5) return false;
-    try { return fs.statSync(path.join("/home", parts[2])).isDirectory(); } catch { return false; }
-  })();
 
   // SSH_KEY_ALLOWED_PATHS: comma-separated absolute path prefixes for keys that
   // live outside standard home directories (e.g. /root/.ssh when the app runs
@@ -70,7 +58,7 @@ export function validateSshKeyPath(raw: unknown): SshKeyPathResult {
       return resolved === prefix || resolved.startsWith(prefixWithSep);
     });
 
-  if (!isUnderCurrentHome && !isUnderSystemHomes && !isUnderAllowedPath) {
+  if (!isUnderCurrentHome && !isUnderAllowedPath) {
     return {
       ok: false,
       error: `sshKeyPath must be within a home directory (${home})`,
