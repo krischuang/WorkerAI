@@ -7,9 +7,13 @@ import "@xterm/xterm/css/xterm.css";
 
 import { useEffect, useRef, useState } from "react";
 
+// When served over HTTPS, route WebSocket through nginx (/ws) using wss://.
+// In HTTP dev mode, connect directly to the standalone ws-server port.
 const WS_URL =
   typeof window !== "undefined"
-    ? `ws://${window.location.hostname}:3099`
+    ? window.location.protocol === "https:"
+      ? `wss://${window.location.host}/ws`
+      : `ws://${window.location.hostname}:3099`
     : "ws://localhost:3099";
 
 // Exponential backoff delays in ms — caps at 30 s.
