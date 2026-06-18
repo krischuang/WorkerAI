@@ -5,10 +5,14 @@ import { executeRepair } from "@/lib/self-healing/repair-executor";
 import { writeRepairAuditLog } from "@/lib/self-healing/repair-audit";
 import { resolveIncident, setIncidentStatus } from "@/lib/self-healing/incident-service";
 import { nextAttemptNumber } from "@/lib/self-healing/repair-task-service";
+import { requireAdmin } from "@/lib/require-admin";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export async function POST(_request: NextRequest, ctx: Ctx) {
+export async function POST(request: NextRequest, ctx: Ctx) {
+  const denied = await requireAdmin(request);
+  if (denied) return denied;
+
   try {
     const { id } = await ctx.params;
 
