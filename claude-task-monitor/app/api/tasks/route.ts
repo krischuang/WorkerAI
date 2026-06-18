@@ -90,8 +90,6 @@ export async function POST(request: Request) {
       // Useful for seed scripts or bulk imports that supply their own values.
       skipPriorityInherit,
       requiredTags,
-      // Manual override — when omitted, riskLevel is auto-computed by lib/risk-classifier.ts.
-      riskLevel,
       isAutonomous,
     } = body;
 
@@ -113,7 +111,7 @@ export async function POST(request: Request) {
     }
     resolvedPriority ??= "P3";
 
-    const resolvedRiskLevel = riskLevel ?? classifyTaskRisk({ title, description, taskType: taskType ?? "coding" });
+    const resolvedRiskLevel = classifyTaskRisk({ title, description, taskType: taskType ?? "coding" });
 
     const task = await prisma.task.create({
       data: {

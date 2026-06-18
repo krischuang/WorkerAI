@@ -57,3 +57,30 @@ describe("classifyTaskRisk — default risk by taskType", () => {
     expect(classifyTaskRisk({ title: "Research the production deployment process", taskType: "research" })).toBe("high");
   });
 });
+
+// ─── Server-side risk classification enforcement ──────────────────────────────
+// These tests document that riskLevel is always computed server-side and cannot
+// be influenced by a client-supplied value.
+
+describe("classifyTaskRisk — server-side enforcement", () => {
+  it("returns high for a task with high-risk keywords regardless of any caller intent", () => {
+    // A client submitting { riskLevel: 'low' } for a migration task must NOT bypass
+    // this function — the route ignores client riskLevel and always calls classifyTaskRisk.
+    const result = classifyTaskRisk({ title: "Run database migration", taskType: "coding" });
+    expect(result).toBe("high");
+  });
+
+  it("returns medium for a benign task — client cannot override to 'low'", () => {
+    const result = classifyTaskRisk({ title: "Add a tooltip to the UI", taskType: "coding" });
+    expect(result).toBe("medium");
+  });
+
+  it("high-risk description escalates a benign title to high", () => {
+    const result = classifyTaskRisk({
+      title: "Regular update",
+      description: "Deploy the new build to production",
+      taskType: "coding",
+    });
+    expect(result).toBe("high");
+  });
+});
