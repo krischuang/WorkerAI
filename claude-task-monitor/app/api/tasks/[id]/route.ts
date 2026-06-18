@@ -87,7 +87,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     const {
       title, description, priority, status, estimatedCostLevel,
       taskType, resultSummary, nextAction, serverId, agentId, timeoutMinutes, maxRetries,
-      scheduledFor, requiredTags, riskLevel, isAutonomous,
+      scheduledFor, requiredTags, isAutonomous,
     } = body;
 
     const validationErr = validateTaskUpdate(body);
@@ -133,8 +133,6 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(maxRetries !== undefined && { maxRetries: Number(maxRetries) }),
         ...(scheduledFor !== undefined && { scheduledFor: scheduledFor === null ? null : new Date(scheduledFor) }),
         ...(Array.isArray(requiredTags) && { requiredTags: requiredTags.map((t: string) => t.trim().toLowerCase()) }),
-        // Manual override of the auto-computed risk classification (lib/risk-classifier.ts).
-        ...(riskLevel !== undefined && { riskLevel }),
         ...(isAutonomous !== undefined && { isAutonomous: Boolean(isAutonomous) }),
       },
       include: {
