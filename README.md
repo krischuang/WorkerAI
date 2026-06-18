@@ -252,21 +252,11 @@ The app ships as a Docker image (`ghcr.io/krischuang/tarotai:latest`) and is dep
 1. Push to `main` triggers the GitHub Actions workflow (`.github/workflows/deploy.yml`)
 2. The workflow assumes an IAM role via OIDC and sends an SSM command to the EC2 instance
 3. The EC2 instance runs `/home/ec2-user/auto_deploy/deploy.sh`, which:
+   - Pulls latest code from `main` (`git pull origin main`)
    - Stops running containers (`docker compose down`)
-   - Pulls the latest image from ghcr.io
+   - Rebuilds and starts containers (`docker compose up -d --build`)
    - Prunes dangling images and containers
-   - Starts containers (`docker compose up -d`)
    - Polls `http://localhost:3000/api/health` for up to 120 seconds
-
-### One-Time EC2 Setup
-
-Authenticate Docker with GitHub Container Registry (required to pull the image):
-
-```bash
-echo "YOUR_GITHUB_PAT" | sudo docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-```
-
-The PAT needs `read:packages` scope. Credentials are stored in `/root/.docker/config.json` and persist across deploys.
 
 ### Manual Deploy
 
