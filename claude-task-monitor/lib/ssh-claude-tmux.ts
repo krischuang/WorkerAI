@@ -1011,9 +1011,8 @@ export async function detectTaskCompletion(
   };
 
   // Capture enough scrollback to cover from outputOffset onward plus Claude's response.
-  // Use a 500-line window past the offset (up from 200) so longer responses are included.
   const captureDepth = (outputOffset !== undefined && outputOffset > 0)
-    ? Math.min(outputOffset + 500, 10_000)
+    ? Math.min(outputOffset + COMPLETION_SCAN_LINES, 5_000)
     : COMPLETION_SCAN_LINES;
 
   try {
@@ -1045,12 +1044,10 @@ export async function detectTaskCompletion(
       if (lines.length > outputOffset) {
         scanText = lines.slice(outputOffset).join("\n");
       } else {
-        // Offset exceeds captured lines — the pane grew less than expected
-        // (e.g., Claude wrote a very short response). Fall back to the last
-        // 100 lines: the completion block is always near the end of Claude's
-        // response, and the nonce+taskId match prevents false-positives from
-        // the prompt template which sits further back in the pane.
-        scanText = lines.slice(-100).join("\n");
+        // Offset exceeds captured lines — Claude hasn't produced output yet.
+        // Use empty scanText to avoid matching the completion block template
+        // embedded in the dispatch prompt.
+        scanText = "";
       }
     } else {
       scanText = pane;
