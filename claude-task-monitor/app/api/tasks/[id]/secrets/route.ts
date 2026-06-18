@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { encryptSecret } from "@/lib/task-secrets";
 import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
+import { emitAudit } from "@/lib/audit";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -47,6 +48,14 @@ export async function POST(req: NextRequest, ctx: Ctx): Promise<NextResponse | R
     where: { taskId_key: { taskId: id, key } },
     create: { taskId: id, key, encryptedValue },
     update: { encryptedValue },
+  });
+
+  await emitAudit({
+    entityType: "TaskSecret",
+    entityId: `${id}:${key}`,
+    eventType: "secret.created",
+    actorType: "user",
+    payload: { key },
   });
 
   return NextResponse.json({ key }, { status: 201 });
