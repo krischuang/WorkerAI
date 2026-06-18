@@ -243,6 +243,41 @@ Sessions auto-close after 30 minutes of idle. SSH private keys are read server-s
 
 ---
 
+## Deployment
+
+The app ships as a Docker image (`ghcr.io/krischuang/tarotai:latest`) and is deployed to an EC2 instance via GitHub Actions + AWS SSM.
+
+### CI/CD Flow
+
+1. Push to `main` triggers the GitHub Actions workflow (`.github/workflows/deploy.yml`)
+2. The workflow assumes an IAM role via OIDC and sends an SSM command to the EC2 instance
+3. The EC2 instance runs `/home/ec2-user/auto_deploy/deploy.sh`, which:
+   - Stops running containers (`docker compose down`)
+   - Pulls the latest image from ghcr.io
+   - Prunes dangling images and containers
+   - Starts containers (`docker compose up -d`)
+   - Polls `http://localhost:3000/api/health` for up to 120 seconds
+
+### One-Time EC2 Setup
+
+Authenticate Docker with GitHub Container Registry (required to pull the image):
+
+```bash
+echo "YOUR_GITHUB_PAT" | sudo docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+```
+
+The PAT needs `read:packages` scope. Credentials are stored in `/root/.docker/config.json` and persist across deploys.
+
+### Manual Deploy
+
+```bash
+sudo bash /home/ec2-user/auto_deploy/deploy.sh
+```
+
+Deploy logs are written to `/home/ec2-user/auto_deploy/deploy.log` (overwritten each run).
+
+---
+
 ## Known Limitations
 
 - **No authentication** — do not expose this app to the network
