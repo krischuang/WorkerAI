@@ -128,17 +128,43 @@ export function rateLimitResponse(retryAfterSec: number): Response {
 // ─── IP extraction (edge-compatible) ─────────────────────────────────────────
 
 /**
+ * Parse TRUSTED_PROXY_IPS into a Set of normalised IP strings.
+ * Returns null when the env var is absent or empty (no trusted proxies configured).
+ */
+function getTrustedProxyIps(): Set<string> | null {
+  const raw = process.env.TRUSTED_PROXY_IPS ?? "";
+  const ips = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return ips.length > 0 ? new Set(ips) : null;
+}
+
+/**
  * Extract the best-available client IP from request headers.
- * Works in both Edge runtime (middleware) and Node.js runtime (route handlers).
+ *
+ * X-Forwarded-For is only trusted when TRUSTED_PROXY_IPS is configured and the
+ * immediate source IP (X-Real-IP) is in that list.  This prevents attackers from
+ * spoofing arbitrary IPs and creating unlimited rate-limit buckets.
+ *
+ * When TRUSTED_PROXY_IPS is not set, X-Forwarded-For is ignored entirely.
+ * X-Real-IP is used as-is (typically set by a local reverse proxy like nginx).
  */
 export function extractRequestIp(
   request: { headers: { get(key: string): string | null } },
 ): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim();
-  const real = request.headers.get("x-real-ip");
-  if (real) return real;
-  return "127.0.0.1";
+  const trustedProxies = getTrustedProxyIps();
+  const realIp = request.headers.get("x-real-ip");
+
+  if (trustedProxies) {
+    // Only honour X-Forwarded-For when the immediate upstream is a trusted proxy.
+    if (realIp && trustedProxies.has(realIp)) {
+      const forwarded = request.headers.get("x-forwarded-for");
+      if (forwarded) return forwarded.split(",")[0].trim();
+    }
+    // Immediate source is not a trusted proxy — use X-Real-IP or fallback.
+    return realIp ?? "127.0.0.1";
+  }
+
+  // No trusted proxy list configured — ignore X-Forwarded-For to prevent spoofing.
+  return realIp ?? "127.0.0.1";
 }
 
 // ─── Admin-login bucket persistence helpers ───────────────────────────────────
