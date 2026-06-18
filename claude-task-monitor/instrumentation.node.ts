@@ -82,6 +82,7 @@ async function multiTaskSecretValues(taskIds: string[]): Promise<string[]> {
 }
 import { runDueScheduledTasks } from "./lib/scheduled-task-service";
 import { setRateLimitEnabled } from "./lib/api-rate-limit";
+import { runSelfHealingCycle } from "./lib/self-healing/self-healing-cycle";
 
 const TAG = "[usage-poller]";
 
@@ -2433,6 +2434,13 @@ function startPoller() {
       await startDueImprovementCycles();
     } catch (err) {
       console.error(`${TAG} startDueImprovementCycles threw:`, err);
+    }
+
+    // ── 14. Self-healing cycle — detect incidents, run auto-repairs ──────────
+    try {
+      await runSelfHealingCycle();
+    } catch (err) {
+      console.error(`${TAG} runSelfHealingCycle threw:`, err);
     }
 
     // Persist heartbeat so the health endpoint can detect a stalled poller.

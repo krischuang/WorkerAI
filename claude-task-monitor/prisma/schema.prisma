@@ -396,6 +396,8 @@ model Agent {
   workerHealths  WorkerHealth[]
   recoveryLogs   RecoveryLog[]
   usageSnapshots AgentUsageSnapshot[]
+  incidents      Incident[]           @relation("AgentIncidents")
+  repairTasks    RepairTask[]         @relation("AgentRepairTasks")
 
   @@unique([serverId, slug])
 }
@@ -862,6 +864,116 @@ model ScheduledTask {
   @@index([projectId])
   @@index([nextRunAt, enabled])
 }
+
+// ─── Self-Healing ────────────────────────────────────────────────────────────
+
+enum IncidentSeverity {
+  warning
+  error
+  critical
+}
+
+enum IncidentStatus {
+  open
+  investigating
+  resolved
+  closed
+}
+
+enum RepairTaskStatus {
+  pending
+  assigned
+  in_progress
+  fixed
+  failed_validation
+  needs_human_review
+  failed
+}
+
+// An anomaly detected by the self-healing monitor (one per distinct condition).
+model Incident {
+  id              String           @id @default(cuid())
+  source          String           // "usage_fetch_failure" | "usage_parse_error" | "stale_usage_data" | "invalid_usage_value" | "stuck_agent" | ...
+  severity        IncidentSeverity
+  affectedAgentId String?
+  affectedAgent   Agent?           @relation("AgentIncidents", fields: [affectedAgentId], references: [id], onDelete: SetNull)
+  title           String
+  message         String
+  rawError        String?
+  contextJson     Json             @default("{}")
+  status          IncidentStatus   @default(open)
+  resolvedAt      DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  repairTasks     RepairTask[]
+
+  @@index([status])
+  @@index([affectedAgentId])
+  @@index([source, status])
+  @@index([createdAt])
+}
+
+// A unit of repair work created for each open Incident.
+model RepairTask {
+  id              String           @id @default(cuid())
+  incidentId      String
+  incident        Incident         @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  title           String
+  description     String
+  suggestedSteps  String[]
+  status          RepairTaskStatus @default(pending)
+  riskLevel       RiskLevel        @default(low)
+  assignedAgentId String?
+  assignedAgent   Agent?           @relation("AgentRepairTasks", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  repairAttempts  RepairAttempt[]
+  auditLogs       RepairAuditLog[]
+
+  @@index([incidentId])
+  @@index([status])
+  @@index([assignedAgentId])
+}
+
+// One record per repair execution attempt.
+model RepairAttempt {
+  id               String     @id @default(cuid())
+  repairTaskId     String
+  repairTask       RepairTask @relation(fields: [repairTaskId], references: [id], onDelete: Cascade)
+  attemptNumber    Int        @default(1)
+  executedBy       String?    // "system" | agentId
+  logs             String?
+  validationOutput String?
+  validationPassed Boolean?
+  changedFiles     String[]
+  commitHash       String?
+  status           String     @default("running") // "running" | "completed" | "failed"
+  createdAt        DateTime   @default(now())
+  completedAt      DateTime?
+
+  @@index([repairTaskId])
+}
+
+// Immutable audit record written after every repair attempt.
+model RepairAuditLog {
+  id               String     @id @default(cuid())
+  incidentId       String
+  repairTaskId     String
+  repairTask       RepairTask @relation(fields: [repairTaskId], references: [id], onDelete: Cascade)
+  assignedAgentId  String?
+  status           String
+  validationResult String?
+  changedFiles     String[]
+  commitHash       String?
+  pushStatus       String?
+  errorMessage     String?
+  createdAt        DateTime   @default(now())
+
+  @@index([incidentId])
+  @@index([repairTaskId])
+}
+
+// ─── End Self-Healing ─────────────────────────────────────────────────────────
 
 // Admin-panel action audit log — tracks every mutating action taken via admin UI/API.
 model AdminAuditLog {

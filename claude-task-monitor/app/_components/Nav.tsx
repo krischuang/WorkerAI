@@ -28,6 +28,7 @@ import {
   FileJson,
   ClipboardCheck,
   CalendarClock,
+  Wrench,
 } from "lucide-react";
 import { KeyboardShortcutsModal } from "./KeyboardShortcutsModal";
 import { GlobalSearch } from "./GlobalSearch";
@@ -69,6 +70,7 @@ const sections = [
     label: "Admin",
     items: [
       { href: "/admin/health",         label: "Health Monitor", icon: Activity       },
+      { href: "/admin/self-healing",   label: "Self-Healing",   icon: Wrench         },
       { href: "/admin/audit",          label: "Audit Log",      icon: ShieldCheck    },
       { href: "/admin/audit-log",      label: "Admin Actions",  icon: ClipboardCheck },
       { href: "/admin/notifications",  label: "Notifications",  icon: Bell           },
