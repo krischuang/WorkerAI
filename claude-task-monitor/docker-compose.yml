@@ -38,8 +38,8 @@ services:
       # Set SSH_KEY_FILE on the host (or in .env) to override the source path.
       - ${SSH_KEY_FILE:-/home/ec2-user/.ssh/WorkerAI.pem}:/app/.ssh/WorkerAI.pem:ro
     ports:
-      - "3000:3000"
-      - "3099:3099"
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3099:3099"
     entrypoint: ["sh", "/app/scripts/docker-entrypoint.sh"]
     command: ["sh", "-c", "npm start & npm run ws & wait"]
 
