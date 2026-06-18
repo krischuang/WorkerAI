@@ -25,6 +25,12 @@ export interface AgentCandidate {
   claudeWeekPct: number | null;
   pausedDueToUsage: boolean;
   cooldownUntil: Date | null;
+  /** Real-time count of tasks in running state for this agent. When provided, used instead of
+   *  activeTaskCount for the capacity gate. */
+  runningTaskCount?: number;
+  /** Real-time count of tasks in queued state waiting for this agent. Used as a load-balancing
+   *  signal — agents with long queues are scored lower so work spreads evenly. */
+  queuedTaskCount?: number;
 }
 
 export interface TaskRequirement {
@@ -78,8 +84,15 @@ export function scoreAgent(
     return rejected(agent, `in cooldown until ${agent.cooldownUntil.toISOString()}`);
   }
 
-  if (agent.activeTaskCount >= agent.maxConcurrentTasks) {
-    return rejected(agent, `at capacity (${agent.activeTaskCount}/${agent.maxConcurrentTasks} active tasks)`);
+  // Prefer real-time running count when available; fall back to the cached field.
+  const runningCount = agent.runningTaskCount ?? agent.activeTaskCount;
+  const queuedCount = agent.queuedTaskCount ?? 0;
+
+  // Hard gate: agent cannot start any new task while already at running capacity.
+  // Tasks can still be queued to agents with a full queue — queued tasks will dispatch
+  // once the running task finishes — so this gate only blocks overbooking.
+  if (runningCount >= agent.maxConcurrentTasks) {
+    return rejected(agent, `at running capacity (${runningCount}/${agent.maxConcurrentTasks})`);
   }
 
   if (agent.healthScore !== null && agent.healthScore < MIN_HEALTH_SCORE) {
@@ -100,15 +113,19 @@ export function scoreAgent(
     reasons.push(`matches all ${task.requiredTags.length} required tag(s)`);
   }
 
-  score += (100 - usagePct); // lower usage scores higher, up to +100
+  score += (100 - usagePct); // lower usage → higher score, up to +100
   reasons.push(`usage=${usagePct}%`);
 
-  const health = agent.healthScore ?? 100; // unknown health is treated as healthy, not penalized
-  score += health * 0.5;
+  const health = agent.healthScore ?? 100;
+  score += health * 0.5; // up to +50
   reasons.push(`health=${agent.healthScore ?? "unknown"}`);
 
-  score -= agent.activeTaskCount * 10; // each active task lowers the score
-  reasons.push(`activeTasks=${agent.activeTaskCount}/${agent.maxConcurrentTasks}`);
+  // Queue depth penalty: running tasks cost 10 pts each, queued tasks cost 20 pts each.
+  // Queued tasks are weighted more heavily because they represent committed future work
+  // that delays any newly assigned task proportionally.
+  score -= runningCount * 10;
+  score -= queuedCount * 20;
+  reasons.push(`running=${runningCount}, queued=${queuedCount}`);
 
   return { agentId: agent.id, agentName: agent.name, eligible: true, score, reasons };
 }
