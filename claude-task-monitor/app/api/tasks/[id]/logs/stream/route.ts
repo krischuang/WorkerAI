@@ -1,4 +1,6 @@
 import { prisma } from "@/lib/prisma";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
+import { emitAudit } from "@/lib/audit";
 import type { NextRequest } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -17,13 +19,39 @@ type Ctx = { params: Promise<{ id: string }> };
  */
 export async function GET(request: NextRequest, ctx: Ctx) {
   const { id } = await ctx.params;
+
+  // Rate-limit: cap rapid reconnect attempts (e.g. polling loops or probing
+  // unknown task IDs) at 30 opens per minute per task.
+  const rl = apiRateLimit(`task:logs-stream:${id}`, 30, 60_000);
+  if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
   const cursor = request.nextUrl.searchParams.get("cursor") ?? null;
 
-  // Verify the task exists before opening the stream.
-  const task = await prisma.task.findUnique({ where: { id }, select: { status: true } });
+  // Verify the task exists and belongs to a project before opening the stream.
+  // Execution logs can contain sensitive SSH output and env var names, so we
+  // must not stream them to callers who only know a task UUID from another context.
+  const task = await prisma.task.findUnique({
+    where: { id },
+    select: { status: true, projectId: true },
+  });
   if (!task) {
     return new Response("Task not found", { status: 404 });
   }
+  // Reject orphaned tasks (projectId should never be null for valid tasks, but
+  // guard explicitly so log access always requires a known project association).
+  if (!task.projectId) {
+    return new Response("Task has no associated project", { status: 403 });
+  }
+
+  // Audit: record that a live log stream was opened so operators can review
+  // access patterns in the audit log, consistent with other sensitive endpoints.
+  emitAudit({
+    entityType: "Task",
+    entityId: id,
+    eventType: "task.log_stream_opened",
+    actorType: "user",
+    payload: { projectId: task.projectId },
+  }).catch(() => { /* non-fatal */ });
 
   const encoder = new TextEncoder();
 
