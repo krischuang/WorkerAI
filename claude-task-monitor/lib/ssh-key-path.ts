@@ -50,8 +50,11 @@ export function validateSshKeyPath(raw: unknown): SshKeyPathResult {
   const homeWithSep = home.endsWith(path.sep) ? home : home + path.sep;
   const isUnderCurrentHome = resolved === home || resolved.startsWith(homeWithSep);
   const isUnderSystemHomes = (() => {
-    const parts = resolved.split(path.sep); // ["", "home", "<user>", ...]
-    if (parts[1] !== "home" || !parts[2] || parts.length < 4) return false;
+    const parts = resolved.split(path.sep); // ["", "home", "<user>", ".ssh", ...]
+    // Require path to be under /home/<username>/.ssh/ to prevent traversal
+    // attacks where HOME is a subdirectory of /home/<username> (e.g.
+    // /home/ec2-user/claude-agents/agent-N) and .. escapes to sibling dirs.
+    if (parts[1] !== "home" || !parts[2] || parts[3] !== ".ssh" || parts.length < 5) return false;
     try { return fs.statSync(path.join("/home", parts[2])).isDirectory(); } catch { return false; }
   })();
 
