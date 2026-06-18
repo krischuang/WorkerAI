@@ -25,6 +25,19 @@ function getMasterKey(): Buffer {
 
 export function encryptSecret(plaintext: string): string {
   const key = getMasterKey();
+  return encryptSecretWithKey(plaintext, key);
+}
+
+export function decryptSecret(encryptedValue: string): string {
+  const key = getMasterKey();
+  return decryptSecretWithKey(encryptedValue, key);
+}
+
+/**
+ * Encrypt using an explicitly supplied 32-byte key buffer.
+ * Used by the key-rotation endpoint so it does not need to swap the env var.
+ */
+export function encryptSecretWithKey(plaintext: string, key: Buffer): string {
   const iv = randomBytes(IV_LEN);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
@@ -32,8 +45,11 @@ export function encryptSecret(plaintext: string): string {
   return Buffer.concat([iv, authTag, encrypted]).toString("base64url");
 }
 
-export function decryptSecret(encryptedValue: string): string {
-  const key = getMasterKey();
+/**
+ * Decrypt using an explicitly supplied 32-byte key buffer.
+ * Used by the key-rotation endpoint so it does not need to swap the env var.
+ */
+export function decryptSecretWithKey(encryptedValue: string, key: Buffer): string {
   const combined = Buffer.from(encryptedValue, "base64url");
   const iv = combined.subarray(0, IV_LEN);
   const authTag = combined.subarray(IV_LEN, IV_LEN + TAG_LEN);
@@ -41,6 +57,15 @@ export function decryptSecret(encryptedValue: string): string {
   const decipher = createDecipheriv(ALGORITHM, key, iv);
   decipher.setAuthTag(authTag);
   return decipher.update(ciphertext).toString("utf8") + decipher.final("utf8");
+}
+
+/**
+ * Parse and validate a 64-character hex key string into a 32-byte Buffer.
+ * Returns null if the string is invalid so callers can return a clean error.
+ */
+export function parseHexKey(hex: unknown): Buffer | null {
+  if (typeof hex !== "string" || !/^[0-9a-fA-F]{64}$/.test(hex)) return null;
+  return Buffer.from(hex, "hex");
 }
 
 /** Returns `{ key, value }[]` for all secrets attached to a task. */
