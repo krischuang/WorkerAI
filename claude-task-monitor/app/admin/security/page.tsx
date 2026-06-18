@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { PageHeader, Btn, inputCls } from "@/app/_components/ui";
-import { ShieldCheck, ShieldOff, RefreshCw } from "lucide-react";
+import { ShieldCheck, ShieldOff, RefreshCw, KeyRound } from "lucide-react";
 
 interface TotpStatus {
   enabled: boolean;
@@ -19,6 +19,12 @@ export default function AdminSecurityPage() {
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [showDisableConfirm, setShowDisableConfirm] = useState(false);
+
+  // Key rotation state
+  const [rotateOldKey, setRotateOldKey] = useState("");
+  const [rotateNewKey, setRotateNewKey] = useState("");
+  const [rotateWorking, setRotateWorking] = useState(false);
+  const [rotateMessage, setRotateMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -88,6 +94,35 @@ export default function AdminSecurityPage() {
       await fetch("/api/admin/totp", { method: "DELETE" });
     } catch { /* ignore */ }
     load();
+  }
+
+  async function handleRotateKey(e: React.FormEvent) {
+    e.preventDefault();
+    setRotateMessage(null);
+    setRotateWorking(true);
+    try {
+      const res = await fetch("/api/admin/secrets/rotate-key", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ oldKey: rotateOldKey, newKey: rotateNewKey }),
+      });
+      const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+      if (res.ok) {
+        const migrated = typeof body.migrated === "number" ? body.migrated : 0;
+        setRotateMessage({
+          type: "success",
+          text: `Re-encrypted ${migrated} secret row(s). Update TASK_SECRET_KEY to the new key and restart the server.`,
+        });
+        setRotateOldKey("");
+        setRotateNewKey("");
+      } else {
+        setRotateMessage({ type: "error", text: String(body.error || "Key rotation failed") });
+      }
+    } catch {
+      setRotateMessage({ type: "error", text: "Could not reach the server" });
+    } finally {
+      setRotateWorking(false);
+    }
   }
 
   return (
@@ -252,6 +287,81 @@ export default function AdminSecurityPage() {
           )}
         </div>
       )}
+      {/* ── Task Secret Key Rotation ─────────────────────────────────── */}
+      <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-6 space-y-4">
+        <div className="flex items-center gap-3">
+          <KeyRound className="w-5 h-5 text-zinc-600 dark:text-zinc-400 shrink-0" />
+          <div>
+            <p className="font-medium text-zinc-900 dark:text-zinc-100">Task Secret Key Rotation</p>
+            <p className="text-sm text-zinc-600 dark:text-zinc-400">
+              Re-encrypt all stored task secrets when rotating <code className="font-mono text-xs bg-zinc-100 dark:bg-zinc-800 px-1 rounded">TASK_SECRET_KEY</code>.
+            </p>
+          </div>
+        </div>
+
+        <div className="text-sm text-zinc-600 dark:text-zinc-400 space-y-1 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg px-4 py-3">
+          <p className="font-medium text-zinc-700 dark:text-zinc-300">Rotation steps:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Generate a new 64-character hex key: <code className="font-mono text-xs bg-zinc-100 dark:bg-zinc-700 px-1 rounded">node -e &quot;console.log(require(&apos;crypto&apos;).randomBytes(32).toString(&apos;hex&apos;))&quot;</code></li>
+            <li>Enter the current key (oldKey) and the new key (newKey) below and submit.</li>
+            <li>Verify the response shows the expected row count.</li>
+            <li>Update <code className="font-mono text-xs bg-zinc-100 dark:bg-zinc-700 px-1 rounded">TASK_SECRET_KEY</code> to the new value and restart the server.</li>
+          </ol>
+        </div>
+
+        {rotateMessage && (
+          <div className={`rounded-lg px-4 py-3 text-sm ${
+            rotateMessage.type === "success"
+              ? "bg-green-50 text-green-800 dark:bg-green-900/20 dark:text-green-300"
+              : "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300"
+          }`}>
+            {rotateMessage.text}
+          </div>
+        )}
+
+        <form onSubmit={handleRotateKey} className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              Current key (oldKey) — 64 hex chars
+            </label>
+            <input
+              type="password"
+              value={rotateOldKey}
+              onChange={(e) => setRotateOldKey(e.target.value)}
+              placeholder="e.g. a3f1..."
+              className={`${inputCls} font-mono text-xs`}
+              autoComplete="off"
+              required
+              minLength={64}
+              maxLength={64}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              New key (newKey) — 64 hex chars
+            </label>
+            <input
+              type="password"
+              value={rotateNewKey}
+              onChange={(e) => setRotateNewKey(e.target.value)}
+              placeholder="e.g. 9d2b..."
+              className={`${inputCls} font-mono text-xs`}
+              autoComplete="off"
+              required
+              minLength={64}
+              maxLength={64}
+            />
+          </div>
+          <Btn
+            variant="secondary"
+            size="sm"
+            type="submit"
+            disabled={rotateWorking || rotateOldKey.length !== 64 || rotateNewKey.length !== 64}
+          >
+            {rotateWorking ? "Rotating…" : "Rotate key"}
+          </Btn>
+        </form>
+      </div>
     </div>
   );
 }
