@@ -14,6 +14,7 @@ import {
   validateStatusUpdate,
   validateTmuxSession,
   validateWorkDir,
+  validateAutomationLevel,
   VALID_PRIORITIES,
   VALID_STATUSES,
   VALID_COST_LEVELS,
@@ -22,6 +23,8 @@ import {
   TIMEOUT_MINUTES_MAX,
   MAX_RETRIES_MIN,
   MAX_RETRIES_MAX,
+  AUTOMATION_LEVEL_MIN,
+  AUTOMATION_LEVEL_MAX,
 } from "../task-validation";
 
 // ─── validateTaskCreate ───────────────────────────────────────────────────────
@@ -619,5 +622,60 @@ describe("validateWorkDir — injection attacks rejected", () => {
     expect(validateWorkDir(null)).not.toBeNull();
     expect(validateWorkDir(undefined)).not.toBeNull();
     expect(validateWorkDir(123)).not.toBeNull();
+  });
+});
+
+// ─── validateAutomationLevel ──────────────────────────────────────────────────
+
+describe("validateAutomationLevel — valid values", () => {
+  it("accepts 0 (off)", () => {
+    expect(validateAutomationLevel(0)).toBeNull();
+  });
+
+  it("accepts 1 through 4", () => {
+    for (let i = AUTOMATION_LEVEL_MIN; i <= AUTOMATION_LEVEL_MAX; i++) {
+      expect(validateAutomationLevel(i)).toBeNull();
+    }
+  });
+
+  it("accepts undefined (field omitted — no validation needed)", () => {
+    expect(validateAutomationLevel(undefined)).toBeNull();
+  });
+
+  it("accepts null (field omitted — no validation needed)", () => {
+    expect(validateAutomationLevel(null)).toBeNull();
+  });
+});
+
+describe("validateAutomationLevel — invalid values", () => {
+  it("rejects values above max (999)", () => {
+    expect(validateAutomationLevel(999)).not.toBeNull();
+  });
+
+  it("rejects negative values", () => {
+    expect(validateAutomationLevel(-1)).not.toBeNull();
+  });
+
+  it("rejects decimal values", () => {
+    expect(validateAutomationLevel(1.5)).not.toBeNull();
+    expect(validateAutomationLevel(0.1)).not.toBeNull();
+  });
+
+  it("rejects NaN", () => {
+    expect(validateAutomationLevel(NaN)).not.toBeNull();
+  });
+
+  it("rejects Infinity", () => {
+    expect(validateAutomationLevel(Infinity)).not.toBeNull();
+    expect(validateAutomationLevel(-Infinity)).not.toBeNull();
+  });
+
+  it("rejects string representations of numbers", () => {
+    expect(validateAutomationLevel("2")).not.toBeNull();
+  });
+
+  it("uses the custom fieldName in the error message", () => {
+    const err = validateAutomationLevel(99, "autonomousMode");
+    expect(err?.message).toContain("autonomousMode");
   });
 });

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { emitAudit } from "@/lib/audit";
+import { validateAutomationLevel } from "@/lib/task-validation";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -10,9 +11,12 @@ export async function POST(request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
     const body = await request.json().catch(() => ({}));
-    const automationLevel: number = typeof body.automationLevel === "number"
-      ? body.automationLevel
-      : undefined as never;
+    const rawLevel = body.automationLevel;
+    const levelErr = validateAutomationLevel(rawLevel);
+    if (levelErr) return NextResponse.json({ error: levelErr.message }, { status: 400 });
+    const automationLevel: number | undefined = rawLevel !== undefined && rawLevel !== null
+      ? Number(rawLevel)
+      : undefined;
 
     const project = await prisma.project.findUnique({
       where: { id },
