@@ -22,11 +22,23 @@ export async function GET(_req: NextRequest, ctx: Ctx): Promise<NextResponse> {
 
   const buffer = fs.readFileSync(artifact.storagePath);
 
+  // Sanitize the user-supplied filename to prevent header injection.
+  // The fallback ASCII name strips any character that could be used to
+  // inject CRLF sequences or break the quoted-string syntax.
+  // The RFC 5987 encoded parameter (filename*) carries the full Unicode
+  // name safely for modern clients while the ASCII fallback serves older ones.
+  const safeAscii = artifact.filename
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/^\.+/, "_") // disallow leading dots
+    .slice(0, 255) || "download";
+  const contentDisposition =
+    `attachment; filename="${safeAscii}"; filename*=UTF-8''${encodeURIComponent(artifact.filename)}`;
+
   return new NextResponse(buffer, {
     status: 200,
     headers: {
       "Content-Type": artifact.mimeType,
-      "Content-Disposition": `attachment; filename="${artifact.filename}"`,
+      "Content-Disposition": contentDisposition,
       "Content-Length": String(buffer.length),
       "Cache-Control": "private, no-cache",
     },
