@@ -130,14 +130,17 @@ export async function pollForFindings<T>(opts: {
       const extracted = extractJson(pane, startMarker, endMarker);
 
       if (extracted) {
-        // Only treat this fragment as a real candidate if it references the expected
-        // key. Prevents code snippets in Claude's prose (e.g. Prisma query patterns)
-        // from being reported as parse_failed when the real error is timed_out.
+        // Only treat unparseable fragments as candidates if they reference the
+        // expected key — prevents Claude's prose code snippets from being
+        // captured as debug output when the real issue is a timeout.
         if (extracted.raw.includes(`"${resultKey}"`)) {
           lastRaw = extracted.raw;
         }
         try {
           const parsed = JSON.parse(extracted.raw) as Record<string, unknown>;
+          // Always capture raw when JSON parses successfully (useful for debugging
+          // even when the expected key is absent).
+          lastRaw = extracted.raw;
           const items = parsed[resultKey];
           if (Array.isArray(items)) return { result: items as T[], raw: extracted.raw };
           // Parsed but key missing — keep polling; Claude may not have finished
