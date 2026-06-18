@@ -4,7 +4,7 @@
  * requiring an SSH connection or a running tmux session.
  */
 
-import { COMPLETION_BLOCK_START, COMPLETION_BLOCK_END } from "@/lib/constants";
+import { COMPLETION_BLOCK_START, COMPLETION_BLOCK_END, VALIDATION_BLOCK_START, VALIDATION_BLOCK_END } from "@/lib/constants";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -489,4 +489,51 @@ export function classifyIdlePane(pane: string): IdleClassification {
   const busyPattern = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|\bThinking\b|esc to interrupt/i;
   const isBusy = tail.some((l) => busyPattern.test(l));
   return { isIdle: hasPrompt && !isBusy, hasPrompt, isBusy };
+}
+
+export interface ValidationBlockResult {
+  found: boolean;
+  status: "passed" | "failed" | null;
+  evidence: string | null;
+}
+
+/**
+ * Scans pane text for a [WORKERAI_VALIDATION]...[/WORKERAI_VALIDATION] block
+ * whose taskId and nonce match the expected values. Returns the first matching block's
+ * result and evidence, or { found: false } if no valid block is present.
+ */
+export function detectValidationBlock(
+  paneText: string,
+  expectedTaskId: string,
+  expectedNonce: string,
+): ValidationBlockResult {
+  if (!expectedTaskId || !expectedNonce) return { found: false, status: null, evidence: null };
+
+  let pos = 0;
+  while (true) {
+    const startIdx = paneText.indexOf(VALIDATION_BLOCK_START, pos);
+    if (startIdx === -1) return { found: false, status: null, evidence: null };
+
+    const endIdx = paneText.indexOf(VALIDATION_BLOCK_END, startIdx + VALIDATION_BLOCK_START.length);
+    if (endIdx === -1) return { found: false, status: null, evidence: null };
+
+    const block = paneText.slice(startIdx + VALIDATION_BLOCK_START.length, endIdx);
+    const taskIdMatch = block.match(/^taskId:\s*(.+)$/m);
+    const nonceMatch  = block.match(/^nonce:\s*(.+)$/m);
+    const resultMatch = block.match(/^result:\s*(.+)$/m);
+    const evidenceMatch = block.match(/^evidence:\s*(.+)$/m);
+
+    if (
+      taskIdMatch?.[1].trim() === expectedTaskId &&
+      nonceMatch?.[1].trim() === expectedNonce
+    ) {
+      const result = resultMatch?.[1].trim();
+      const status: "passed" | "failed" | null =
+        result === "passed" ? "passed" : result === "failed" ? "failed" : null;
+      const evidence = evidenceMatch?.[1].trim() ?? null;
+      return { found: true, status, evidence };
+    }
+
+    pos = endIdx + VALIDATION_BLOCK_END.length;
+  }
 }
