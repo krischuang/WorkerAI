@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { startDueImprovementCycles } from "@/lib/improvement-cycle-service";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -14,9 +15,12 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
 
+    const rl = apiRateLimit(`project:trigger-cycle:${id}`, 3, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
     const project = await prisma.project.findUnique({
       where: { id },
-      select: { id: true, improvementAutomationLevel: true },
+      select: { id: true, improvementAutomationLevel: true, autoImprovementPaused: true },
     });
     if (!project) {
       return Response.json({ error: "Not found" }, { status: 404 });
@@ -25,6 +29,12 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
       return Response.json(
         { error: "Automation is disabled (level 0). Set improvementAutomationLevel >= 1 first." },
         { status: 400 },
+      );
+    }
+    if (project.autoImprovementPaused) {
+      return Response.json(
+        { error: "Auto-improvement is paused for this project due to consecutive scan failures. Resume it from the project settings before triggering a cycle." },
+        { status: 409 },
       );
     }
 
