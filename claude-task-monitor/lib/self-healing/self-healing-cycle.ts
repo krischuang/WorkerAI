@@ -16,6 +16,7 @@ import { createIncidentIfNew, resolveIncident, setIncidentStatus } from "./incid
 import { createRepairTaskIfNew, getPendingRepairTasks, updateRepairTaskStatus, nextAttemptNumber } from "./repair-task-service";
 import { executeRepair } from "./repair-executor";
 import { writeRepairAuditLog } from "./repair-audit";
+import { isSubsystemHalted } from "@/lib/kill-switch";
 
 const TAG = "[self-healing]";
 
@@ -83,6 +84,12 @@ function repairTaskInputFor(source: string, agentName: string) {
 }
 
 export async function runSelfHealingCycle(): Promise<void> {
+  // Kill switch: skip entire cycle when self-healing is halted
+  if (await isSubsystemHalted("selfHealing")) {
+    console.log(`${TAG} skipping cycle — kill switch active (selfHealing halted)`);
+    return;
+  }
+
   // ── 1. Detect anomalies ────────────────────────────────────────────────────
   let detections;
   try {
