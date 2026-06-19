@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
+import { decryptSecret } from "@/lib/task-secrets";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -11,14 +13,59 @@ type Ctx = { params: Promise<{ id: string }> };
  * Called by the agent or SSH session via curl during task execution to report
  * incremental progress. Only accepted while the task is in "running" status.
  *
+ * Authentication (one of):
+ *   - Session cookie (operator browser UI — validated by middleware)
+ *   - Bearer token matching the task's WORKERAI_PROGRESS_TOKEN secret (agent curl calls)
+ *
+ * To provision a progress token for a task, store a secret via:
+ *   POST /api/tasks/${TASK_ID}/secrets  { key: "WORKERAI_PROGRESS_TOKEN", value: "<random>" }
+ *
  * Example curl usage from within an agent:
  *   curl -s -X POST http://localhost:3000/api/tasks/${TASK_ID}/progress \
  *     -H "Content-Type: application/json" \
+ *     -H "Authorization: Bearer ${WORKERAI_PROGRESS_TOKEN}" \
  *     -d '{"percent":50,"message":"Halfway through analysis"}'
  */
 export async function POST(request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+
+    // Rate limit: 60 updates/min per task to prevent log flooding.
+    const rl = apiRateLimit(`task:progress:${id}`, 60, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
+    // Bearer token auth for agent curl callers (middleware passed them through).
+    // Requests without a Bearer header reached here via session cookie (middleware
+    // already validated), so no additional check is needed in that case.
+    const authHeader = request.headers.get("authorization");
+    if (authHeader?.startsWith("Bearer ")) {
+      const token = authHeader.slice(7).trim();
+      if (!process.env.TASK_SECRET_KEY) {
+        return Response.json(
+          { error: "TASK_SECRET_KEY is not configured — cannot validate progress token" },
+          { status: 503 },
+        );
+      }
+      const secret = await prisma.taskSecret.findUnique({
+        where: { taskId_key: { taskId: id, key: "WORKERAI_PROGRESS_TOKEN" } },
+        select: { encryptedValue: true },
+      });
+      if (!secret) {
+        return Response.json(
+          { error: "No WORKERAI_PROGRESS_TOKEN configured for this task" },
+          { status: 401 },
+        );
+      }
+      let expected: string;
+      try {
+        expected = decryptSecret(secret.encryptedValue);
+      } catch {
+        return Response.json({ error: "Token validation failed" }, { status: 401 });
+      }
+      if (token !== expected) {
+        return Response.json({ error: "Invalid progress token" }, { status: 401 });
+      }
+    }
 
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== "object") {
