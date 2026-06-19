@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isLocalOrigin } from "@/lib/exec-guards";
 import { apiRateLimit, rateLimitResponse, extractRequestIp, isRateLimitEnabled } from "@/lib/api-rate-limit";
+import { getAdminNonce } from "@/lib/admin-nonce-cache";
+import { timingSafeCompare } from "@/lib/timing-safe";
 
 // ─── General auth ─────────────────────────────────────────────────────────────
 
@@ -24,11 +26,14 @@ export const ADMIN_OTP_PENDING_COOKIE = "__admin_otp_pending";
 export const ADMIN_OTP_PENDING_MAX_AGE = 10 * 60; // 10 minutes
 
 /**
- * HMAC-SHA256 token derived from the admin password.
+ * HMAC-SHA256 token derived from the admin password and a per-session nonce.
  * Used as the httpOnly admin session cookie value.
  * Edge-compatible — no bcrypt involved.
+ *
+ * The nonce is incorporated so that rotating it (on logout) immediately
+ * invalidates all existing session cookies without changing the password.
  */
-export async function adminCookieToken(password: string): Promise<string> {
+export async function adminCookieToken(password: string, nonce = ""): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(password),
@@ -39,7 +44,7 @@ export async function adminCookieToken(password: string): Promise<string> {
   const sig = await crypto.subtle.sign(
     "HMAC",
     key,
-    new TextEncoder().encode("admin-session:v1"),
+    new TextEncoder().encode(`admin-session:v2:${nonce}`),
   );
   return Array.from(new Uint8Array(sig))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -149,10 +154,11 @@ export async function middleware(request: NextRequest) {
       );
     }
 
-    const expected = await adminCookieToken(adminPassword);
-    const adminCookie = request.cookies.get(ADMIN_COOKIE)?.value;
+    const nonce = getAdminNonce();
+    const expected = await adminCookieToken(adminPassword, nonce);
+    const adminCookie = request.cookies.get(ADMIN_COOKIE)?.value ?? "";
 
-    if (adminCookie === expected) return NextResponse.next();
+    if (timingSafeCompare(adminCookie, expected)) return NextResponse.next();
 
     // API routes → 401 JSON.
     if (pathname.startsWith("/api/")) {
@@ -174,6 +180,16 @@ export async function middleware(request: NextRequest) {
   // Login page and auth endpoint — no cookie required.
   if (isPublicPath(pathname)) return NextResponse.next();
 
+  // Progress endpoint supports Bearer token auth for agent curl calls.
+  // The route handler validates the token against TaskSecret; we just pass
+  // it through here so agents on remote servers can call without a cookie.
+  if (/^\/api\/tasks\/[^/]+\/progress$/.test(pathname)) {
+    const authHeader = request.headers.get("authorization");
+    if (authHeader?.startsWith("Bearer ")) {
+      return NextResponse.next();
+    }
+  }
+
   const secret = process.env.AUTH_SECRET;
 
   // If AUTH_SECRET is not configured, warn and allow through so the app
@@ -184,9 +200,9 @@ export async function middleware(request: NextRequest) {
   }
 
   const expected = await cookieToken(secret);
-  const cookie = request.cookies.get(AUTH_COOKIE)?.value;
+  const cookie = request.cookies.get(AUTH_COOKIE)?.value ?? "";
 
-  if (cookie === expected) return NextResponse.next();
+  if (timingSafeCompare(cookie, expected)) return NextResponse.next();
 
   // API routes → 401 JSON (not a redirect, so fetch() callers get a proper error).
   if (pathname.startsWith("/api/")) {
