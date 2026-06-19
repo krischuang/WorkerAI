@@ -13,7 +13,7 @@
  *   SystemConfig key "webhook_secret" / env WEBHOOK_SECRET  (HMAC-SHA256 signing)
  */
 
-import { createHmac, randomBytes } from "crypto";
+import { createHmac, createHash, randomBytes, timingSafeEqual } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { sendAlertEmail } from "@/lib/email";
 
@@ -239,6 +239,61 @@ export async function getOrCreateWebhookSigningSecret(): Promise<string> {
   return secret;
 }
 
+/**
+ * Sign a webhook payload with a timestamp to prevent replay attacks.
+ *
+ * Signature format: t=<unix_seconds>,v1=HMAC-SHA256("<unix_seconds>.<body>", secret)
+ *
+ * Receivers should:
+ *   1. Parse t= to get the timestamp.
+ *   2. Reject payloads older than 5 minutes.
+ *   3. Recompute the HMAC and compare using a timing-safe function.
+ */
+export function signWebhookPayload(body: string, secret: string, nowMs: number = Date.now()): string {
+  const tSec = Math.floor(nowMs / 1000);
+  const sig = createHmac("sha256", secret)
+    .update(`${tSec}.${body}`)
+    .digest("hex");
+  return `t=${tSec},v1=${sig}`;
+}
+
+/**
+ * Verify a webhook signature header.
+ * Returns the parsed timestamp in seconds, or null if verification fails.
+ *
+ * @param header  The value of the X-WorkerAI-Signature header.
+ * @param body    The raw request body string.
+ * @param secret  The shared signing secret.
+ * @param nowMs   Current epoch ms (injectable for tests).
+ * @param maxAgeMs Maximum age in ms before the request is rejected (default 5 min).
+ */
+export function verifyWebhookSignature(
+  header: string,
+  body: string,
+  secret: string,
+  nowMs: number = Date.now(),
+  maxAgeMs = 5 * 60 * 1000,
+): { valid: boolean; reason?: string } {
+  const tMatch = header.match(/t=(\d+)/);
+  const v1Match = header.match(/v1=([0-9a-f]+)/);
+  if (!tMatch || !v1Match) return { valid: false, reason: "malformed signature header" };
+
+  const tSec = parseInt(tMatch[1], 10);
+  const age = nowMs - tSec * 1000;
+  if (age < 0) return { valid: false, reason: "timestamp in future" };
+  if (age > maxAgeMs) return { valid: false, reason: "timestamp expired" };
+
+  const expected = createHmac("sha256", secret)
+    .update(`${tSec}.${body}`)
+    .digest("hex");
+
+  const ha = createHash("sha256").update(v1Match[1]).digest();
+  const hb = createHash("sha256").update(expected).digest();
+  if (!timingSafeEqual(ha, hb)) return { valid: false, reason: "signature mismatch" };
+
+  return { valid: true };
+}
+
 function signPayload(body: string, secret: string, tsMs: number): string {
   return createHmac("sha256", secret)
     .update(`${tsMs}.${body}`)
@@ -256,10 +311,11 @@ async function fireWebhook(
   headers: Record<string, string>,
   eventType: string,
 ): Promise<void> {
-  // Add dedicated signing header — always present so consumers can always verify.
+  // Add timestamp + HMAC signature for replay protection.
+  // Format: t=<unix_sec>,v1=HMAC-SHA256("<unix_sec>.<body>", secret)
   const sigSecret = await getOrCreateWebhookSigningSecret().catch(() => null);
   if (sigSecret) {
-    headers["X-WorkerAI-Signature"] = `sha256=${createHmac("sha256", sigSecret).update(body).digest("hex")}`;
+    headers["X-WorkerAI-Signature"] = signWebhookPayload(body, sigSecret);
   }
 
   let lastError: string | undefined;
