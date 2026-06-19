@@ -2,6 +2,8 @@ import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
 import { validateCron, nextCronDate } from "@/lib/cron-schedule";
 
+const MAX_SCHEDULED_TASKS_PER_PROJECT = 50;
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -41,6 +43,14 @@ export async function POST(request: Request) {
 
     const cronErr = validateCron(cronSchedule);
     if (cronErr) return Response.json({ error: `Invalid cron expression: ${cronErr}` }, { status: 400 });
+
+    const existingCount = await prisma.scheduledTask.count({ where: { projectId } });
+    if (existingCount >= MAX_SCHEDULED_TASKS_PER_PROJECT) {
+      return Response.json(
+        { error: `Scheduled task limit reached (${MAX_SCHEDULED_TASKS_PER_PROJECT} per project)` },
+        { status: 429 }
+      );
+    }
 
     const nextRunAt = nextCronDate(cronSchedule);
 
