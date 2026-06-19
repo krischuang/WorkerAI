@@ -40,6 +40,7 @@ import {
   promptFilePath,
   wrapperScriptPath,
 } from "@/lib/wrapper-script";
+import { opaqueSessionName } from "@/lib/tmux-session";
 
 export type { ClaudeUsageParsed };
 
@@ -708,14 +709,14 @@ export async function launchClaudeInTmux(
 // ─── Per-task tmux session management ────────────────────────────────────────
 
 /**
- * Returns the deterministic tmux session name for a given task.
- * Format: claude_<taskId>
+ * Returns the session name for a given task.
  *
- * Using the taskId keeps names unique, human-readable in `tmux ls`, and
- * makes it easy to correlate a session to its task in the database.
+ * When TMUX_SESSION_SECRET is configured the name is an opaque HMAC-derived
+ * token (not guessable from the task ID).  When the env var is absent it
+ * falls back to the legacy "claude_<taskId>" format with a warning.
  */
 export function taskTmuxSessionName(taskId: string): string {
-  return `claude_${taskId}`;
+  return opaqueSessionName(taskId);
 }
 
 export interface CreateTaskSessionResult {
@@ -1011,8 +1012,10 @@ export async function detectTaskCompletion(
   };
 
   // Capture enough scrollback to cover from outputOffset onward plus Claude's response.
+  // Use a 500-line window beyond the offset (up from 200) to handle longer AI responses
+  // that push the completion block further down the pane. Max 10_000 to stay safe.
   const captureDepth = (outputOffset !== undefined && outputOffset > 0)
-    ? Math.min(outputOffset + COMPLETION_SCAN_LINES, 5_000)
+    ? Math.min(outputOffset + 500, 10_000)
     : COMPLETION_SCAN_LINES;
 
   try {
