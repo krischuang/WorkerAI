@@ -8,6 +8,8 @@ import {
 import { withServerDispatchLock } from "@/lib/dispatch-lock";
 import { emitAudit } from "@/lib/audit";
 import { getDecryptedTaskSecrets } from "@/lib/task-secrets";
+import { isSubsystemHalted } from "@/lib/kill-switch";
+import { evaluateTaskContent } from "@/lib/prompt-firewall";
 
 export type AgentDispatchOutcome =
   | { ok: true }
@@ -40,6 +42,21 @@ export async function tryDispatchTaskToServer(opts: {
   logText: string;
   usageSnapshotPct?: number | null;
 }): Promise<DispatchOutcome> {
+  // Kill switch: block all dispatch when taskDispatch subsystem is halted
+  if (await isSubsystemHalted("taskDispatch")) {
+    return { ok: false, reason: "task_not_dispatchable" as const };
+  }
+
+  // Prompt firewall: scan task content for injection/exfiltration attempts
+  const firewallResult = await evaluateTaskContent({
+    taskId: opts.taskId,
+    title: opts.task.title,
+    description: opts.task.description,
+  });
+  if (firewallResult.blocked) {
+    return { ok: false, reason: "task_not_dispatchable" as const };
+  }
+
   return withServerDispatchLock(opts.taskId, async () => {
     const current = await prisma.task.findUnique({
       where: { id: opts.taskId },
@@ -142,6 +159,21 @@ export async function tryDispatchTaskToAgent(opts: {
       reason: "tmux_missing" as const,
       detail: "Agent has no tmuxSession configured. Set the tmuxSession field on the agent record.",
     };
+  }
+
+  // Kill switch: block all agent execution when subsystem is halted
+  if (await isSubsystemHalted("agentExecution")) {
+    return { ok: false, reason: "task_not_dispatchable" as const };
+  }
+
+  // Prompt firewall: scan for injection/exfiltration before dispatch
+  const firewallCheck = await evaluateTaskContent({
+    taskId: opts.taskId,
+    title: opts.task.title,
+    description: opts.task.description,
+  });
+  if (firewallCheck.blocked) {
+    return { ok: false, reason: "task_not_dispatchable" as const };
   }
 
   const maxConcurrent = opts.maxConcurrentTasks ?? 1;
