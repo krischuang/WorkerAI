@@ -18,6 +18,8 @@
 
 import { validateSshKeyEnv, validateArtifactStoragePath } from "./lib/startup-validation";
 import { prisma } from "./lib/prisma";
+import { setAdminNonce } from "./lib/admin-nonce-cache";
+import { setAdminOtpBucket } from "./lib/api-rate-limit";
 import {
   fetchClaudeUsageViaTmux,
   fetchClaudeUsageReliable,
@@ -137,6 +139,26 @@ if (!g._usagePollerStarted) {
       if (row) setRateLimitEnabled(row.value !== "false");
     })
     .catch(() => { /* leave default (true) if DB is not yet ready */ });
+
+  // ── Admin session nonce restoration ────────────────────────────────────
+  // Load the current session nonce so the middleware can validate admin
+  // cookies without a per-request DB round-trip.
+  prisma.systemConfig.findUnique({ where: { key: "admin_session_nonce" } })
+    .then((row) => { if (row) setAdminNonce(row.value); })
+    .catch(() => { /* non-fatal — nonce defaults to "" (legacy compat) */ });
+
+  // ── Admin-OTP rate-limit crash resilience ──────────────────────────────
+  // Restore OTP brute-force counters so a server restart cannot reset them.
+  prisma.systemConfig.findUnique({ where: { key: "rl_bucket_admin-otp" } })
+    .then((row) => {
+      if (row) {
+        try {
+          const parsed: unknown = JSON.parse(row.value);
+          if (Array.isArray(parsed)) setAdminOtpBucket(parsed as number[]);
+        } catch { /* ignore corrupt entry */ }
+      }
+    })
+    .catch(() => { /* non-fatal */ });
 
   // ── Admin-login rate-limit crash resilience ─────────────────────────────
   // Restore any previously persisted admin-login bucket so a server restart

@@ -7,6 +7,8 @@ import {
   adminOtpPendingToken, ADMIN_OTP_PENDING_COOKIE, ADMIN_OTP_PENDING_MAX_AGE,
 } from "@/middleware";
 import { getActiveTotpSecret } from "@/lib/admin-totp";
+import { getCurrentNonce } from "@/lib/admin-session-nonce";
+import { logAdminAction } from "@/lib/admin-audit-log";
 
 /**
  * Persist the admin-login rate-limit bucket to SystemConfig so it survives
@@ -65,7 +67,8 @@ export async function POST(request: NextRequest) {
     return res;
   }
 
-  const token = await adminCookieToken(adminPassword);
+  const nonce = await getCurrentNonce();
+  const token = await adminCookieToken(adminPassword, nonce);
   const res = NextResponse.json({ ok: true });
   res.cookies.set(ADMIN_COOKIE, token, {
     httpOnly: true,
@@ -74,5 +77,8 @@ export async function POST(request: NextRequest) {
     maxAge: ADMIN_COOKIE_MAX_AGE,
     path: "/",
   });
+
+  await logAdminAction(request, { action: "admin.login" });
+
   return res;
 }
