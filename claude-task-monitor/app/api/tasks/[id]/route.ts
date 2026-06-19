@@ -229,9 +229,19 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
 export async function DELETE(_req: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
-    const task = await prisma.task.findUnique({ where: { id }, select: { projectId: true } });
+    const task = await prisma.task.findUnique({
+      where: { id },
+      select: { projectId: true, title: true, status: true },
+    });
     await prisma.task.delete({ where: { id } });
     if (task?.projectId) recalculateProjectProgress(task.projectId).catch(() => {});
+    await emitAudit({
+      entityType: "task",
+      entityId: id,
+      eventType: "task.deleted",
+      actorType: "user",
+      payload: { projectId: task?.projectId, title: task?.title, status: task?.status },
+    });
     return new Response(null, { status: 204 });
   } catch (err) {
     return serverError("tasks/[id] DELETE", err);
