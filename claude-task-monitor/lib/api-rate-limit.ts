@@ -213,6 +213,28 @@ export function applyAdminLoginRestartLockout(lockoutMs: number): void {
   setAdminLoginBucket([...existing, ...synthetic]);
 }
 
+// ─── Admin-OTP bucket persistence helpers ────────────────────────────────────
+
+/** The rate-limit store key used by the admin-otp brute-force guard. */
+export const ADMIN_OTP_RATE_KEY = "admin-otp";
+
+/** Admin-OTP sliding-window parameters (must match the call in /api/admin/verify-otp). */
+export const ADMIN_OTP_MAX = 10;
+export const ADMIN_OTP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Returns the current in-window timestamps for the admin-otp bucket. */
+export function getAdminOtpBucket(): number[] {
+  const store = getApiRateLimitStore();
+  const windowStart = Date.now() - ADMIN_OTP_WINDOW_MS;
+  return (store.get(ADMIN_OTP_RATE_KEY) ?? []).filter((t) => t > windowStart);
+}
+
+/** Overwrites the admin-otp bucket with the supplied timestamps. */
+export function setAdminOtpBucket(timestamps: number[]): void {
+  const store = getApiRateLimitStore();
+  store.set(ADMIN_OTP_RATE_KEY, timestamps);
+}
+
 // ─── rate_limit_enabled SystemConfig cache ────────────────────────────────────
 
 const RL_ENABLED_KEY = "_rateLimitEnabled";
