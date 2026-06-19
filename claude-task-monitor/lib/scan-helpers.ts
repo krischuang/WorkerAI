@@ -130,22 +130,16 @@ export async function pollForFindings<T>(opts: {
       const extracted = extractJson(pane, startMarker, endMarker);
 
       if (extracted) {
-        // Only treat unparseable fragments as candidates if they reference the
-        // expected key — prevents Claude's prose code snippets from being
-        // captured as debug output when the real issue is a timeout.
+        lastRaw = extracted.raw;
         if (extracted.raw.includes(`"${resultKey}"`)) {
-          lastRaw = extracted.raw;
-        }
-        try {
-          const parsed = JSON.parse(extracted.raw) as Record<string, unknown>;
-          // Always capture raw when JSON parses successfully (useful for debugging
-          // even when the expected key is absent).
-          lastRaw = extracted.raw;
-          const items = parsed[resultKey];
-          if (Array.isArray(items)) return { result: items as T[], raw: extracted.raw };
-          // Parsed but key missing — keep polling; Claude may not have finished
-        } catch {
-          // JSON parse failed — may be partial/streaming output; keep polling
+          try {
+            const parsed = JSON.parse(extracted.raw) as Record<string, unknown>;
+            const items = parsed[resultKey];
+            if (Array.isArray(items)) return { result: items as T[], raw: extracted.raw };
+            // Parsed but key missing — keep polling; Claude may not have finished
+          } catch {
+            // JSON parse failed — may be partial/streaming output; keep polling
+          }
         }
       }
     } catch {
