@@ -8,6 +8,8 @@
 
 import type { NextRequest } from "next/server";
 import { adminCookieToken, ADMIN_COOKIE } from "@/middleware";
+import { getAdminNonce } from "@/lib/admin-nonce-cache";
+import { timingSafeCompare } from "@/lib/timing-safe";
 
 /**
  * Validates the admin session cookie on an incoming request.
@@ -22,10 +24,11 @@ export async function requireAdmin(request: NextRequest): Promise<Response | nul
     );
   }
 
-  const expected = await adminCookieToken(adminPassword);
-  const presented = request.cookies.get(ADMIN_COOKIE)?.value;
+  const nonce = getAdminNonce();
+  const expected = await adminCookieToken(adminPassword, nonce);
+  const presented = request.cookies.get(ADMIN_COOKIE)?.value ?? "";
 
-  if (presented !== expected) {
+  if (!timingSafeCompare(presented, expected)) {
     return new Response(
       JSON.stringify({ error: "Admin authentication required" }),
       { status: 401, headers: { "content-type": "application/json" } },
