@@ -28,7 +28,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
     const body = await request.json();
-    const { name, workDir, tmuxSession, status, claudePermissionMode, maxConcurrentTasks, tags } = body;
+    const { name, workDir, tmuxSession, claudePermissionMode, maxConcurrentTasks, tags } = body;
 
     if (maxConcurrentTasks !== undefined) {
       const n = Number(maxConcurrentTasks);
@@ -59,7 +59,6 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
         ...(name !== undefined && { name }),
         ...(workDir !== undefined && { workDir }),
         ...(tmuxSession !== undefined && { tmuxSession }),
-        ...(status !== undefined && { status }),
         ...(claudePermissionMode !== undefined && { claudePermissionMode }),
         ...(maxConcurrentTasks !== undefined && { maxConcurrentTasks: Number(maxConcurrentTasks) }),
         ...(tags !== undefined && { tags: (tags as string[]).map((t) => t.trim().toLowerCase()) }),
@@ -68,7 +67,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     });
 
     const changedFields = Object.fromEntries(
-      Object.entries({ name, workDir, tmuxSession, status, claudePermissionMode, maxConcurrentTasks, tags })
+      Object.entries({ name, workDir, tmuxSession, claudePermissionMode, maxConcurrentTasks, tags })
         .filter(([, v]) => v !== undefined),
     );
     await logAdminAction(request, {
