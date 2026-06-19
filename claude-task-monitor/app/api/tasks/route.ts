@@ -7,6 +7,13 @@ import { classifyTaskRisk } from "@/lib/risk-classifier";
 
 const MAX_QUEUED_TASKS_PER_PROJECT = 100;
 
+// Only terminal / non-active statuses may be bulk-deleted.
+// Prevents a single API call from wiping running, queued, or pending work.
+const BULK_DELETABLE_STATUSES = new Set(["completed", "failed", "archived"]);
+
+// Hard cap per call — prevents a single request from wiping arbitrarily large datasets.
+const BULK_DELETE_CAP = 5_000;
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -63,9 +70,30 @@ export async function DELETE(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get("status");
+    const dryRun = searchParams.get("dryRun") === "true";
 
     if (!status) {
       return Response.json({ error: "status query param is required" }, { status: 400 });
+    }
+
+    if (!BULK_DELETABLE_STATUSES.has(status)) {
+      return Response.json(
+        { error: `status must be one of: ${[...BULK_DELETABLE_STATUSES].join(", ")}` },
+        { status: 400 },
+      );
+    }
+
+    const matchCount = await prisma.task.count({ where: { status: status as never } });
+
+    if (dryRun) {
+      return Response.json({ dryRun: true, wouldDelete: matchCount });
+    }
+
+    if (matchCount > BULK_DELETE_CAP) {
+      return Response.json(
+        { error: `Would delete ${matchCount} tasks which exceeds the per-call cap of ${BULK_DELETE_CAP}. Use a more specific filter or contact an administrator.` },
+        { status: 422 },
+      );
     }
 
     const { count } = await prisma.task.deleteMany({ where: { status: status as never } });

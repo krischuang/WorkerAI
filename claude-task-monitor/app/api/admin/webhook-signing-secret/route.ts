@@ -8,7 +8,7 @@ export async function GET(): Promise<NextResponse> {
     where: { key: "webhook_signing_secret" },
     select: { value: true },
   });
-  return NextResponse.json({ secret: row?.value ?? null });
+  return NextResponse.json({ configured: row?.value != null });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

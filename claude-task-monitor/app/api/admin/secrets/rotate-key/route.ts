@@ -7,6 +7,7 @@ import {
   encryptSecretWithKey,
   decryptSecretWithKey,
 } from "@/lib/task-secrets";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import type { NextRequest } from "next/server";
 
 /**
@@ -35,6 +36,9 @@ import type { NextRequest } from "next/server";
  */
 export async function POST(request: NextRequest) {
   try {
+    const rl = apiRateLimit("admin:secrets:rotate-key", 1, 5 * 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
     let body: Record<string, unknown>;
     try {
       body = (await request.json()) as Record<string, unknown>;
