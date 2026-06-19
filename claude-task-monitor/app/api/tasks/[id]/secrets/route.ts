@@ -3,11 +3,15 @@ import { prisma } from "@/lib/prisma";
 import { encryptSecret } from "@/lib/task-secrets";
 import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import { emitAudit } from "@/lib/audit";
+import { getTaskOrNull } from "@/lib/resource-access";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: NextRequest, ctx: Ctx): Promise<NextResponse> {
   const { id } = await ctx.params;
+  const task = await getTaskOrNull(id);
+  if (!task) return NextResponse.json({ error: "Task not found" }, { status: 404 });
+
   const secrets = await prisma.taskSecret.findMany({
     where: { taskId: id },
     select: { key: true, createdAt: true },
