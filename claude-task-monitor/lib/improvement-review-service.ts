@@ -14,7 +14,15 @@ import { prisma } from "@/lib/prisma";
 import { sendRawPromptToTmux, type SSHConfig } from "@/lib/ssh-claude-tmux";
 import { withServerDispatchLock } from "@/lib/dispatch-lock";
 import { emitAudit } from "@/lib/audit";
-import { escapeXml } from "@/lib/scan-helpers";
+/** Full XML entity encoding — prevents any tag breakout in user-supplied content. */
+function escapeXml(_tag: string, content: string): string {
+  return content
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
 import { resolveSessionForProject } from "@/lib/improvement-cycle-service";
 import { waitForClaudeIdle } from "@/lib/project-scan-service";
 import { approveSuggestion } from "@/lib/suggestion-service";
