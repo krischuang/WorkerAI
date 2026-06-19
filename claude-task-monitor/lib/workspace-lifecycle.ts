@@ -77,20 +77,20 @@ export async function provisionTemporaryWorkspace(opts: {
   // 1. Disk safety gate
   await checkDiskSpace(opts.sshConfig, baseDir);
 
-  // 2. Shallow clone
-  const cloneCmd = [
-    "git clone",
-    "--depth=1",
-    `--branch "${opts.branch}"`,
-    `"${opts.repoUrl}"`,
-    `"${workspaceDir}"`,
-  ].join(" ");
+  // 2. Shallow clone — never interpolate branch/repoUrl into a shell string.
+  const cloneArgv = ["git", "clone", "--depth=1", "--branch", opts.branch, opts.repoUrl, workspaceDir];
 
   if (opts.sshConfig) {
-    await execSSH(opts.sshConfig, cloneCmd, 120_000); // 2-minute timeout
+    // SSH path must send a shell command; shell-quote each argument so no
+    // special characters in branch or repoUrl can escape the argument boundary.
+    const q = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
+    await execSSH(opts.sshConfig, cloneArgv.map(q).join(" "), 120_000);
   } else {
-    const { execSync } = await import("child_process");
-    execSync(cloneCmd, { stdio: "pipe", timeout: 120_000 });
+    const { spawnSync } = await import("child_process");
+    const result = spawnSync(cloneArgv[0], cloneArgv.slice(1), { stdio: "pipe", timeout: 120_000 });
+    if (result.status !== 0) {
+      throw new Error(`git clone failed: ${result.stderr?.toString().trim()}`);
+    }
   }
 
   // 3. Persist workspace path
