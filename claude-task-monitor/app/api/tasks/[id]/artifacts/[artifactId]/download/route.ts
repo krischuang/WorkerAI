@@ -4,6 +4,30 @@ import fs from "fs";
 
 type Ctx = { params: Promise<{ id: string; artifactId: string }> };
 
+// Types that are safe to serve with their declared MIME type.
+// Anything that a browser could execute (HTML, JS, SVG, XML, etc.) is excluded
+// and will be served as application/octet-stream instead, forcing a download.
+const SAFE_MIME_TYPES = new Set([
+  "application/json",
+  "application/octet-stream",
+  "application/pdf",
+  "application/zip",
+  "application/gzip",
+  "application/x-tar",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/avif",
+  "text/csv",
+  "text/plain",
+]);
+
+function safeMimeType(declared: string): string {
+  const base = declared.split(";")[0].trim().toLowerCase();
+  return SAFE_MIME_TYPES.has(base) ? base : "application/octet-stream";
+}
+
 export async function GET(_req: NextRequest, ctx: Ctx): Promise<NextResponse> {
   const { id, artifactId } = await ctx.params;
 
@@ -37,10 +61,11 @@ export async function GET(_req: NextRequest, ctx: Ctx): Promise<NextResponse> {
   return new NextResponse(buffer, {
     status: 200,
     headers: {
-      "Content-Type": artifact.mimeType,
+      "Content-Type": safeMimeType(artifact.mimeType),
       "Content-Disposition": contentDisposition,
       "Content-Length": String(buffer.length),
       "Cache-Control": "private, no-cache",
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
