@@ -94,6 +94,13 @@ export async function POST(request: NextRequest) {
       return jsonResponse(agent, { status: 201 });
     } catch (err: unknown) {
       if (err && typeof err === "object" && "code" in err && err.code === "P2002") {
+        const meta = (err as { meta?: { target?: string[] } }).meta;
+        if (meta?.target?.includes("tmuxSession")) {
+          return NextResponse.json(
+            { error: `A session named "${tmuxSession}" already exists on this server` },
+            { status: 409 }
+          );
+        }
         return NextResponse.json(
           { error: `An agent with slug "${slug}" already exists on this server` },
           { status: 409 }

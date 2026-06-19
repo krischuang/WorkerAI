@@ -400,6 +400,7 @@ model Agent {
   repairTasks    RepairTask[]         @relation("AgentRepairTasks")
 
   @@unique([serverId, slug])
+  @@unique([serverId, tmuxSession])
 }
 
 // Point-in-time snapshot from a usage capture (tmux capture-pane, pipe-pane, or manual refresh).
