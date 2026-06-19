@@ -4,6 +4,8 @@ import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import { emitAudit } from "@/lib/audit";
 import type { NextRequest } from "next/server";
 
+const MAX_CLONES_PER_PROJECT_PER_HOUR = 10;
+
 type Ctx = { params: Promise<{ id: string }> };
 
 /**
@@ -36,18 +38,27 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
 
     if (!source) return Response.json({ error: "Not found" }, { status: 404 });
 
+    // Project-level hourly clone cap (10 per hour).
+    const projectCloneRl = apiRateLimit(`project:clone:${source.projectId}`, MAX_CLONES_PER_PROJECT_PER_HOUR, 60 * 60_000);
+    if (projectCloneRl.limited) {
+      return Response.json(
+        { error: `Clone rate limit reached (${MAX_CLONES_PER_PROJECT_PER_HOUR} clones/hour per project)`, retryAfter: projectCloneRl.retryAfterSec },
+        { status: 429, headers: { "Retry-After": String(projectCloneRl.retryAfterSec) } }
+      );
+    }
+
     const clone = await prisma.task.create({
       data: {
-        projectId:         source.projectId,
-        title:             `${source.title} (copy)`,
-        description:       source.description,
-        priority:          source.priority as never,
-        taskType:          source.taskType as never,
+        projectId:          source.projectId,
+        title:              `${source.title} (copy)`,
+        description:        source.description,
+        priority:           source.priority as never,
+        taskType:           source.taskType as never,
         estimatedCostLevel: source.estimatedCostLevel as never,
-        timeoutMinutes:    source.timeoutMinutes,
-        maxRetries:        source.maxRetries,
+        timeoutMinutes:     source.timeoutMinutes,
+        maxRetries:         source.maxRetries,
         disablePaneCapture: source.disablePaneCapture,
-        status:            "pending",
+        status:             "pending",
       },
       select: { id: true, title: true },
     });

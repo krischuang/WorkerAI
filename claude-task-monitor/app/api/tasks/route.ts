@@ -5,6 +5,8 @@ import { emitAudit } from "@/lib/audit";
 import { recalculateProjectProgress } from "@/lib/project-progress";
 import { classifyTaskRisk } from "@/lib/risk-classifier";
 
+const MAX_QUEUED_TASKS_PER_PROJECT = 100;
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -96,6 +98,17 @@ export async function POST(request: Request) {
     const validationErr = validateTaskCreate(body);
     if (validationErr) {
       return Response.json({ error: validationErr.message }, { status: 400 });
+    }
+
+    // Abuse cap: prevent runaway task creation filling a project queue.
+    const queuedCount = await prisma.task.count({
+      where: { projectId, status: { in: ["pending", "queued"] } },
+    });
+    if (queuedCount >= MAX_QUEUED_TASKS_PER_PROJECT) {
+      return Response.json(
+        { error: `Queued task limit reached (${MAX_QUEUED_TASKS_PER_PROJECT} pending/queued per project)` },
+        { status: 429 }
+      );
     }
 
     // Priority inheritance: if the caller omitted priority (and did not set
