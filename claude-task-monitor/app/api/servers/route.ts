@@ -4,6 +4,7 @@ import { validateSshKeyPath } from "@/lib/ssh-key-path";
 import { serverError } from "@/lib/api-error";
 import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
+import { sanitizeServer } from "@/lib/sanitize-response";
 import type { NextRequest } from "next/server";
 
 export async function GET() {
@@ -20,7 +21,7 @@ export async function GET() {
     });
 
     return jsonResponse(
-      servers.map(({ tasks, ...s }) => ({
+      servers.map(({ tasks, ...s }) => sanitizeServer({
         ...s,
         queuedCount: tasks.filter((t) => t.status === "queued").length,
         runningCount: tasks.filter((t) => t.status === "running").length,
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest) {
       targetId: server.id,
       payload: { name, host, username },
     });
-    return jsonResponse(server, { status: 201 });
+    return jsonResponse(sanitizeServer(server), { status: 201 });
   } catch (err) {
     return serverError("servers POST", err);
   }
