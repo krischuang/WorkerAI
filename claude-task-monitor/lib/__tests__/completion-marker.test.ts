@@ -272,8 +272,10 @@ describe("detectTaskCompletion — valid completion block completes task", () =>
 
     expect(mockExecSSH).toHaveBeenCalledTimes(1);
     const captureCmd = mockExecSSH.mock.calls[0][1] as string;
-    // captureDepth = min(100 + 200, 5000) = 300
-    expect(captureCmd).toContain("-S -300");
+    // captureDepth = min(outputOffset + 500, 10_000) = min(100 + 500, 10_000) = 600
+    // The 500-line window (up from 200) handles longer AI responses that push the
+    // completion block further down the pane without missing it.
+    expect(captureCmd).toContain("-S -600");
   });
 
   it("falls back to COMPLETION_SCAN_LINES depth when no offset provided", async () => {
