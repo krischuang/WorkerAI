@@ -4,6 +4,7 @@ import { serverError } from "@/lib/api-error";
 import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
 import { validateTmuxSession, validateWorkDir } from "@/lib/task-validation";
+import { sanitizeAgentServer } from "@/lib/sanitize-response";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -17,7 +18,7 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     const { id } = await ctx.params;
     const agent = await prisma.agent.findUnique({ where: { id }, include: AGENT_INCLUDE });
     if (!agent) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    return jsonResponse(agent);
+    return jsonResponse(sanitizeAgentServer(agent));
   } catch (err) {
     return serverError("agents/[id] GET", err);
   }
@@ -77,7 +78,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       payload: { fields: changedFields },
     });
 
-    return jsonResponse(agent);
+    return jsonResponse(sanitizeAgentServer(agent));
   } catch (err) {
     return serverError("agents/[id] PUT", err);
   }

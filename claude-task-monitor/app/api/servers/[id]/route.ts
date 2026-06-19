@@ -4,6 +4,7 @@ import { validateSshKeyPath } from "@/lib/ssh-key-path";
 import { serverError } from "@/lib/api-error";
 import { jsonResponse } from "@/lib/json-response";
 import { logAdminAction } from "@/lib/admin-audit-log";
+import { sanitizeServer } from "@/lib/sanitize-response";
 import type { NextRequest } from "next/server";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -13,7 +14,7 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     const { id } = await ctx.params;
     const server = await prisma.server.findUnique({ where: { id } });
     if (!server) return Response.json({ error: "Not found" }, { status: 404 });
-    return jsonResponse(server);
+    return jsonResponse(sanitizeServer(server));
   } catch (err) {
     return serverError("servers/[id] GET", err);
   }
@@ -70,7 +71,7 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
       payload: { fields: changedFields },
     });
 
-    return jsonResponse(server);
+    return jsonResponse(sanitizeServer(server));
   } catch (err) {
     return serverError("servers/[id] PUT", err);
   }
