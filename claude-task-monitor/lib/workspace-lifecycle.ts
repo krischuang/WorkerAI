@@ -23,6 +23,35 @@ export interface WorkspaceResult {
 }
 
 /**
+ * Reject branch names that contain shell metacharacters or path-traversal sequences.
+ * Accepts the superset of names used by GitHub, GitLab, and Bitbucket CI systems.
+ */
+export function validateBranch(branch: string): void {
+  if (!branch || !/^[a-zA-Z0-9/._-]{1,255}$/.test(branch)) {
+    throw new Error(
+      `Invalid branch name "${branch}": only alphanumeric characters, /, ., _, and - are allowed.`,
+    );
+  }
+  if (branch.startsWith("/") || branch.endsWith("/") || branch.includes("..")) {
+    throw new Error(`Invalid branch name "${branch}": must not start/end with / or contain ..`);
+  }
+}
+
+/**
+ * Reject repository URLs that contain shell metacharacters or are not recognisable
+ * git remote URL formats (https://, git@host:, ssh://, git://).
+ */
+export function validateRepoUrl(url: string): void {
+  if (!url) throw new Error("Repository URL is required");
+  if (/[\s;&|`$(){}<>!*?#\\]/.test(url)) {
+    throw new Error(`Invalid repository URL: contains shell metacharacters`);
+  }
+  if (!/^(https?:\/\/|git@[^:]+:|ssh:\/\/|git:\/\/)/.test(url)) {
+    throw new Error(`Invalid repository URL: must begin with https://, git@host:, ssh://, or git://`);
+  }
+}
+
+/**
  * Check free disk space on the target server (or localhost when sshConfig is
  * null) and throw if less than MIN_FREE_BYTES are available.
  *
@@ -70,6 +99,9 @@ export async function provisionTemporaryWorkspace(opts: {
   /** Optional base directory for clones (defaults to /tmp on remote, os.tmpdir() locally). */
   baseDir?: string;
 }): Promise<WorkspaceResult> {
+  validateBranch(opts.branch);
+  validateRepoUrl(opts.repoUrl);
+
   const baseDir = opts.baseDir ?? (opts.sshConfig ? "/tmp" : os.tmpdir());
   const dirName = `workerai_${opts.taskId}_${Date.now()}`;
   const workspaceDir = path.posix.join(baseDir, dirName);
