@@ -18,6 +18,20 @@ import type { SSHConfig } from "@/lib/ssh-claude-tmux";
 
 const MIN_FREE_BYTES = 500 * 1024 * 1024; // 500 MB
 
+/**
+ * POSIX single-quote a string so it is safe to embed in a remote shell command.
+ * Single-quoted strings in POSIX sh are treated as literals — no variable
+ * expansion, no command substitution, no glob.  The only character that cannot
+ * appear inside single quotes is the single quote itself, which is handled by
+ * ending the quoted section, appending a double-quoted single quote, and
+ * reopening the quoted section.
+ *
+ * Example: posixQuote("/tmp/workerai_'test") → "'/tmp/workerai_'\"'\"'test'"
+ */
+export function posixQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\"'\"'") + "'";
+}
+
 export interface WorkspaceResult {
   workspaceDir: string;
 }
@@ -61,15 +75,24 @@ export async function checkDiskSpace(
   sshConfig: SSHConfig | null,
   checkPath: string,
 ): Promise<void> {
-  const cmd = `df -k "${checkPath}" | awk 'NR==2{print $4}'`;
   let freeKb: number;
 
   if (sshConfig) {
+    // SSH path must send a shell string; quote the path so no characters in
+    // checkPath can escape the argument boundary.
+    const cmd = `df -k ${posixQuote(checkPath)} | awk 'NR==2{print $4}'`;
     const result = await execSSH(sshConfig, cmd);
     freeKb = parseInt(result.stdout.trim(), 10);
   } else {
-    const { execSync } = await import("child_process");
-    freeKb = parseInt(execSync(cmd).toString().trim(), 10);
+    // Local path: use spawnSync so the OS handles argument separation —
+    // no shell is involved and checkPath cannot inject commands.
+    const { spawnSync } = await import("child_process");
+    const dfResult = spawnSync("df", ["-k", checkPath], { stdio: "pipe" });
+    if (dfResult.status !== 0) {
+      throw new Error(`df failed on "${checkPath}": ${dfResult.stderr?.toString().trim()}`);
+    }
+    const lines = dfResult.stdout.toString().split("\n");
+    freeKb = parseInt(lines[1]?.trim().split(/\s+/)[3] ?? "0", 10);
   }
 
   if (isNaN(freeKb) || freeKb * 1024 < MIN_FREE_BYTES) {
@@ -115,8 +138,7 @@ export async function provisionTemporaryWorkspace(opts: {
   if (opts.sshConfig) {
     // SSH path must send a shell command; shell-quote each argument so no
     // special characters in branch or repoUrl can escape the argument boundary.
-    const q = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
-    await execSSH(opts.sshConfig, cloneArgv.map(q).join(" "), 120_000);
+    await execSSH(opts.sshConfig, cloneArgv.map(posixQuote).join(" "), 120_000);
   } else {
     const { spawnSync } = await import("child_process");
     const result = spawnSync(cloneArgv[0], cloneArgv.slice(1), { stdio: "pipe", timeout: 120_000 });
@@ -160,14 +182,16 @@ export async function cleanupWorkspace(opts: {
     return;
   }
 
-  const rmCmd = `rm -rf "${workspaceDir}"`;
-
   try {
     if (opts.sshConfig) {
-      await execSSH(opts.sshConfig, rmCmd, 30_000);
+      // SSH path must send a shell string; quote the path so no characters in
+      // workspaceDir can escape the argument boundary.
+      await execSSH(opts.sshConfig, `rm -rf ${posixQuote(workspaceDir)}`, 30_000);
     } else {
-      const { execSync } = await import("child_process");
-      execSync(rmCmd, { timeout: 30_000 });
+      // Local path: use spawnSync so no shell is involved — workspaceDir
+      // cannot inject commands regardless of its content.
+      const { spawnSync } = await import("child_process");
+      spawnSync("rm", ["-rf", workspaceDir], { stdio: "pipe", timeout: 30_000 });
     }
     console.log(
       `[workspace] cleaned up taskId="${opts.taskId}" dir="${workspaceDir}"`,
