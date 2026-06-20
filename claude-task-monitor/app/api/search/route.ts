@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { serverError } from "@/lib/api-error";
+import { apiRateLimit, rateLimitResponse } from "@/lib/api-rate-limit";
 import type { NextRequest } from "next/server";
 
 export interface SearchResult {
@@ -30,6 +31,9 @@ const PER_TYPE = 5;
 
 export async function GET(request: NextRequest) {
   try {
+    const rl = apiRateLimit("search:global", 20, 60_000);
+    if (rl.limited) return rateLimitResponse(rl.retryAfterSec);
+
     const q = request.nextUrl.searchParams.get("q")?.trim() ?? "";
 
     if (q.length < 1) {
