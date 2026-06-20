@@ -26,7 +26,8 @@ function LoginForm() {
         body: JSON.stringify({ password }),
       });
       if (res.ok) {
-        const redirect = params.get("redirect") || "/dashboard";
+        const raw = params.get("redirect") ?? "";
+        const redirect = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/dashboard";
         router.push(redirect);
       } else {
         const body = await res.json().catch(() => ({}));

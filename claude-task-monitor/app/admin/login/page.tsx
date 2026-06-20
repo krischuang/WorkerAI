@@ -27,7 +27,8 @@ function AdminLoginForm() {
       });
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
-        const redirect = params.get("redirect") || "/admin/config";
+        const raw = params.get("redirect") ?? "";
+        const redirect = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/admin/config";
         if (data.requiresOtp) {
           router.push(`/admin/verify-otp?redirect=${encodeURIComponent(redirect)}`);
           return;
