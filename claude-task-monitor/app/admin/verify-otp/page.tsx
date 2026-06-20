@@ -26,7 +26,8 @@ function VerifyOtpForm() {
         body: JSON.stringify({ code }),
       });
       if (res.ok) {
-        const redirect = params.get("redirect") || "/admin/config";
+        const raw = params.get("redirect") ?? "";
+        const redirect = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/admin/config";
         router.push(redirect);
       } else {
         const body = await res.json().catch(() => ({}));
