@@ -192,11 +192,12 @@ export async function middleware(request: NextRequest) {
 
   const secret = process.env.AUTH_SECRET;
 
-  // If AUTH_SECRET is not configured, warn and allow through so the app
-  // stays usable before first-time setup. All requests are local anyway.
   if (!secret) {
-    console.warn("[auth] AUTH_SECRET is not set — all requests are unauthenticated");
-    return NextResponse.next();
+    console.error("[SECURITY] AUTH_SECRET missing - application access disabled");
+    return new NextResponse(
+      JSON.stringify({ error: "Service unavailable: server configuration error" }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    );
   }
 
   const expected = await cookieToken(secret);
