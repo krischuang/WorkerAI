@@ -59,6 +59,9 @@ function parseCSV(text: string): string[][] {
   return rows;
 }
 
+// Max upload size for CSV import: 5 MB
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+
 // ── Route ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -109,6 +112,13 @@ export async function POST(request: NextRequest) {
       return Response.json(
         { error: "file field is required (multipart/form-data)" },
         { status: 400 },
+      );
+    }
+
+    if ((file as File).size > MAX_IMPORT_BYTES) {
+      return Response.json(
+        { error: `Import file too large (max ${MAX_IMPORT_BYTES / 1024 / 1024} MB)` },
+        { status: 413 },
       );
     }
 
