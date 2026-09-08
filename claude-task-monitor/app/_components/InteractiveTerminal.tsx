@@ -217,7 +217,6 @@ export default function InteractiveTerminal({ serverId, agentId, label }: Props)
       termRef.current = null;
       wsRef.current  = null;
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverId, agentId]);
 
   return (
