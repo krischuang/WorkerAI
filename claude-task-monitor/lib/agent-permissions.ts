@@ -32,7 +32,11 @@ export const AgentPermission = {
 
 export type AgentPermission = typeof AgentPermission[keyof typeof AgentPermission];
 
-// Permission hierarchy — granting a higher permission implicitly requires lower ones
+// Permission hierarchy — granting a higher permission implicitly requires lower ones.
+// Not yet consulted by any permission check (see permission-mode logic below) — the
+// hierarchy is currently only enforced implicitly by which permissions each mode
+// grants. Left in place as the intended model for a future explicit hierarchy check.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const PERMISSION_HIERARCHY: AgentPermission[][] = [
   [AgentPermission.READ_FILES],
   [AgentPermission.WRITE_FILES, AgentPermission.EXECUTE_COMMANDS],
