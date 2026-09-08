@@ -41,7 +41,7 @@
     "bcryptjs": "^3.0.3",
     "concurrently": "^10.0.3",
     "lucide-react": "^1.17.0",
-    "next": "15.5.6",
+    "next": "^15.5.25",
     "nodemailer": "^8.0.11",
     "otpauth": "^9.5.1",
     "pg": "^8.21.0",
@@ -51,6 +51,7 @@
     "react-dom": "19.2.4",
     "recharts": "^3.8.1",
     "ssh2": "^1.17.0",
+    "tsx": "^4.22.4",
     "ws": "^8.21.0"
   },
   "devDependencies": {
@@ -66,7 +67,6 @@
     "eslint": "^9",
     "eslint-config-next": "15.5.6",
     "tailwindcss": "^4",
-    "tsx": "^4.22.4",
     "typescript": "^5",
     "vitest": "^4.1.8"
   }
