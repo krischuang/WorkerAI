@@ -15,7 +15,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    task: { findMany: vi.fn(), update: vi.fn(), findUnique: vi.fn(), count: vi.fn() },
+    task: { findMany: vi.fn(), update: vi.fn(), findUnique: vi.fn(), count: vi.fn(), groupBy: vi.fn() },
     agent: { findMany: vi.fn() },
   },
 }));
@@ -31,6 +31,7 @@ import { emitAudit } from "@/lib/audit";
 const mockTaskFindMany = vi.mocked(prisma.task.findMany);
 const mockTaskUpdate = vi.mocked(prisma.task.update);
 const mockTaskFindUnique = vi.mocked(prisma.task.findUnique);
+const mockTaskGroupBy = vi.mocked(prisma.task.groupBy);
 const mockAgentFindMany = vi.mocked(prisma.agent.findMany);
 const mockEmitAudit = vi.mocked(emitAudit);
 
@@ -72,6 +73,11 @@ beforeEach(() => {
   // null makes it short-circuit to { ok: false, reason: "not_found" } without side effects —
   // we only care about the assignment/audit behavior in these tests, not dispatch mechanics.
   mockTaskFindUnique.mockResolvedValue(null as never);
+  // Real-time workload query (added alongside the groupBy-based queue-depth
+  // calculation in task-service.ts). Empty by default: none of these tests
+  // exercise workload-based agent selection, so no agent has a running/queued
+  // backlog unless a test explicitly overrides this.
+  mockTaskGroupBy.mockResolvedValue([] as never);
 });
 
 describe("autoAssignQueuedTasks — high-risk gating", () => {
