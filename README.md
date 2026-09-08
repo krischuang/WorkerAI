@@ -245,26 +245,13 @@ Sessions auto-close after 30 minutes of idle. SSH private keys are read server-s
 
 ## Deployment
 
-The app ships as a Docker image (`ghcr.io/krischuang/tarotai:latest`) and is deployed to an EC2 instance via GitHub Actions + AWS SSM.
-
-### CI/CD Flow
-
-1. Push to `main` triggers the GitHub Actions workflow (`.github/workflows/deploy.yml`)
-2. The workflow assumes an IAM role via OIDC and sends an SSM command to the EC2 instance
-3. The EC2 instance runs `/home/ec2-user/auto_deploy/deploy.sh`, which:
-   - Pulls latest code from `main` (`git pull origin main`)
-   - Stops running containers (`docker compose down`)
-   - Rebuilds and starts containers (`docker compose up -d --build`)
-   - Prunes dangling images and containers
-   - Polls `http://localhost:3000/api/health` for up to 120 seconds
-
-### Manual Deploy
+Runs as a Docker Compose stack (see `docker-compose.yml`) on a single host. There is currently no automated CI/CD deploy pipeline — a prior GitHub Actions + AWS SSM workflow was removed; deploys are manual:
 
 ```bash
-sudo bash /home/ec2-user/auto_deploy/deploy.sh
+git pull origin main
+docker compose build --no-cache app
+docker compose up -d app
 ```
-
-Deploy logs are written to `/home/ec2-user/auto_deploy/deploy.log` (overwritten each run).
 
 ---
 
