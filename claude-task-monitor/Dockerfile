@@ -16,6 +16,10 @@ COPY . .
 RUN npx prisma generate
 RUN npm run build
 
+# Drop devDependencies (eslint, playwright, typescript, vitest, tailwind, ...)
+# now that the build is done. tsx stays — it runs ws-server.ts at runtime.
+RUN npm prune --omit=dev
+
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 # Alpine base (~170 MB) instead of the full Debian node:22 (~1 GB).
 # Build tools (python3/make/g++) are not copied — they stay in the builder layer.
