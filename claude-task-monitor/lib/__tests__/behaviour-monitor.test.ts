@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { analyseCommand } from "../behaviour-monitor";
 
 // analyseCommand is a pure function — no DB or audit calls needed

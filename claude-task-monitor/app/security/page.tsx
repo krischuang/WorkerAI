@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Shield, ShieldAlert, ShieldOff, ShieldCheck,
-  AlertTriangle, Eye, Lock, Wifi, WifiOff,
+  AlertTriangle, Eye, Lock, WifiOff,
   Activity, RefreshCw, Power, PowerOff,
-  Flame, FileWarning, Key, Network,
+  Flame, Key, Network,
 } from "lucide-react";
 import { PageHeader, Btn } from "@/app/_components/ui";
 

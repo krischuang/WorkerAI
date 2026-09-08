@@ -558,13 +558,13 @@ function SecretsSection({ taskId }: { taskId: string }) {
   const [showForm, setShowForm] = useState(false);
   const [noKeyConfigured, setNoKeyConfigured] = useState(false);
 
-  function load() {
+  const load = useCallback(() => {
     fetch(`/api/tasks/${taskId}/secrets`)
       .then(r => r.ok ? r.json() : null)
       .then((data: TaskSecretEntry[] | null) => { if (data) setSecrets(data); });
-  }
+  }, [taskId]);
 
-  useEffect(() => { load(); }, [taskId]);
+  useEffect(() => { load(); }, [load]);
 
   async function handleAdd() {
     if (!newKey.trim() || !newValue.trim()) return;

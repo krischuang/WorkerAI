@@ -73,7 +73,13 @@ const DEFAULT_SANDBOX_CONFIG: Omit<SandboxConfig, "taskId"> = {
  * - user namespace remapping (if host supports it)
  * - resource limits: memory, CPU, PIDs
  * - no network by default (override for restricted mode)
+ *
+ * Not yet called from the task execution path — sandboxed execution is
+ * built but not wired in, so tasks currently run unsandboxed. Tracked as
+ * WorkerAI#10 rather than wiring it in without the ability to test the
+ * integration end-to-end.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildDockerRunCommand(cfg: SandboxConfig, workDir: string): string {
   const parts: string[] = [
     "docker run",

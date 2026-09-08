@@ -1,4 +1,3 @@
-import { serverError } from "@/lib/api-error";
 import { sendTestEmail } from "@/lib/email";
 
 export async function POST() {
