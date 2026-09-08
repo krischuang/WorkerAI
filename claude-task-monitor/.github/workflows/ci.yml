@@ -34,6 +34,9 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
+      - name: Type check
+        run: npm run typecheck
+
   # ── Job 2: Unit tests with coverage ─────────────────────────────────────────
   unit-tests:
     name: Unit Tests (coverage ≥70%)
