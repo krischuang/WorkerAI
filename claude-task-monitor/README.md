@@ -1,6 +1,6 @@
 # Claude Task Monitor
 
-[![CI](https://github.com/kevinshuang1029/WorkerAI/actions/workflows/ci.yml/badge.svg)](https://github.com/kevinshuang1029/WorkerAI/actions/workflows/ci.yml)
+[![CI](https://github.com/krischuang/WorkerAI/actions/workflows/ci.yml/badge.svg)](https://github.com/krischuang/WorkerAI/actions/workflows/ci.yml)
 
 A task management platform for tracking AI-assisted work across projects, powered by Next.js and Claude AI.
 
