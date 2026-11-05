@@ -81,7 +81,7 @@ test.describe("Tasks", () => {
 
   test("POST /api/tasks — creates an unassigned task for later tests", async () => {
     const res = await api.post("/api/tasks", {
-      data: { projectId, title: `${PREFIX}-unassigned`, priority: "P4", taskType: "analysis" },
+      data: { projectId, title: `${PREFIX}-unassigned`, priority: "P4", taskType: "review" },
     });
     expect(res.status()).toBe(201);
     unassignedTaskId = (await res.json()).id;
@@ -176,7 +176,7 @@ test.describe("Tasks", () => {
   test("GET /api/tasks?projectId= — filters tasks by project", async () => {
     const res = await api.get(`/api/tasks?projectId=${projectId}`);
     expect(res.status()).toBe(200);
-    const tasks = await res.json();
+    const { tasks } = await res.json();
     expect(Array.isArray(tasks)).toBe(true);
     expect(tasks.every((t: { projectId: string }) => t.projectId === projectId)).toBe(true);
     expect(tasks.some((t: { id: string }) => t.id === taskId)).toBe(true);

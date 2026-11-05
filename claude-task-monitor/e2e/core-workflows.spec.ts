@@ -83,7 +83,7 @@ test.describe("Core user workflows", () => {
   test("GET /api/tasks?projectId= — task appears under its project", async () => {
     const res = await api.get(`/api/tasks?projectId=${projectId}`);
     expect(res.status()).toBe(200);
-    const tasks = await res.json();
+    const { tasks } = await res.json();
     expect(tasks.some((t: { id: string }) => t.id === taskId)).toBe(true);
   });
 
