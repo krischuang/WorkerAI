@@ -27,7 +27,8 @@ export type KillSwitchReason =
   | "credential_leak"
   | "manual_stop"
   | "maintenance"
-  | "anomaly_detected";
+  | "anomaly_detected"
+  | "db_unavailable";
 
 export interface KillSwitchState {
   active: boolean;
@@ -73,6 +74,11 @@ function isEnvKillSwitchActive(): boolean {
 /**
  * Load kill switch state from the database.
  * Returns a default inactive state if no record exists.
+ *
+ * On DB error, fails CLOSED (halted): the kill switch's own job is to stop
+ * dispatch, so if we cannot confirm it is safe to proceed, we must not proceed.
+ * A database outage is exactly the kind of degraded condition this guard exists
+ * to be conservative about.
  */
 async function loadStateFromDb(): Promise<KillSwitchState> {
   try {
@@ -85,9 +91,17 @@ async function loadStateFromDb(): Promise<KillSwitchState> {
     }
 
     return JSON.parse(config.value) as KillSwitchState;
-  } catch {
-    // On DB error, fail safe — return inactive
-    return { active: false, scope: FULL_SCOPE };
+  } catch (err) {
+    console.error(
+      "[KILL_SWITCH] Database unavailable while loading state — failing CLOSED (all subsystems halted) until DB recovers.",
+      err,
+    );
+    return {
+      active: true,
+      reason: "db_unavailable",
+      detail: "Kill switch state could not be read from the database (DB unavailable) — failing closed.",
+      scope: FULL_SCOPE,
+    };
   }
 }
 

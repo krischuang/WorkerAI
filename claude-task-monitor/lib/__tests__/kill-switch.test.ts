@@ -131,3 +131,35 @@ describe("kill switch — isSubsystemHalted", () => {
     }
   });
 });
+
+// ── Fail-closed on DB outage ──────────────────────────────────────────────────
+// Uses its own module instance (vi.resetModules) so the 5s in-memory cache from
+// other tests in this file can't mask the DB-error path under test.
+
+describe("kill switch — fails closed when the database is unavailable", () => {
+  it("halts every subsystem if SystemConfig cannot be read (DB error)", async () => {
+    delete process.env.PLATFORM_KILL_SWITCH;
+    vi.resetModules();
+    vi.doMock("../prisma", () => ({
+      prisma: {
+        systemConfig: {
+          findUnique: vi.fn().mockRejectedValue(new Error("connection refused")),
+          upsert: vi.fn().mockResolvedValue({}),
+        },
+        auditEvent: { findMany: vi.fn().mockResolvedValue([]) },
+      },
+    }));
+    vi.doMock("../audit", () => ({ emitAudit: vi.fn().mockResolvedValue(undefined) }));
+
+    const fresh = await import("../kill-switch");
+    const state = await fresh.getKillSwitchState();
+
+    expect(state.active).toBe(true);
+    expect(state.scope.taskDispatch).toBe(true);
+    expect(state.scope.agentExecution).toBe(true);
+    expect(await fresh.isSubsystemHalted("taskDispatch")).toBe(true);
+    expect(await fresh.isSubsystemHalted("agentExecution")).toBe(true);
+
+    vi.resetModules();
+  });
+});

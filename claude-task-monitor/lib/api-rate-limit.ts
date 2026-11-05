@@ -242,19 +242,42 @@ const RL_ENABLED_KEY = "_rateLimitEnabled";
 /**
  * Set the cached rate-limit-enabled flag.
  * Called at startup (instrumentation.node.ts) and on admin config updates.
- * Stored in globalThis so it survives HMR and is shared across all modules
- * in the same Node.js process (middleware + route handlers).
+ * Stored in globalThis — but NOTE: this is NOT shared with middleware.ts.
+ * middleware.ts runs in the Edge Runtime (a separate V8 isolate with its own
+ * globalThis), while this setter only ever runs from Node.js-runtime code
+ * (instrumentation.node.ts, and API route handlers under the default Node.js
+ * runtime). isRateLimitEnabled() is only ever called from middleware — so
+ * this globalThis write can NEVER be observed by the one place that reads
+ * it. Confirmed by direct reproduction while building this fix: setting the
+ * SystemConfig row to "false" has zero effect on live request handling, with
+ * or without a delay. Same root-cause class as the timing-safe Edge Runtime
+ * bug fixed earlier (lib/timing-safe.ts) — code written assuming Node.js and
+ * Edge share state when they do not. Kept here as-is (harmless, and correct
+ * if this flag is ever read from Node.js-runtime code in the future); see
+ * isRateLimitEnabled() below for the actual fix.
  */
 export function setRateLimitEnabled(enabled: boolean): void {
   (globalThis as Record<string, unknown>)[RL_ENABLED_KEY] = enabled;
 }
 
 /**
- * Returns true unless the admin has explicitly disabled rate limiting via
- * the SystemConfig key "rate_limit_enabled" = "false".
- * Defaults to true when the flag has not been loaded yet.
+ * Returns true unless rate limiting has been explicitly disabled.
+ *
+ * Primary check: the RATE_LIMIT_DISABLED environment variable — this is the
+ * ONLY mechanism that actually works from middleware.ts's Edge Runtime
+ * (env vars, unlike globalThis, are available identically in both runtimes).
+ * This mirrors lib/kill-switch.ts's PLATFORM_KILL_SWITCH env-var fast path,
+ * the same proven pattern already used elsewhere in this codebase for a
+ * setting that must be readable from the Edge Runtime.
+ *
+ * Falls back to the globalThis cache (see setRateLimitEnabled's comment for
+ * why that path does not currently work from middleware, but is kept for
+ * any future Node.js-runtime caller). Defaults to enabled.
  */
 export function isRateLimitEnabled(): boolean {
+  const envValue = process.env.RATE_LIMIT_DISABLED;
+  if (envValue === "1" || envValue?.toLowerCase() === "true") return false;
+
   const g = globalThis as Record<string, unknown>;
   if (RL_ENABLED_KEY in g) return g[RL_ENABLED_KEY] as boolean;
   return true;

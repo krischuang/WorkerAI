@@ -3,6 +3,14 @@
  *
  * Verifies that timingSafeCompare produces correct results and uses the
  * Node.js timingSafeEqual under the hood for constant-time comparison.
+ *
+ * Caveat: Vitest runs these in a real Node.js process, where `require("crypto")`
+ * succeeds — so this suite alone cannot catch a regression specific to the
+ * Next.js Edge Runtime (what middleware.ts actually runs under), where
+ * `require("crypto")` throws. That exact regression shipped once (every
+ * comparison silently returned `false`, breaking all login) and was only
+ * caught by running a real built server and observing login fail. See the
+ * comment above `nodeTimingSafeEqual` in ../timing-safe.ts.
  */
 
 import { describe, it, expect } from "vitest";
