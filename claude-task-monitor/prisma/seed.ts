@@ -1,4 +1,10 @@
-import "dotenv/config";
+// .env.local MUST win over .env — plain "dotenv/config" only loads .env,
+// which would silently point a local/CI seed run at a real DATABASE_URL in
+// .env if one is present (e.g. a developer's machine with real production
+// credentials in .env). See the same fix/rationale in playwright.config.ts.
+import { config as loadEnv } from "dotenv";
+loadEnv({ path: ".env.local" });
+loadEnv({ path: ".env" });
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../app/generated/prisma/client";
 
@@ -264,6 +270,20 @@ async function main() {
         "Started database schema design for daily pull history. User model and CardPull model created.",
       startedAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
     },
+  });
+
+  // Written for completeness/forward-compatibility, but NOTE: as of this
+  // writing this value has no effect on middleware.ts's actual rate-limit
+  // enforcement, which runs in the Edge Runtime and cannot see it (confirmed
+  // by direct reproduction — see lib/api-rate-limit.ts's isRateLimitEnabled
+  // doc comment for the full explanation). The mechanism that actually works
+  // for CI/E2E is the RATE_LIMIT_DISABLED env var set in
+  // .github/workflows/ci.yml's e2e job (and in a local .env.local when
+  // running the suite by hand) — not this SystemConfig row.
+  await prisma.systemConfig.upsert({
+    where: { key: "rate_limit_enabled" },
+    create: { key: "rate_limit_enabled", value: "false" },
+    update: { value: "false" },
   });
 
   console.log("Seed completed successfully.");
