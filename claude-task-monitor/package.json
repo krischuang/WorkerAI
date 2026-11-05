@@ -24,7 +24,14 @@
     "test:e2e:ci": "playwright test --reporter=list --retries=1",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:debug": "playwright test --debug",
-    "docs:generate": "npx tsx scripts/generate-openapi.ts"
+    "docs:generate": "npx tsx scripts/generate-openapi.ts",
+    "demo:validation": "tsx scripts/demo-independent-validation.ts",
+    "demo:adaptive-trust": "bash -c 'set -a; [ -f .env.local ] && source .env.local; [ -f .env ] && source .env; set +a; tsx scripts/demo-adaptive-trust.ts'",
+    "demo:evidence-preference": "bash -c 'set -a; [ -f .env.local ] && source .env.local; [ -f .env ] && source .env; set +a; tsx scripts/demo-evidence-preference.ts'",
+    "demo:e2e": "tsx scripts/demo-e2e/run.ts --teardown",
+    "demo:real-claude": "tsx scripts/demo-e2e/verify-real-claude.ts",
+    "export:clean": "bash scripts/export-clean-package.sh",
+    "demo:precheck": "bash scripts/pre-demo-check.sh"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -39,9 +46,8 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "bcryptjs": "^3.0.3",
-    "concurrently": "^10.0.3",
     "lucide-react": "^1.17.0",
-    "next": "^15.5.25",
+    "next": "^15.5.29",
     "nodemailer": "^8.0.11",
     "otpauth": "^9.5.1",
     "pg": "^8.21.0",
@@ -63,6 +69,7 @@
     "@types/ssh2": "^1.15.5",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.8",
+    "concurrently": "^10.0.3",
     "dotenv": "^17.4.2",
     "eslint": "^9",
     "eslint-config-next": "15.5.6",

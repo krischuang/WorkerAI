@@ -6,7 +6,11 @@
  * Safe to re-run — skips tasks whose title already exists in the project.
  */
 
-import "dotenv/config";
+// .env.local must win over .env — see prisma.config.ts for why plain
+// "dotenv/config" is unsafe here.
+import { config as loadEnv } from "dotenv";
+loadEnv({ path: ".env.local" });
+loadEnv({ path: ".env" });
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../app/generated/prisma/client";
 
