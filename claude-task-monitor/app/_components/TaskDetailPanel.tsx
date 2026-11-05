@@ -94,6 +94,9 @@ interface Task {
   reviewStatus: string | null;
   reviewAttempts: number;
   reviewVerdictNotes: string | null;
+  isAutonomous: boolean;
+  validationStatus: "passed" | "failed" | "missing" | "not_verified" | null;
+  validationEvidence: string | null;
   progressPercent: number | null;
   progressMessage: string | null;
   requiredTags: string[];
@@ -236,10 +239,34 @@ const EVENT_LABEL: Record<string, string> = {
   "task.failed":            "Marked failed",
   "task.timeout":           "Execution timed out",
   "task.retried":           "Retried",
+  "task.cloned":            "Cloned",
+  "task.deleted":           "Deleted",
+  "task.status_changed":    "Status changed",
+  "task.force_failed":      "Force-failed by operator",
   "task.review.sent":              "Review sent",
   "task.review.done":              "Review: done",
   "task.review.incomplete":        "Review: incomplete",
   "task.review.max_attempts_reached": "Review: max attempts reached",
+  "task.review_skipped":           "Review skipped",
+  "task.log_stream_opened":        "Log stream opened",
+  // Independent-verification lifecycle (lib/validation-gate.ts) — the
+  // events that make AGENT_REPORTED vs INDEPENDENTLY_VERIFIED concrete.
+  "task.validation_passed":        "Independently verified — validation passed",
+  "task.validation_failed":        "Verification failed — completion blocked",
+  "task.verification_unavailable": "Not verified — no workspace to confirm against",
+  "task.auto_followup_created":    "Follow-up task created from validation failure",
+  // Dispatch-time policy gate (lib/task-dispatch.ts).
+  "task.dispatch_blocked":           "Dispatch blocked by policy",
+  "task.dispatch_approval_consumed": "Approval consumed — dispatch allowed",
+  // File-level policy gate (lib/policy-engine.ts) — note entityType here is
+  // "policy", not "task"; see the load() comment above for why this still
+  // shows up for this task.
+  "policy.allow":            "Policy: allowed",
+  "policy.require_approval": "Policy: requires human approval",
+  "policy.deny":             "Policy: denied",
+  // Platform kill switch (lib/kill-switch.ts).
+  "kill_switch.activated":   "Kill switch activated — dispatch halted",
+  "kill_switch.deactivated": "Kill switch deactivated — dispatch resumed",
 };
 
 const EVENT_DOT: Record<string, string> = {
@@ -250,10 +277,27 @@ const EVENT_DOT: Record<string, string> = {
   "task.failed":            "bg-red-500",
   "task.timeout":           "bg-red-400",
   "task.retried":           "bg-amber-400",
+  "task.cloned":            "bg-sky-400",
+  "task.deleted":           "bg-zinc-400",
+  "task.status_changed":    "bg-zinc-400",
+  "task.force_failed":      "bg-red-500",
   "task.review.sent":              "bg-sky-400",
   "task.review.done":              "bg-emerald-500",
   "task.review.incomplete":        "bg-amber-500",
   "task.review.max_attempts_reached": "bg-red-500",
+  "task.review_skipped":           "bg-zinc-400",
+  "task.log_stream_opened":        "bg-zinc-300",
+  "task.validation_passed":        "bg-green-500",
+  "task.validation_failed":        "bg-red-500",
+  "task.verification_unavailable": "bg-amber-500",
+  "task.auto_followup_created":    "bg-sky-400",
+  "task.dispatch_blocked":           "bg-red-500",
+  "task.dispatch_approval_consumed": "bg-emerald-500",
+  "policy.allow":            "bg-emerald-500",
+  "policy.require_approval": "bg-amber-500",
+  "policy.deny":             "bg-red-500",
+  "kill_switch.activated":   "bg-red-600",
+  "kill_switch.deactivated": "bg-emerald-500",
 };
 
 // ── Artifact types ────────────────────────────────────────────────────────────
@@ -471,7 +515,14 @@ function AuditTimeline({ taskId }: { taskId: string }) {
   const [loadingMore, setLoadingMore] = useState(false);
 
   function load(cursor?: string) {
-    const url = `/api/audit?entityType=task&entityId=${taskId}${cursor ? `&cursor=${cursor}` : ""}`;
+    // entityId alone, not entityType=task — file-level policy decisions
+    // (lib/policy-engine.ts's evaluatePolicy) are audited under
+    // entityType: "policy" even though entityId is this same task's id, so
+    // filtering by entityType would silently hide real policy-deny /
+    // require-approval evidence for this exact task. cuids don't collide
+    // across tables, so entityId alone correctly and safely reunifies the
+    // task's full audit trail.
+    const url = `/api/audit?entityId=${taskId}${cursor ? `&cursor=${cursor}` : ""}`;
     return fetch(url)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { events: AuditEvent[]; nextCursor: string | null } | null) => {
@@ -1237,6 +1288,44 @@ export function TaskDetailPanel({
       {task.reviewAttempts > 0 && task.reviewStatus !== "failed" && task.reviewStatus !== "incomplete" && (
         <div className="mb-4 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-2 text-xs text-zinc-600">
           Review attempts: {task.reviewAttempts}
+        </div>
+      )}
+
+      {/* Completion validation gate — isAutonomous tasks only. Labels use the same
+          verificationState vocabulary as lib/validation-gate.ts: a task is never marked
+          INDEPENDENTLY_VERIFIED from the agent's self-report alone. NOT_VERIFIED (amber) is
+          deliberately distinct from VERIFICATION_FAILED (red) — "no confirmed signal either
+          way" is not the same claim as "confirmed to have failed". */}
+      {task.isAutonomous && task.validationStatus && (
+        <div
+          className={`mb-4 rounded-lg border px-4 py-3 text-sm ${
+            task.validationStatus === "passed"
+              ? "border-green-200 bg-green-50 text-green-800"
+              : task.validationStatus === "not_verified"
+              ? "border-amber-200 bg-amber-50 text-amber-800"
+              : "border-red-200 bg-red-50 text-red-800"
+          }`}
+        >
+          <span className="font-semibold uppercase tracking-wide text-xs">
+            {task.validationStatus === "passed" && "INDEPENDENTLY VERIFIED"}
+            {task.validationStatus === "failed" && "VERIFICATION FAILED"}
+            {task.validationStatus === "not_verified" && "NOT VERIFIED"}
+            {task.validationStatus === "missing" && "MISSING EVIDENCE"}
+          </span>
+          {task.validationStatus === "passed" && " — independent re-execution against the agent's own workspace agreed with its self-report. Not just trusted."}
+          {task.validationStatus === "failed" && " — the agent reported success, but independent re-execution disagreed. Completion blocked; see evidence below."}
+          {task.validationStatus === "not_verified" && " — no workspace was available to independently confirm the agent's self-report. Never promoted to verified without proof; completion blocked."}
+          {task.validationStatus === "missing" && " — agent reported completion without the required evidence block; completion blocked."}
+          {task.validationEvidence && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs font-medium opacity-80 hover:opacity-100">
+                Evidence
+              </summary>
+              <pre className="mt-2 whitespace-pre-wrap text-xs font-mono bg-white/60 rounded p-2 max-h-80 overflow-y-auto">
+                {task.validationEvidence}
+              </pre>
+            </details>
+          )}
         </div>
       )}
 
