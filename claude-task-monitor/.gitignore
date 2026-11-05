@@ -43,3 +43,39 @@ yarn-error.log*
 next-env.d.ts
 
 /app/generated/prisma
+
+# demo-day: regenerated on each run, not a stable artifact
+/scripts/demo-e2e/last-run-report.json
+/scripts/demo-e2e/*-report.json
+
+# local database backups — real data (server hosts, tasks, audit events).
+# Three .sql.gz dumps were found already committed to git history during the
+# Demo Day security pass (see docs/DEMO_DAY_FINAL_AUDIT.md). Re-verified
+# 2026-11-05: `git rm --cached` for all three is currently STAGED locally
+# (index) but NOT YET COMMITTED OR PUSHED — until that commit happens and is
+# pushed, they remain tracked and present at origin/main's current tip on the
+# public repo, exactly as before. This .gitignore entry only stops NEW dumps
+# from being tracked going forward; neither it nor the pending `git rm
+# --cached` purges the three files from existing git history (origin/main's
+# commit 5769a19 onward) — that needs a deliberate, separate history-rewrite
+# decision. See the Git History Remediation Plan for the full picture.
+/backups/*.sql
+/backups/*.sql.gz
+/backups/*.dump
+
+# Playwright auth storage state — contains a real, currently-valid session
+# cookie (__auth, domain=localhost) each time the e2e suite runs. Low remote
+# exploitability (cookie is scoped to localhost and keyed to this machine's
+# AUTH_SECRET hash), but it is still a live credential.
+#
+# `e2e/.auth-state.json` (old name) was found tracked in git history — every
+# commit of it was an empty `{"cookies":[],"origins":[]}` placeholder, never
+# a real cookie (re-verified by inspecting the committed/pushed blob
+# directly, not assumed) — but leaving it tracked meant a future `git add`
+# over a real local run could change that. Untracked via `git rm --cached`
+# this pass (nothing lost: the committed version was always empty) and
+# e2e/global-setup.ts + playwright.config.ts now write the real file to
+# `.auth-state.local.json` instead, a name this pattern also covers, so even
+# a careless `git add e2e/` can't re-introduce it.
+/e2e/.auth-state.json
+/e2e/.auth-state.local.json
