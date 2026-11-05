@@ -48,6 +48,36 @@ interface Agent {
   autoPauseEnabled: boolean;
 }
 
+interface ReliabilityCounts {
+  verifiedSuccess: number;
+  verifiedFailureHonest: number;
+  verifiedFailureFalsePositive: number;
+  excludedAmbiguous: number;
+  excludedPolicy: number;
+  excludedNotVerified: number;
+}
+
+interface AgentReliability {
+  verdict: "RELIABLE" | "MIXED" | "UNRELIABLE" | "INSUFFICIENT_EVIDENCE";
+  score: number | null;
+  sampleSize: number;
+  counts: ReliabilityCounts;
+  explanation: string;
+  method: string;
+}
+
+interface BaselineComparison {
+  taskCategory: string | null;
+  baselineAgentId: string | null;
+  baselineAgentName: string | null;
+  evidencePreferredAgentId: string | null;
+  evidencePreferredAgentName: string | null;
+  recommendationChanged: boolean;
+  explanation: string;
+  reasonNoAlternative: string | null;
+  advisoryOnly: true;
+}
+
 type ParserConfidence = "high" | "medium" | "low" | "failed";
 
 interface UsageSnapshot {
@@ -155,6 +185,11 @@ export default function AgentDetailPage() {
   const [snapshots, setSnapshots] = useState<UsageSnapshot[]>([]);
   const [showRawCapture, setShowRawCapture] = useState(false);
 
+  // Adaptive Trust Engine — deterministic, evidence-based reliability (not ML)
+  const [reliability, setReliability] = useState<AgentReliability | null>(null);
+  const [showReliabilityDetail, setShowReliabilityDetail] = useState(false);
+  const [comparison, setComparison] = useState<BaselineComparison | null>(null);
+
   // Launch Claude
   const [launching, setLaunching] = useState(false);
   const [launchResult, setLaunchResult] = useState<{ success: boolean; command?: string; error?: string } | null>(null);
@@ -216,10 +251,26 @@ export default function AgentDetailPage() {
       .catch(() => setTasks([]));
   }
 
+  function loadReliability() {
+    fetch(`/api/agents/${id}/reliability`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: AgentReliability | null) => setReliability(data))
+      .catch(() => setReliability(null));
+  }
+
+  function loadComparison() {
+    fetch(`/api/agents/${id}/compare`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: BaselineComparison | null) => setComparison(data))
+      .catch(() => setComparison(null));
+  }
+
   useEffect(() => {
     loadAgent();
     loadTasks();
     loadSnapshots();
+    loadReliability();
+    loadComparison();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -590,6 +641,100 @@ mkdir -p ${agent.workDir}
 HOME=${agent.workDir} claude login
 
 # 3. Then click "Launch Claude" above to start the tmux session`}</pre>
+        </section>
+      )}
+
+      {/* ── Adaptive Trust Engine — deterministic, evidence-based reliability ──
+          Not machine learning: a direct aggregation of real, independently-
+          verified AuditEvent outcomes (lib/agent-reliability.ts). Advisory
+          only — never affects dispatch; see lib/adaptive-trust.ts. */}
+      {reliability && (
+        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Reliability (evidence-based)</h2>
+            <span
+              className={`text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                reliability.verdict === "RELIABLE"
+                  ? "bg-green-50 text-green-700 border border-green-200"
+                  : reliability.verdict === "MIXED"
+                  ? "bg-amber-50 text-amber-700 border border-amber-200"
+                  : reliability.verdict === "UNRELIABLE"
+                  ? "bg-red-50 text-red-700 border border-red-200"
+                  : "bg-zinc-100 text-zinc-600 border border-zinc-200"
+              }`}
+            >
+              {reliability.verdict.replace(/_/g, " ")}
+            </span>
+          </div>
+          <p className="text-xs text-zinc-500 mb-3">
+            Deterministic evidence aggregation from independently-verified task outcomes — not machine learning, not self-reported.
+          </p>
+          {reliability.score !== null && (
+            <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-100 mb-1">
+              {reliability.score}<span className="text-sm font-normal text-zinc-500">/100</span>
+            </p>
+          )}
+          <p className="text-sm text-zinc-700 dark:text-zinc-300">{reliability.explanation}</p>
+          {reliability.sampleSize > 0 && (
+            <button
+              onClick={() => setShowReliabilityDetail((s) => !s)}
+              className="mt-2 text-xs font-medium text-blue-600 hover:text-blue-800 dark:hover:text-blue-400"
+            >
+              {showReliabilityDetail ? "Hide" : "Show"} evidence breakdown
+            </button>
+          )}
+          {showReliabilityDetail && (
+            <dl className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+              <div className="bg-green-50 rounded p-2"><dt className="text-green-700 font-medium">Verified success</dt><dd className="text-green-900">{reliability.counts.verifiedSuccess}</dd></div>
+              <div className="bg-amber-50 rounded p-2"><dt className="text-amber-700 font-medium">Honest failure</dt><dd className="text-amber-900">{reliability.counts.verifiedFailureHonest}</dd></div>
+              <div className="bg-red-50 rounded p-2"><dt className="text-red-700 font-medium">False positive</dt><dd className="text-red-900">{reliability.counts.verifiedFailureFalsePositive}</dd></div>
+              <div className="bg-zinc-50 rounded p-2"><dt className="text-zinc-600 font-medium">Excluded: not verified</dt><dd className="text-zinc-800">{reliability.counts.excludedNotVerified}</dd></div>
+              <div className="bg-zinc-50 rounded p-2"><dt className="text-zinc-600 font-medium">Excluded: policy</dt><dd className="text-zinc-800">{reliability.counts.excludedPolicy}</dd></div>
+              <div className="bg-zinc-50 rounded p-2"><dt className="text-zinc-600 font-medium">Excluded: ambiguous</dt><dd className="text-zinc-800">{reliability.counts.excludedAmbiguous}</dd></div>
+            </dl>
+          )}
+        </section>
+      )}
+
+      {/* ── Baseline vs. evidence-preferred comparison — compact, advisory only.
+          Compares this agent and its eligible siblings on the same server;
+          never recommends an ineligible agent (same hard gates as production
+          dispatch — see lib/adaptive-trust.ts's compareBaselineWithEvidencePreference).
+          Shows SAME AGENT with a reason when evidence doesn't justify a change,
+          rather than inventing a preferred alternative. */}
+      {comparison && (
+        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-700 p-5 mb-6">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="font-semibold text-zinc-900 dark:text-zinc-100">Baseline vs. Evidence-Preferred</h2>
+            <span className="text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600 border border-zinc-200">
+              advisory only
+            </span>
+          </div>
+          <p className="text-xs text-zinc-500 mb-3">
+            Compares existing capability/health/load selection against evidence-preferred routing for &ldquo;{comparison.taskCategory ?? "coding"}&rdquo; tasks among eligible agents on this server. Never alters real dispatch.
+          </p>
+          {!comparison.baselineAgentId ? (
+            <p className="text-sm text-zinc-600">No eligible agent on this server right now.</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 mb-2">
+              <div className="rounded-lg border border-zinc-200 p-3">
+                <p className="text-xs text-zinc-500 font-medium mb-0.5">BASELINE</p>
+                <p className="text-sm font-semibold text-zinc-900">{comparison.baselineAgentName}</p>
+              </div>
+              <div className={`rounded-lg border p-3 ${comparison.recommendationChanged ? "border-amber-200 bg-amber-50" : "border-zinc-200"}`}>
+                <p className="text-xs text-zinc-500 font-medium mb-0.5">EVIDENCE-PREFERRED</p>
+                <p className="text-sm font-semibold text-zinc-900">
+                  {comparison.recommendationChanged ? comparison.evidencePreferredAgentName : "SAME AGENT"}
+                </p>
+              </div>
+            </div>
+          )}
+          {comparison.baselineAgentId && (
+            <>
+              <p className="text-xs font-medium text-zinc-700 mt-2 mb-0.5">WHY?</p>
+              <p className="text-sm text-zinc-700 dark:text-zinc-300">{comparison.explanation}</p>
+            </>
+          )}
         </section>
       )}
 
