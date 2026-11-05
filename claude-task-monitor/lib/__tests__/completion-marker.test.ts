@@ -7,11 +7,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { COMPLETION_BLOCK_START, COMPLETION_BLOCK_END, COMPLETION_SCAN_LINES } from "../constants";
+import { COMPLETION_BLOCK_START, COMPLETION_BLOCK_END, COMPLETION_SCAN_LINES, VALIDATION_BLOCK_START, VALIDATION_BLOCK_END } from "../constants";
 
 // ─── 1. detectCompletionBlock — pure function ─────────────────────────────────
 
-import { detectCompletionBlock } from "../usage-parser";
+import { detectCompletionBlock, detectValidationBlock } from "../usage-parser";
 
 const TASK_ID = "task-abc123";
 const NONCE = "deadbeef-0000-1111-2222-333333333333";
@@ -199,6 +199,85 @@ describe("detectTaskCompletion — marker inside prompt must not complete task",
     const result = await detectTaskCompletion(SSH_CONFIG, "claude", TASK_ID, NONCE, outputOffset);
     expect(result.markerFound).toBe(true);
     expect(result.completed).toBe(true);
+  });
+});
+
+describe("detectTaskCompletion — echoed VALIDATION template must not be mistaken for real validation", () => {
+  // buildDispatchPrompt embeds a literal [WORKERAI_VALIDATION] block as a
+  // format example, with the real taskId/nonce already filled in and
+  // "result: passed" as the illustrative value (see lib/prompt-sanitiser.ts).
+  // When that prompt is pasted into tmux, the terminal echoes it back into
+  // the pane. Anything that re-scans paneText for a validation block (e.g.
+  // applyValidationGate's detectValidationBlock) must never match that
+  // echoed example — only real output Claude produces after outputOffset.
+  beforeEach(() => vi.resetAllMocks());
+
+  it("negative: incomplete work (no real output yet) is not marked completed, and the returned paneText does not contain the echoed validation example", async () => {
+    const prompt = buildDispatchPrompt({
+      title: "Write a unit test",
+      description: "Add tests for the auth module",
+      taskId: TASK_ID,
+      nonce: NONCE,
+      isAutonomous: true,
+    });
+    // Sanity check on the fixture itself: the prompt really does contain a
+    // literal, matchable validation block — this is what makes the bug real.
+    expect(detectValidationBlock(prompt, TASK_ID, NONCE).found).toBe(true);
+
+    const preLines = ["$ ssh demo@worker", "connected"];
+    const promptLines = prompt.split("\n");
+    const pane = [...preLines, ...promptLines].join("\n"); // no real output yet
+    const outputOffset = preLines.length + promptLines.length + 40; // matches sendRawPromptToTmux's convention
+
+    mockExecSSH.mockResolvedValueOnce({ stdout: pane, stderr: "", exitCode: 0 });
+
+    const result = await detectTaskCompletion(SSH_CONFIG, "claude", TASK_ID, NONCE, outputOffset);
+
+    expect(result.markerFound).toBe(false);
+    expect(result.completed).toBe(false);
+    // The core assertion: a downstream re-scan of the returned paneText must
+    // not find the echoed example either.
+    expect(detectValidationBlock(result.paneText, TASK_ID, NONCE).found).toBe(false);
+    expect(result.paneText).not.toContain("result: passed");
+  });
+
+  it("positive: a real validation block after outputOffset is still detected correctly", async () => {
+    const prompt = buildDispatchPrompt({
+      title: "Write a unit test",
+      taskId: TASK_ID,
+      nonce: NONCE,
+      isAutonomous: true,
+    });
+    const promptLines = prompt.split("\n");
+    const outputOffset = promptLines.length + 40;
+
+    const realOutput = [
+      "Running tests...",
+      "3 passed",
+      VALIDATION_BLOCK_START,
+      `taskId: ${TASK_ID}`,
+      `nonce: ${NONCE}`,
+      "result: passed",
+      "evidence: npm test: 3 passed, 0 failed.",
+      VALIDATION_BLOCK_END,
+      makeBlock(TASK_ID, "completed", NONCE),
+    ];
+    // Pad with blank lines so the real output genuinely lands after the offset,
+    // matching how captureDepth/outputOffset behave against a live pane.
+    const padding = Array.from({ length: outputOffset - promptLines.length }, () => "");
+    const pane = [...promptLines, ...padding, ...realOutput].join("\n");
+
+    mockExecSSH
+      .mockResolvedValueOnce({ stdout: pane, stderr: "", exitCode: 0 })
+      .mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 }); // Escape
+
+    const result = await detectTaskCompletion(SSH_CONFIG, "claude", TASK_ID, NONCE, outputOffset);
+
+    expect(result.markerFound).toBe(true);
+    expect(result.completed).toBe(true);
+    const validation = detectValidationBlock(result.paneText, TASK_ID, NONCE);
+    expect(validation.found).toBe(true);
+    expect(validation.status).toBe("passed");
   });
 });
 

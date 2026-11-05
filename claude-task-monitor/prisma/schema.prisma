@@ -70,6 +70,11 @@ enum ValidationStatus {
   passed
   failed
   missing
+  // Added for the explicit verification-state model: a task reported success
+  // but independent verification was mandatory and no workspace was available
+  // to run it — the agent's word was never independently confirmed. Distinct
+  // from "missing" (no evidence block at all) and "passed" (confirmed).
+  not_verified
 }
 
 enum ParserConfidence {
