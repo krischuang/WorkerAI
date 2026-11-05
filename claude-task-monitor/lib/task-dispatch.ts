@@ -10,6 +10,90 @@ import { emitAudit } from "@/lib/audit";
 import { getDecryptedTaskSecrets } from "@/lib/task-secrets";
 import { isSubsystemHalted } from "@/lib/kill-switch";
 import { evaluateTaskContent } from "@/lib/prompt-firewall";
+import { evaluateDispatchPolicy, getPolicyApproval, consumePolicyApproval } from "@/lib/policy-engine";
+
+/**
+ * Defense-in-depth safety gate, called from both dispatch functions before any
+ * SSH/tmux action. Re-checks what task-service.ts's auto-assign loop already
+ * checks at assignment time, and also runs the policy engine, so a task can
+ * never reach dispatch without this gate — regardless of which code path
+ * queued it.
+ *
+ * This is DISPATCH-TIME policy only: it evaluates the "code_execution"
+ * category by riskLevel, because no files have been touched yet — there is
+ * nothing else to evaluate before the task has even started running. It
+ * intentionally does NOT pass filePaths to evaluateDispatchPolicy (there are
+ * none to pass). File-level policy — which paths an agent actually touched —
+ * can only be evaluated after execution, against the real git diff; see
+ * lib/validation-gate.ts's file-level check, which runs at the opposite end
+ * of the same task's lifecycle.
+ */
+async function assertDispatchAllowed(taskId: string): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const task = await prisma.task.findUnique({
+    where: { id: taskId },
+    select: {
+      riskLevel: true,
+      isAutonomous: true,
+      project: { select: { autonomousMode: true, allowHighRiskAutonomy: true } },
+    },
+  });
+  if (!task) return { ok: false, detail: "task_not_found" };
+
+  // High-risk autonomous tasks must never dispatch unless the project has
+  // explicitly opted in. Mirrors lib/task-service.ts's auto-assign gate.
+  if (
+    task.isAutonomous &&
+    task.riskLevel === "high" &&
+    !(task.project.autonomousMode >= 4 && task.project.allowHighRiskAutonomy)
+  ) {
+    await emitAudit({
+      entityType: "task",
+      entityId: taskId,
+      eventType: "task.dispatch_blocked",
+      actorType: "system",
+      payload: { reason: "high_risk_requires_explicit_opt_in" },
+    });
+    return { ok: false, detail: "high_risk_requires_explicit_opt_in" };
+  }
+
+  const policyResult = await evaluateDispatchPolicy({ taskId, riskLevel: task.riskLevel });
+  if (policyResult.blocked) {
+    await emitAudit({
+      entityType: "task",
+      entityId: taskId,
+      eventType: "task.dispatch_blocked",
+      actorType: "system",
+      payload: { reason: "policy_denied", evaluations: policyResult.evaluations },
+    });
+    return { ok: false, detail: "policy_denied" };
+  }
+
+  if (policyResult.requiresApproval) {
+    const approval = await getPolicyApproval(taskId, "code_execution");
+    if (!approval) {
+      await emitAudit({
+        entityType: "task",
+        entityId: taskId,
+        eventType: "task.dispatch_blocked",
+        actorType: "system",
+        payload: { reason: "policy_requires_approval", evaluations: policyResult.evaluations },
+      });
+      return { ok: false, detail: "policy_requires_approval" };
+    }
+    // Approval granted — consume it immediately so it cannot be silently
+    // reused for a later, possibly different, dispatch of the same task.
+    await consumePolicyApproval(taskId);
+    await emitAudit({
+      entityType: "task",
+      entityId: taskId,
+      eventType: "task.dispatch_approval_consumed",
+      actorType: "system",
+      payload: { approval, evaluations: policyResult.evaluations },
+    });
+  }
+
+  return { ok: true };
+}
 
 export type AgentDispatchOutcome =
   | { ok: true }
@@ -45,6 +129,13 @@ export async function tryDispatchTaskToServer(opts: {
   // Kill switch: block all dispatch when taskDispatch subsystem is halted
   if (await isSubsystemHalted("taskDispatch")) {
     return { ok: false, reason: "task_not_dispatchable" as const };
+  }
+
+  // Risk/policy gate: re-checked here regardless of caller, so no dispatch path
+  // can skip it.
+  const policyCheck = await assertDispatchAllowed(opts.taskId);
+  if (!policyCheck.ok) {
+    return { ok: false, reason: "task_not_dispatchable" as const, detail: policyCheck.detail };
   }
 
   // Prompt firewall: scan task content for injection/exfiltration attempts
@@ -164,6 +255,13 @@ export async function tryDispatchTaskToAgent(opts: {
   // Kill switch: block all agent execution when subsystem is halted
   if (await isSubsystemHalted("agentExecution")) {
     return { ok: false, reason: "task_not_dispatchable" as const };
+  }
+
+  // Risk/policy gate: re-checked here regardless of caller, so no dispatch path
+  // can skip it.
+  const policyCheck = await assertDispatchAllowed(opts.taskId);
+  if (!policyCheck.ok) {
+    return { ok: false, reason: "task_not_dispatchable" as const, detail: policyCheck.detail };
   }
 
   // Prompt firewall: scan for injection/exfiltration before dispatch

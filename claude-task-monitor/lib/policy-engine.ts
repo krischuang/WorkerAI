@@ -125,6 +125,22 @@ const BUILTIN_RULES: PolicyRule[] = [
       "**/*.p12",
       "**/credentials.json",
       "**/service-account*.json",
+      // Conventional OpenSSH private key filenames have no extension at all —
+      // *.key/*.pem alone would miss every one of these.
+      "**/id_rsa",
+      "**/id_dsa",
+      "**/id_ecdsa",
+      "**/id_ed25519",
+      "**/.ssh/*",
+      // Common cloud-credential file locations.
+      "**/.aws/credentials",
+      "**/.aws/config",
+      "**/.netrc",
+      "**/.npmrc",
+      "**/.docker/config.json",
+      "**/gcloud/credentials.db",
+      "**/kube/config",
+      "**/.kube/config",
     ],
     decision: "deny",
     priority: 950,
@@ -215,12 +231,22 @@ async function loadCustomRules(): Promise<PolicyRule[]> {
 /**
  * Match a path against a glob pattern.
  * Supports ** for directory wildcards and * for single-segment wildcards.
+ *
+ * A leading double-star-slash segment matches zero or more directories —
+ * not "at least one" — so a pattern like double-star-slash-".env" matches
+ * both a repo-root .env and a nested a/b/.env. A naive substitution of
+ * double-star to ".*" leaves the slash as a literal required character,
+ * which would silently let a bare root-level .env (the single most common
+ * and most sensitive location) slip past the "block secret files" rule while
+ * still blocking any nested one — the opposite of what the rule intends.
  */
 function matchGlob(pattern: string, path: string): boolean {
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\//g, "DOUBLE_STAR_SLASH")
     .replace(/\*\*/g, "DOUBLE_STAR")
     .replace(/\*/g, "[^/]*")
+    .replace(/DOUBLE_STAR_SLASH/g, "(?:.*/)?")
     .replace(/DOUBLE_STAR/g, ".*");
   return new RegExp(`^${escaped}$`).test(path);
 }
@@ -384,6 +410,121 @@ export async function evaluateDispatchPolicy(opts: {
     blocked: finalDecision === "deny",
     requiresApproval: finalDecision === "require_approval",
   };
+}
+
+// ── Policy approvals ──────────────────────────────────────────────────────────
+//
+// A "require_approval" decision is not self-granting — evaluatePolicy/
+// evaluateDispatchPolicy only ever *classify* a decision, they never record
+// that a human actually reviewed and approved it. Approval is tracked here,
+// in SystemConfig (no schema migration needed, same storage already used for
+// policy_rules and the kill switch), keyed per task. An approval is one-time
+// use: the gate that consumes it (lib/task-dispatch.ts for dispatch-time
+// code_execution policy, lib/validation-gate.ts for post-execution
+// file_change policy) deletes it immediately, so a stale approval can't be
+// silently replayed for a later, possibly different, decision on the same
+// task.
+
+export interface PolicyApprovalRecord {
+  approvedBy: string;
+  approvedAt: string;
+  /** Hard expiry — an approval past this point is treated as absent. */
+  expiresAt: string;
+  /** The exact policy category this approval authorises. An approval granted
+   *  for one category (e.g. dispatch-time code_execution) can never satisfy
+   *  a check for a different category (e.g. post-execution file_change),
+   *  even for the same task — approvals are scoped to the operation they
+   *  were actually granted for, not just the task. */
+  category: PolicyCategory;
+  detail?: string;
+}
+
+function approvalKey(taskId: string): string {
+  return `policy_approval:${taskId}`;
+}
+
+const DEFAULT_APPROVAL_TTL_MINUTES = 30;
+/** Hard ceiling regardless of what a caller requests — an approval can never
+ *  be granted for longer than this, so "time-limited" cannot be defeated by
+ *  simply asking for a very large TTL. */
+const MAX_APPROVAL_TTL_MINUTES = 240;
+
+/** Record that a human has approved a pending require_approval decision for
+ *  this task, scoped to exactly one policy category, expiring after ttlMinutes
+ *  (default 30, hard-capped at 4 hours). */
+export async function grantPolicyApproval(opts: {
+  taskId: string;
+  approvedBy: string;
+  category: PolicyCategory;
+  detail?: string;
+  ttlMinutes?: number;
+}): Promise<PolicyApprovalRecord> {
+  const { prisma } = await import("@/lib/prisma");
+  const ttl = Math.min(Math.max(opts.ttlMinutes ?? DEFAULT_APPROVAL_TTL_MINUTES, 1), MAX_APPROVAL_TTL_MINUTES);
+  const now = Date.now();
+  const record: PolicyApprovalRecord = {
+    approvedBy: opts.approvedBy,
+    approvedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + ttl * 60_000).toISOString(),
+    category: opts.category,
+    detail: opts.detail,
+  };
+  await prisma.systemConfig.upsert({
+    where: { key: approvalKey(opts.taskId) },
+    create: { key: approvalKey(opts.taskId), value: JSON.stringify(record) },
+    update: { value: JSON.stringify(record) },
+  });
+  await emitAudit({
+    entityType: "task",
+    entityId: opts.taskId,
+    eventType: "policy.approval_granted",
+    actorType: opts.approvedBy,
+    payload: { ...record },
+  });
+  return record;
+}
+
+/** Look up a pending approval for a task, scoped to a specific policy
+ *  category — returns null (treated as "no approval") if none exists, if it
+ *  was granted for a different category, or if it has expired. An expired
+ *  record is deleted on read so it cannot be mistaken for valid on a later
+ *  lookup and does not linger indefinitely. */
+export async function getPolicyApproval(
+  taskId: string,
+  category: PolicyCategory,
+): Promise<PolicyApprovalRecord | null> {
+  const { prisma } = await import("@/lib/prisma");
+  const config = await prisma.systemConfig.findUnique({ where: { key: approvalKey(taskId) } });
+  if (!config?.value) return null;
+
+  let record: PolicyApprovalRecord;
+  try {
+    record = JSON.parse(config.value) as PolicyApprovalRecord;
+  } catch {
+    return null;
+  }
+
+  if (record.category !== category) return null;
+
+  if (new Date(record.expiresAt).getTime() <= Date.now()) {
+    await consumePolicyApproval(taskId);
+    await emitAudit({
+      entityType: "task",
+      entityId: taskId,
+      eventType: "policy.approval_expired",
+      actorType: "system",
+      payload: { category, expiresAt: record.expiresAt },
+    });
+    return null;
+  }
+
+  return record;
+}
+
+/** Consume (delete) an approval once a gate has acted on it — one-time use. */
+export async function consumePolicyApproval(taskId: string): Promise<void> {
+  const { prisma } = await import("@/lib/prisma");
+  await prisma.systemConfig.delete({ where: { key: approvalKey(taskId) } }).catch(() => {});
 }
 
 /**

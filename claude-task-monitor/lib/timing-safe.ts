@@ -13,7 +13,19 @@
 
 // We try to import Node.js crypto lazily so the module is importable in
 // edge contexts where the static import would fail.
-function nodeTimingSafeEqual(a: string, b: string): boolean {
+//
+// `typeof require !== "undefined"` is NOT a reliable way to detect Node.js:
+// Next.js's Edge Runtime (what middleware.ts actually runs under, in both
+// `next dev` and `next start` — there is no Node.js fallback unless
+// middleware explicitly opts into `export const runtime = "nodejs"`)
+// provides a `require` shim for module-compat purposes, but invoking it with
+// "crypto" throws ("The edge runtime does not support Node.js 'crypto'
+// module."). A previous version of this function branched on that check and
+// returned `false` from the catch block — which meant every timing-safe
+// comparison in the app silently failed under the Edge Runtime, breaking
+// both the general AUTH_SECRET login and the admin password login entirely.
+// Always attempt the Node path and fall back on any failure instead.
+function nodeTimingSafeEqual(a: string, b: string): boolean | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { timingSafeEqual, createHash } = require("crypto") as typeof import("crypto");
@@ -22,7 +34,7 @@ function nodeTimingSafeEqual(a: string, b: string): boolean {
     const hb = createHash("sha256").update(b).digest();
     return timingSafeEqual(ha, hb);
   } catch {
-    return false;
+    return null; // Node's crypto module isn't available here — caller should fall back.
   }
 }
 
@@ -47,8 +59,7 @@ function webCryptoTimingSafeEqual(a: string, b: string): boolean {
  * reliable); falls back to a Web Crypto XOR loop otherwise.
  */
 export function timingSafeCompare(a: string, b: string): boolean {
-  if (typeof require !== "undefined") {
-    return nodeTimingSafeEqual(a, b);
-  }
+  const nodeResult = nodeTimingSafeEqual(a, b);
+  if (nodeResult !== null) return nodeResult;
   return webCryptoTimingSafeEqual(a, b);
 }
