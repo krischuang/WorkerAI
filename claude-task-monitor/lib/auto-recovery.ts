@@ -11,6 +11,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { launchClaudeInTmux, type ClaudePermissionMode } from "@/lib/ssh-claude-tmux";
+import { isSubsystemHalted } from "@/lib/kill-switch";
 
 export interface RecoveryResult {
   attempted: boolean;
@@ -26,6 +27,15 @@ export async function recoverServer(
   serverId: string,
   triggeredBy: "auto" | "manual" = "manual",
 ): Promise<RecoveryResult> {
+  // The kill switch's selfHealing scope exists precisely to stop this: no
+  // relaunching of Claude sessions, automatic or manual, while an emergency
+  // stop is active. A human must explicitly deactivate the kill switch
+  // first — a stray "recover" click should not be able to undermine an
+  // active incident response.
+  if (await isSubsystemHalted("selfHealing")) {
+    return { attempted: false, success: false, reason: "kill_switch_active" };
+  }
+
   const server = await prisma.server.findUnique({
     where: { id: serverId },
     select: {
@@ -87,6 +97,10 @@ export async function recoverAgent(
   agentId: string,
   triggeredBy: "auto" | "manual" = "manual",
 ): Promise<RecoveryResult> {
+  if (await isSubsystemHalted("selfHealing")) {
+    return { attempted: false, success: false, reason: "kill_switch_active" };
+  }
+
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     select: {
