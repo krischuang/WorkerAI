@@ -2,7 +2,7 @@
 
 A local-first task management platform for orchestrating AI-assisted work across remote servers. Manage projects and tasks, dispatch them to Claude CLI sessions running on worker servers, and monitor execution — all from a single web UI.
 
-No authentication. Designed to run on localhost only.
+Password-protected (single user). Set `AUTH_SECRET` before exposing this beyond localhost — see [Authentication](claude-task-monitor/CLAUDE.md#authentication).
 
 ---
 
@@ -12,6 +12,8 @@ No authentication. Designed to run on localhost only.
 - **Server Management** — register remote SSH servers, verify connectivity, and inspect environment details
 - **Claude Usage Monitoring** — fetch real-time session and weekly usage percentages from a remote Claude CLI tmux session; automatically blocks task dispatch when usage ≥ 90%
 - **Task Dispatch via tmux** — send task descriptions directly into a running `claude` tmux session on a worker server; task status advances automatically
+- **Agents** — named Claude CLI instances, each with its own tmux session and working directory on a server, for running multiple isolated tasks per server
+- **Autonomous pipeline safeguards** — kill switch, policy engine, and an independent (not self-reported) validation gate sit in front of every autonomous dispatch — see [Safety & Validation](#safety--validation)
 - **Interactive SSH Terminal** — full PTY terminal in the browser via WebSocket + xterm.js
 - **Priority Queue** — view all pending tasks sorted by priority
 - **Daily Reports** — generate and browse per-day execution summaries
@@ -22,7 +24,7 @@ No authentication. Designed to run on localhost only.
 
 | Layer | Technology |
 |---|---|
-| Framework | Next.js 16.2.7, App Router, Turbopack |
+| Framework | Next.js 15.5, App Router, Turbopack |
 | Language | TypeScript 5, React 19 |
 | Database | PostgreSQL (Docker), Prisma 7, `@prisma/adapter-pg` |
 | Styling | Tailwind CSS v4 (CSS-only config, no `tailwind.config.js`) |
@@ -177,6 +179,10 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm run db:seed` | Seed with sample data |
 | `npm run db:studio` | Open Prisma Studio |
 | `npm run db:reset` | Wipe and re-migrate (destructive) |
+| `npm run test` | Unit tests (Vitest) |
+| `npm run test:e2e` | E2E tests (Playwright) |
+| `npm run typecheck` | TypeScript, no emit |
+| `npm run demo:validation` | Run the independent-validation demo scenario (real commands, disposable repo, no production access) |
 
 ---
 
@@ -243,20 +249,27 @@ Sessions auto-close after 30 minutes of idle. SSH private keys are read server-s
 
 ---
 
-## Deployment
+## CI/CD
 
-Runs as a Docker Compose stack (see `docker-compose.yml`) on a single host. There is currently no automated CI/CD deploy pipeline — a prior GitHub Actions + AWS SSM workflow was removed; deploys are manual:
+GitHub Actions workflows live at the repository root (`.github/workflows/`, not inside `claude-task-monitor/` — this is a monorepo with a single app in a subdirectory, and GitHub Actions only discovers workflows at the actual repo root). Every job sets `working-directory: claude-task-monitor` so `npm ci`/`npm run <script>` run against the app, not the repo root.
 
-```bash
-git pull origin main
-docker compose build --no-cache app
-docker compose up -d app
-```
+- **`ci.yml`** — lint, typecheck, unit tests (coverage-gated), production build, and E2E tests (Playwright against a real Postgres service container) on every push/PR to `main`.
+- **`deploy.yml`** — deploys to the configured EC2 host over SSH automatically once `ci.yml` succeeds on `main` (or manually via `workflow_dispatch`, with an optional rollback input). Runs disk-space and Docker-health pre-checks, tags the previous image for rollback, and automatically rolls back if the post-deploy health check fails.
+
+Deploys run as a Docker Compose stack (see `docker-compose.yml`) on a single host; the workflow above drives it — manual deploys (`git pull && docker compose up -d app`) still work if needed.
+
+---
+
+## Safety & Validation
+
+- **Kill switch** (`lib/kill-switch.ts`) — a single flag halts task dispatch, agent execution, self-healing, and auto-commit/push. Checked before every dispatch. Fails **closed**: if its own state can't be read from the database, it halts everything rather than guessing it's safe to proceed.
+- **Policy engine** (`lib/policy-engine.ts`) — declarative allow/require-approval/deny rules (e.g. production deploys, secret files, Terraform) evaluated on every dispatch, with every decision audited.
+- **High-risk autonomous gate** — a task flagged `riskLevel: high` from the autonomous pipeline is blocked at dispatch time unless the project has explicitly opted in (`Project.allowHighRiskAutonomy` + `autonomousMode >= 4`), re-checked at the dispatch call itself regardless of which code path queued the task.
+- **Independent validation** (`lib/validation-gate.ts`) — an autonomous task's own `[WORKERAI_VALIDATION] result: passed` self-report is not trusted by itself. When the task has an isolated workspace, the same lint/typecheck/test/build commands are independently re-executed against it, and the task is only marked completed if the real exit codes agree. See `npm run demo:validation` and `docs/DEMO_RUN_RECORD.md` in `claude-task-monitor/` for a real, captured run of this.
 
 ---
 
 ## Known Limitations
 
-- **No authentication** — do not expose this app to the network
-- **`ssh2` is incompatible with Turbopack's production build** — dev server works fine; production builds are blocked until the upstream issue is resolved
+- **Single-user password auth** — one shared `AUTH_SECRET`, no per-user accounts; do not expose to the network without it set
 - **Usage data is cached** — the task execution gate reads from the DB, not a live SSH check; refresh from the server detail page if the cached data is stale (a >10 min warning is shown)

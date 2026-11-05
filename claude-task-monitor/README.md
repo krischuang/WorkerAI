@@ -68,14 +68,25 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## Learn More
+## Safety & Validation
 
-To learn more about Next.js, take a look at the following resources:
+See the root [README's Safety & Validation section](../README.md#safety--validation) for the kill switch, policy engine, and independent (not self-reported) completion validation gate.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+To see the independent validation gate catch a false "passed" self-report for real — a disposable git repo, a real failing test, real exit codes, no production access:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run demo:validation
+```
+
+A captured run is recorded in [`docs/DEMO_RUN_RECORD.md`](docs/DEMO_RUN_RECORD.md) as a fallback if a live run isn't possible during the demo.
+
+For the fuller lifecycle — task creation, SSH dispatch, a scripted stand-in for Claude making a real commit, completion detection, and three safety-gate demonstrations (high-risk-autonomous block, policy-engine deny, kill-switch block) — against two disposable, localhost-only Docker containers (never any production host, credentials, or database):
+
+```bash
+npm run demo:e2e
+```
+
+This calls the real `lib/task-dispatch.ts`, `lib/kill-switch.ts`, `lib/policy-engine.ts`, and `lib/validation-gate.ts` over a real SSH connection to a throwaway container. Requires Docker. Run `npx tsx scripts/demo-e2e/run.ts --clean` if a previous run's containers were left up.
 
 ## Database Backup & Restore
 
@@ -137,8 +148,6 @@ ls -lh backups/
 | `BACKUP_DIR` | `./backups/` | Directory where backup files are written |
 | `DOCKER_CONTAINER` | `workerai-postgres` | Name of the Postgres Docker container |
 
-## Deploy on Vercel
+## Deployment
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+This app needs a persistent Postgres connection, a standalone WebSocket server (`ws-server.ts`, port 3099), and outbound SSH to worker servers — it does not run on serverless platforms like Vercel. See the root [README's CI/CD section](../README.md#cicd) for the actual deploy pipeline (`.github/workflows/deploy.yml`, EC2 + Docker Compose over SSH).

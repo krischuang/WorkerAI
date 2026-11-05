@@ -1,4 +1,8 @@
-import "dotenv/config";
+// .env.local must win over .env — see prisma.config.ts for why plain
+// "dotenv/config" is unsafe here.
+import { config as loadEnv } from "dotenv";
+loadEnv({ path: ".env.local" });
+loadEnv({ path: ".env" });
 import { WebSocketServer, WebSocket } from "ws";
 import { Client } from "ssh2";
 import { PrismaPg } from "@prisma/adapter-pg";
