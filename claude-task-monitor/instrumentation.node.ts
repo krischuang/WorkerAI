@@ -710,6 +710,7 @@ function startPoller() {
       timeoutMinutes: number | null;
       updatedAt: Date;
       disablePaneCapture: boolean;
+      workspaceDir: string | null;
       executionLogs: { id: string; startedAt: Date; status: string; finishedAt: Date | null }[];
       server: {
         id: string;
@@ -744,6 +745,7 @@ function startPoller() {
           timeoutMinutes: true,
           updatedAt: true,
           disablePaneCapture: true,
+          workspaceDir: true,
           executionLogs: {
             where: { status: "running", finishedAt: null },
             orderBy: { startedAt: "desc" },
@@ -1027,6 +1029,8 @@ function startPoller() {
             isAutonomous: task.isAutonomous,
             paneText: completionResult.paneText,
             expectedNonce: task.completionNonce,
+            sshConfig,
+            workspaceDir: task.workspaceDir,
           });
           const finalStatus: "completed" | "failed" = gate.allowed ? "completed" : "failed";
           const finalExitReason = gate.allowed ? exitReason : "validation_failed";
@@ -1121,6 +1125,7 @@ function startPoller() {
       timeoutMinutes: number | null;
       updatedAt: Date;
       disablePaneCapture: boolean;
+      workspaceDir: string | null;
       executionLogs: { id: string; startedAt: Date; status: string; finishedAt: Date | null }[];
       agent: {
         id: string;
@@ -1159,6 +1164,7 @@ function startPoller() {
           timeoutMinutes: true,
           updatedAt: true,
           disablePaneCapture: true,
+          workspaceDir: true,
           executionLogs: {
             where: { status: "running", finishedAt: null },
             orderBy: { startedAt: "desc" },
@@ -1207,6 +1213,7 @@ function startPoller() {
       taskStartedAt: Date;
       title: string;
       isAutonomous: boolean;
+      workspaceDir: string | null;
     };
     type AgentTaskEntry = {
       agent: AgentInfo;
@@ -1234,6 +1241,7 @@ function startPoller() {
         taskStartedAt: task.updatedAt,
         title: task.title,
         isAutonomous: task.isAutonomous,
+        workspaceDir: task.workspaceDir,
       };
       const entry = byAgent.get(task.agentId);
       if (entry) {
@@ -1490,6 +1498,13 @@ function startPoller() {
                 isAutonomous: info.isAutonomous,
                 paneText: perResult.paneText,
                 expectedNonce: info.completionNonce,
+                sshConfig: agent.server,
+                // Fall back to the agent's fixed working directory when the task
+                // itself never got an isolated temporary-clone workspace — this
+                // keeps independent verification possible (and thus completion
+                // reachable) for the common agent-dispatch case, rather than
+                // every such task landing on NOT_VERIFIED by default.
+                workspaceDir: info.workspaceDir ?? agent.workDir ?? null,
               });
               const perFinalStatus: "completed" | "failed" = perGate.allowed ? "completed" : "failed";
               const perFinalExitReason = perGate.allowed ? perExitReason : "validation_failed";
@@ -1614,6 +1629,9 @@ function startPoller() {
                     isAutonomous: legacyInfo?.isAutonomous ?? false,
                     paneText: legacyResult.paneText,
                     expectedNonce: legacyInfo?.completionNonce ?? completionNonce,
+                    sshConfig: agent.server,
+                    // Same fallback as the per-task path above.
+                    workspaceDir: legacyInfo?.workspaceDir ?? agent.workDir ?? null,
                   });
                   const legacyFinalStatus: "completed" | "failed" = legacyGate.allowed ? "completed" : "failed";
                   const legacyFinalExitReason = legacyGate.allowed ? legacyExitReason : "validation_failed";

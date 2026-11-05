@@ -969,6 +969,9 @@ export interface TaskCompletionResult {
   isIdle: boolean;
   /** true when either markerFound or isIdle — caller should mark the task done */
   completed: boolean;
+  /** Post-dispatch pane output only (when outputOffset was supplied) — safe to
+   *  re-scan for completion/validation blocks without matching the templates
+   *  embedded in the dispatch prompt itself. */
   paneText: string;
   error?: string;
   tmuxMissing?: boolean;
@@ -1073,7 +1076,18 @@ export async function detectTaskCompletion(
       ).catch(() => {});
     }
 
-    return { markerFound, isIdle, completed, paneText: pane.slice(-2000) };
+    // Same post-dispatch scanText used for markerFound — not the raw pane —
+    // so downstream re-scans (e.g. applyValidationGate's detectValidationBlock)
+    // can never match the [WORKERAI_VALIDATION]/[WORKERAI_RESULT] block
+    // templates embedded in the dispatch prompt itself (see buildDispatchPrompt
+    // in lib/prompt-sanitiser.ts, which fills in the real taskId/nonce as a
+    // format example). Falls back to the raw pane tail only when no offset was
+    // supplied (legacy tasks dispatched before the nonce protocol existed).
+    const safePaneText = (outputOffset !== undefined && outputOffset > 0)
+      ? scanText.slice(-4000)
+      : pane.slice(-2000);
+
+    return { markerFound, isIdle, completed, paneText: safePaneText };
   } catch (err) {
     return {
       markerFound: false, isIdle: false, completed: false,
@@ -1176,17 +1190,24 @@ export async function sendTaskToTmux(
   };
 
   // Capture pre-dispatch line count so we can skip old content when checking completion.
+  //
+  // Must count lines the exact same way detectTaskCompletion does when it
+  // later slices by this offset — otherwise the two measurements disagree
+  // and the offset silently overshoots the real (cleaned) pane length,
+  // producing an always-empty post-dispatch scanText. Piping through `wc -l`
+  // counts raw lines (including \r and trailing-whitespace padding tmux adds
+  // to fill the pane's row count); detectTaskCompletion slices
+  // cleanPane(stdout).split("\n"), which strips that padding and so is
+  // always a handful of lines shorter. Count the same way here.
   let outputOffset: number | undefined;
   try {
     const { stdout } = await execSSH(
       ssh,
-      `tmux capture-pane -t ${tmuxSession} -p -S -${COMPLETION_SCAN_LINES} 2>/dev/null | wc -l`,
+      `tmux capture-pane -t ${tmuxSession} -p -S -${COMPLETION_SCAN_LINES} 2>/dev/null`,
       5_000,
     );
-    const preLines = parseInt(stdout.trim(), 10);
-    if (!isNaN(preLines)) {
-      outputOffset = preLines + promptLineCount + 5;
-    }
+    const preLines = cleanPane(stdout).split("\n").length;
+    outputOffset = preLines + promptLineCount + 5;
   } catch { /* non-fatal — proceed without offset */ }
 
   // Inject task-specific env vars before the prompt so Claude can read them.
