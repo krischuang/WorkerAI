@@ -8,6 +8,7 @@
 
 import { test, expect, type APIRequestContext } from "@playwright/test";
 import path from "path";
+import { E2E_SSH_KEY_PATH } from "./global-setup";
 
 const PREFIX = `e2e-agent-${Date.now()}`;
 
@@ -19,7 +20,7 @@ test.describe("Agents", () => {
   test.beforeAll(async ({ playwright }) => {
     api = await playwright.request.newContext({
       baseURL: "http://localhost:3000",
-      storageState: path.join(__dirname, ".auth-state.json"),
+      storageState: path.join(__dirname, ".auth-state.local.json"),
     });
 
     // Create a parent server for agents.
@@ -28,7 +29,7 @@ test.describe("Agents", () => {
         name: `${PREFIX}-srv`,
         host: "192.0.2.3",
         username: "e2e",
-        sshKeyPath: "/tmp/e2e-key",
+        sshKeyPath: E2E_SSH_KEY_PATH,
         claudePermissionMode: "workspace_write",
       },
     });
@@ -60,7 +61,11 @@ test.describe("Agents", () => {
     expect(body.name).toBe(`${PREFIX}-agent-1`);
     expect(body.serverId).toBe(serverId);
     expect(body.claudePermissionMode).toBe("full_autonomous");
-    expect(body.status).toBe("idle");
+    // AgentStatus @default(offline) in prisma/schema.prisma — a freshly
+    // created agent has no confirmed tmux session yet, so it starts offline,
+    // not idle. This assertion previously expected "idle", which never
+    // matched the schema's actual, documented default.
+    expect(body.status).toBe("offline");
     agentId = body.id;
   });
 

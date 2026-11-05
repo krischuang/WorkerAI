@@ -5,6 +5,7 @@
 
 import { test, expect, type APIRequestContext } from "@playwright/test";
 import path from "path";
+import { E2E_SSH_KEY_PATH } from "./global-setup";
 
 const PREFIX = `e2e-task-${Date.now()}`;
 
@@ -18,7 +19,7 @@ test.describe("Tasks", () => {
   test.beforeAll(async ({ playwright }) => {
     api = await playwright.request.newContext({
       baseURL: "http://localhost:3000",
-      storageState: path.join(__dirname, ".auth-state.json"),
+      storageState: path.join(__dirname, ".auth-state.local.json"),
     });
 
     // Create supporting resources used across tests.
@@ -32,7 +33,7 @@ test.describe("Tasks", () => {
         name: `${PREFIX}-srv`,
         host: "192.0.2.2",
         username: "e2e",
-        sshKeyPath: "/tmp/e2e-key",
+        sshKeyPath: E2E_SSH_KEY_PATH,
         claudePermissionMode: "workspace_write",
       },
     });

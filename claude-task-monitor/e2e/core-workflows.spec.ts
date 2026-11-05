@@ -9,6 +9,7 @@
  */
 
 import { test, expect, type APIRequestContext } from "@playwright/test";
+import { E2E_SSH_KEY_PATH } from "./global-setup";
 
 const PREFIX = `e2e-${Date.now()}`;
 
@@ -113,7 +114,7 @@ test.describe("Core user workflows", () => {
         name: `${PREFIX}-server`,
         host: "192.0.2.1",       // TEST-NET address — not routable
         username: "e2e",
-        sshKeyPath: "/tmp/e2e-key",
+        sshKeyPath: E2E_SSH_KEY_PATH,
         claudePermissionMode: "workspace_write",
       },
     });

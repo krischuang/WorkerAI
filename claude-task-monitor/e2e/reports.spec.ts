@@ -12,7 +12,7 @@ test.describe("Daily Reports", () => {
   test.beforeAll(async ({ playwright }) => {
     api = await playwright.request.newContext({
       baseURL: "http://localhost:3000",
-      storageState: path.join(__dirname, ".auth-state.json"),
+      storageState: path.join(__dirname, ".auth-state.local.json"),
     });
   });
 
