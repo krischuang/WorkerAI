@@ -57,7 +57,11 @@ test.describe("Authentication", () => {
   // ── Unauthenticated redirect ───────────────────────────────────────────────
 
   test("GET /dashboard — unauthenticated request redirects to /login", async ({ playwright }) => {
-    const unauthed = await playwright.request.newContext({ baseURL: "http://localhost:3000" });
+    // storageState: undefined is required, not optional — the playwright
+    // fixture's newContext() otherwise inherits the project's default
+    // use.storageState (the authenticated session file every other spec
+    // relies on), silently defeating "unauthenticated" tests like this one.
+    const unauthed = await playwright.request.newContext({ baseURL: "http://localhost:3000", storageState: undefined });
     try {
       const res = await unauthed.get("/dashboard");
       const isLoginPage =
@@ -71,7 +75,11 @@ test.describe("Authentication", () => {
   });
 
   test("GET /api/projects — unauthenticated returns 401 or redirect", async ({ playwright }) => {
-    const unauthed = await playwright.request.newContext({ baseURL: "http://localhost:3000" });
+    // storageState: undefined is required, not optional — the playwright
+    // fixture's newContext() otherwise inherits the project's default
+    // use.storageState (the authenticated session file every other spec
+    // relies on), silently defeating "unauthenticated" tests like this one.
+    const unauthed = await playwright.request.newContext({ baseURL: "http://localhost:3000", storageState: undefined });
     try {
       const res = await unauthed.get("/api/projects");
       expect([401, 403, 302]).toContain(res.status());

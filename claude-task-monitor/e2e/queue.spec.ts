@@ -20,7 +20,7 @@ test.describe("Queue", () => {
   test.beforeAll(async ({ playwright }) => {
     api = await playwright.request.newContext({
       baseURL: "http://localhost:3000",
-      storageState: path.join(__dirname, ".auth-state.json"),
+      storageState: path.join(__dirname, ".auth-state.local.json"),
     });
 
     // P1 project with two tasks (P1 + P3)
