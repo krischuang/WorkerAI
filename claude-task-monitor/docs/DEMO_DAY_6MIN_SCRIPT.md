@@ -1,147 +1,153 @@
-# Demo Day 6-Minute Script — WorkerAI (browser-first)
+# Demo Day 6-Minute Script — WorkerAI (browser-first, interactive)
 
-Target: **5:30 (330s) rehearsed, 6:00 (360s) hard ceiling** — 30s of
+Target: **5:20 (320s) rehearsed, 6:00 (360s) hard ceiling** — 40s of
 deliberate, unfilled buffer.
 
-**Design change (2026-11-05)**: the presentation now centers on a single
-browser page, `/demo-day`, instead of a terminal. The browser is the
-primary interface; terminal output only appears in that page's own
-collapsible "Technical evidence" drawer, for judges who ask to see it.
-Every number on `/demo-day` is read live, through real, already-tested
-application APIs (`GET /api/tasks/[id]`, `GET /api/audit`,
-`GET /api/agents/[id]/compare`) — not re-run on stage, not hardcoded. The
-underlying rows are a persistent, clearly-labeled SYNTHETIC fixture (see
-`scripts/seed-demo-day.ts`) — the same architecture principle as every
-other demo in this project: real logic, real reads, labeled synthetic data.
-
-**Update (2026-11-05)**: the Safety segment no longer switches to
-`docs/DEMO_RUN_RECORD.md`. `/demo-day` now has a 5th step, **Safety &
-Audit**, which reads the same four assertions live through
-`GET /api/audit?entityType=task&entityId=_demo_day_safety` — no tab switch,
-no markdown on screen during the live flow. `DEMO_RUN_RECORD.md` remains
-the source-of-truth capture and the fallback if `/demo-day` itself fails
-(see the Fallback cue at the bottom).
+**Design (2026-11-06)**: a 4-slide deck opens and closes the talk; the
+middle is a single interactive browser page, `/demo-day`. The page no
+longer renders its results on load — it opens on a **"Run This Task"**
+button over a real, live-read task card. Pressing it plays a ~5.5s staged
+dispatch→verify feed (a replay of this exact task's real captured
+timeline — a live SSH/tmux/Claude run takes 70s–6min, too unpredictable
+for a hard slot), then unlocks the step-by-step evidence below — all of
+which is still read live through real, already-tested application APIs
+(`GET /api/tasks/[id]`, `GET /api/audit`, `GET /api/agents/[id]/compare`).
+The underlying rows are a persistent, clearly-labeled SYNTHETIC fixture
+(see `scripts/seed-demo-day.ts`).
 
 The full Docker E2E orchestration run is **not** part of the live
-presentation (measured up to 6+ minutes on this machine — see
-`docs/DEMO_RUN_RECORD.md` for the captured evidence instead).
+presentation — see `docs/DEMO_RUN_RECORD.md` for the captured evidence.
 
 **Pre-flight (once, before doors open):**
 ```bash
 npm run dev   # separate terminal, leave running
 set -a; source .env.local; set +a; npm run demo:preflight
 ```
-`demo:preflight` checks the environment, seeds/re-seeds the fixture
-(idempotent), and verifies the exact three API calls and values `/demo-day`
-depends on — including the Safety & Audit assertions — before you ever
-open the page. Only open `http://localhost:3000/demo-day` once it prints
-`READY`. No second tab is needed anymore — see the design update above.
+`demo:preflight` checks the environment, re-seeds the fixture (idempotent),
+and verifies the exact API values `/demo-day` depends on — including the
+0/100 vs 100/100 reliability flip and all 4 Safety & Audit assertions —
+before you ever open the page. Only open `http://localhost:3000/demo-day`
+once it prints `READY`, and **do not click "Run This Task" during
+rehearsal-only checks** — leave the page unclicked so it's in its opening
+state when you walk on stage.
 
 ---
 
 | # | Time | Screen | Action |
 |---|---|---|---|
-| 1 | 00:00–00:50 | Presenter / `/demo-day` top (already loaded) | Problem statement; point at the page header and synthetic-data banner |
-| 2 | 00:50–01:50 | `/demo-day` | Click step **1 Task** — Section 1, Task Execution |
-| 3 | 01:50–02:55 | `/demo-day` | Click step **2 Verification** — Section 2, Independent Verification |
-| 4 | 02:55–03:35 | `/demo-day` | Click steps **3 Reliability Evidence** then **4 Agent Recommendation** — Section 3, Adaptive Trust |
-| 5 | 03:35–04:25 | `/demo-day` | Click step **5 Safety & Audit** — live safety assertions |
-| 6 | 04:25–05:30 | Presenter, no screen (or back to `/demo-day` top) | Business value and conclusion |
-| — | 05:30–06:00 | — | **Buffer — do not script content into this time** |
+| 1 | 00:00–00:20 | Slide 1 | Hook — who checks the work? |
+| 2 | 00:20–00:50 | Slide 2 | One workflow, four stages |
+| 3 | ~00:50 | Slide 3 → switch to `/demo-day` | "Let's not just talk about it." |
+| 4 | 00:50–01:50 | `/demo-day` | Press **▶ Run This Task**, watch the feed, read Section 1 |
+| 5 | 01:50–02:50 | `/demo-day` | Click step **2 Verification** |
+| 6 | 02:50–03:30 | `/demo-day` | Click steps **3 Reliability Evidence** then **4 Agent Recommendation** |
+| 7 | 03:30–04:15 | `/demo-day` | Click step **5 Safety & Audit** |
+| 8 | 04:15–05:20 | Slide 4 | Close |
+| — | 05:20–06:00 | — | **Buffer — do not script content into this time** |
 
 ---
 
-## 1. Problem and architecture (00:00–00:50, ~104 words)
+## 1. Hook (00:00–00:20, ~40 words)
 
-**Screen:** `/demo-day`, already loaded, scrolled to the top.
+**Screen:** Slide 1.
 
-"AI coding agents write good code, but they don't know when to stop, what
-they're allowed to touch, or whether what they did actually worked. An
-overconfident agent will happily say it passed when it didn't.
+"AI agents write code fast. The problem isn't speed — it's trust. An
+overconfident agent will tell you 'done' whether it's true or not. So:
+who actually checks the work?"
 
-This is WorkerAI — a task is created, a policy gate decides if it's
-allowed, it dispatches over real SSH into a tmux session running Claude,
-and then — the part most agent frameworks skip — WorkerAI independently
-re-runs the real test suite before calling it done. Everything you'll see
-for the next few minutes is read live out of the real application, right
-here in the browser."
+## 2. Architecture (00:20–00:50, ~70 words)
 
-## 2. Task orchestration evidence (00:50–01:50, ~82 words, LIVE)
+**Click to Slide 2.**
 
-**Click:** step **1 Task**.
+"Meet WorkerAI. One workflow, four stages: orchestrate the work; authorise
+it through real risk gates and a kill switch; execute it over real SSH,
+inside a real tmux session, running real Claude Code; and verify —
+independently re-run the result instead of just trusting what the agent
+says. Every verified outcome becomes an audit trail, feeding a fully
+advisory trust layer that learns from it — without ever taking the wheel."
 
-"Here's a real task: add a `subtract()` function, assigned to an agent.
-Status, assigned agent, project — all read live from the real task API.
-The dispatch itself — the actual SSH connection, the tmux session, the
-Claude invocation — is shown as captured evidence rather than re-run live
-on stage; a full run takes anywhere from 70 seconds to 6 minutes, too
-unpredictable for a hard slot. What's live here is a real database read
-of this task's actual stored result."
+## 3. Transition (~00:50, ~8 words)
 
-## 3. Visual independent verification (01:50–02:55, ~90 words)
+**Click to Slide 3, then switch to the already-open `/demo-day` tab.**
+
+"Let's not just talk about it — let's run one."
+
+## 4. Run it live (00:50–01:50, ~60 words, INTERACTIVE)
+
+**Screen:** `/demo-day`, opening state — the "Ready to dispatch" card.
+
+"This is a real task, sitting in the real database right now: add a
+`subtract()` function, assigned to one of our agents."
+
+**Press the ▶ Run This Task button.** Let the feed play — don't talk over
+it, let the room read it: policy gate → SSH → tmux → Claude running →
+*"agent reports: SUCCESS."*
+
+"Dispatched, ran, and reported back. Agent says success. Let's not take
+its word for it."
+
+The page auto-scrolls to Section 1 once the feed finishes — point at the
+task card (status, assigned agent, "Orchestration Evidence: Captured")
+while it settles.
+
+## 5. Independent verification (01:50–02:50, ~90 words)
 
 **Click:** step **2 Verification**.
 
-"The agent's own completion report says SUCCESS. Independent validation —
-WorkerAI actually re-running the real test suite against the agent's own
-workspace, not trusting its word — says FAILED. Real exit code, real
+"WorkerAI doesn't just log that claim — it independently re-runs the real
+test suite, against the agent's own workspace. And there it is: the agent
+said SUCCESS. Independent verification says FAILED. Real exit code, real
 assertion error, right there in the mismatch.
 
-That's the entire thesis of this project: 'the agent said so' is a claim;
-a real re-run is evidence. And below it — the verification timeline — is
-the actual audit trail, the same `AuditEvent` rows the rest of the system
-reads, not a log formatted to look convincing."
+That's the whole thesis of this product: 'the agent said so' is a claim.
+A re-run is evidence. And right below — that's not a curated log, that's
+the real audit trail, the same rows the rest of the system reads."
 
-## 4. Evidence-preferred recommendation (02:55–03:35, ~71 words)
+## 6. Evidence-preferred recommendation (02:50–03:30, ~75 words)
 
 **Click:** step **3 Reliability Evidence**, then step **4 Agent Recommendation**.
 
-"Two agents. One of them — the one that just lied — has a real reliability
-score, computed from real independently-verified history, not a vibe:
-zero out of a hundred. The other: a clean hundred. The baseline scheduler
-would still pick alphabetically, ignoring that gap entirely. This
-evidence-preference layer catches it and flips the recommendation — but
-notice the badge: advisory only. It can recommend. It can never override
-real dispatch."
+"Now zoom out. This agent that just lied to us — its real,
+independently-verified track record is zero out of a hundred. The other
+agent on the team: a clean hundred. A naive scheduler would still pick
+alphabetically and miss that completely. WorkerAI's evidence layer catches
+it, and flips the recommendation. But look at the badge: advisory only.
+It can speak up. It can never take control."
 
-## 5. Safety and audit evidence (03:35–04:25, ~75 words)
+## 7. Safety and audit evidence (03:30–04:15, ~80 words)
 
 **Click:** step **5 Safety & Audit**.
 
-"One more layer, read live right here, same database, same code paths: a
-high-risk autonomous task gets blocked outright — no approval path at all.
-A human-created high-risk task instead requires explicit approval — a
-different, real code path. A secret-file edit is denied by policy. And the
-kill switch: activate it, dispatch is refused immediately; deactivate it,
-normal operation resumes. All enforced before or during dispatch, not
-logged after the fact."
+"One more layer, same database, same real code paths. A high-risk
+autonomous task? Blocked outright. The same risk, but human-created? Held
+for approval instead — a genuinely different path. Touch a secret file?
+Denied by policy before it ever reaches disk. And the kill switch: flip it
+on, every dispatch stops immediately. All of this enforced before anything
+runs — not written up afterward."
 
-## 6. Business value and conclusion (04:25–05:30, ~106 words)
+## 8. Close (04:15–05:20, ~85 words)
 
-**Screen:** presenter, no screen (or back to `/demo-day`'s top).
+**Switch back to Slide 4.**
 
-"Plenty of tools make an agent write code. WorkerAI is different: it's an
-evidence-driven control system that coordinates the work *and*
-independently decides whether to trust it — and now, shows you that
-evidence in a real product UI, not a terminal transcript. Every completion
-carries a named verification state. Every reliability number traces back
-to real, independently-verified history. The recommendation layer you just
-watched is advisory only, by design — it can surface evidence, it can
-never bypass a safety gate.
+"So — who checks the work? WorkerAI does. Not with a vibe — with
+evidence: it proves what happened, controls what's allowed, and improves
+its own recommendations from real history. You just watched it catch a
+lying agent, live, in under a minute.
 
-That's WorkerAI: not just an agent that writes code, but a system that
-tells you whether to believe it — and shows its work."
+That's the move from AI execution to accountable engineering. WorkerAI:
+not just an agent that writes code — a system that tells you whether to
+believe it, and shows its work."
 
-**[05:30–06:00 — buffer. If running early, pause; if running late, this
+**[05:20–06:00 — buffer. If running early, pause; if running late, this
 is where it's absorbed. Do not add scripted content here.]**
 
 ---
 
 ## Fallback cue
 
-If `/demo-day` fails to load or shows "fixtures not found" (should not
-happen if `npm run demo:preflight` printed `READY`): say "let me show you
-the captured version of this," switch straight to
-`docs/DEMO_RUN_RECORD.md` for the whole remainder of the talk, and narrate
-from there. Do not attempt to debug or re-seed live. See
-`docs/DEMO_DAY_6MIN_RUNBOOK.md` for the full recovery procedure.
+If `/demo-day` fails to load, shows "fixtures not found", or the Run
+button's feed hangs (should not happen if `npm run demo:preflight` printed
+`READY`): say "let me show you the captured version of this," switch
+straight to `docs/DEMO_RUN_RECORD.md` for the whole remainder of the talk,
+and narrate from there. Do not attempt to debug, re-seed, or re-click Run
+live. See `docs/DEMO_DAY_6MIN_RUNBOOK.md` for the full recovery procedure.
