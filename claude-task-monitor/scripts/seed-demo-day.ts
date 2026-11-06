@@ -109,15 +109,25 @@ async function main() {
     create: { id: SERVER_ID, name: "[SYNTHETIC] demo-day server", host: "127.0.0.1", username: "demo", sshKeyPath: "/dev/null" },
     update: {},
   });
+  // healthScore/consecutiveFailures are forced healthy on every seed run as a
+  // belt-and-suspenders fix: instrumentation.node.ts now excludes the
+  // _demo_day_ prefix from its SSH health/usage pollers entirely (see
+  // lib/worker-health.ts and instrumentation.node.ts), but re-asserting here
+  // means a re-seed heals the fixture even if that exclusion is ever missed,
+  // instead of silently leaving agent-selector.ts's healthScore gate tripped
+  // (found live: both agents had healthScore=0 from the real poller before
+  // that fix, which made /demo-day's Adaptive Trust section show
+  // "No eligible agent" instead of the rehearsed 0/100 vs 100/100 flip).
+  const HEALTHY = { status: "idle" as const, healthScore: 100, consecutiveFailures: 0 };
   await prisma.agent.upsert({
     where: { id: WEAK_AGENT_ID },
-    create: { id: WEAK_AGENT_ID, serverId: SERVER_ID, name: "[SYNTHETIC] agent-weak", slug: WEAK_AGENT_ID, workDir: "/tmp", tmuxSession: WEAK_AGENT_ID, status: "idle" },
-    update: { status: "idle" },
+    create: { id: WEAK_AGENT_ID, serverId: SERVER_ID, name: "[SYNTHETIC] agent-weak", slug: WEAK_AGENT_ID, workDir: "/tmp", tmuxSession: WEAK_AGENT_ID, ...HEALTHY },
+    update: HEALTHY,
   });
   await prisma.agent.upsert({
     where: { id: STRONG_AGENT_ID },
-    create: { id: STRONG_AGENT_ID, serverId: SERVER_ID, name: "[SYNTHETIC] agent-strong", slug: STRONG_AGENT_ID, workDir: "/tmp", tmuxSession: STRONG_AGENT_ID, status: "idle" },
-    update: { status: "idle" },
+    create: { id: STRONG_AGENT_ID, serverId: SERVER_ID, name: "[SYNTHETIC] agent-strong", slug: STRONG_AGENT_ID, workDir: "/tmp", tmuxSession: STRONG_AGENT_ID, ...HEALTHY },
+    update: HEALTHY,
   });
 
   // Hero task — the lying-agent scenario shown in Sections 1 and 2. Assigned
