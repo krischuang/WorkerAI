@@ -112,13 +112,13 @@ interface FeedLine {
 // Every section it reveals below is still a live read of that task's real,
 // stored row — nothing here is invented after the fact.
 const FEED_SCRIPT: Array<{ text: string; tone: FeedTone; delayMs: number }> = [
-  { text: "$ policy gate: task allowed — dispatching to agent-weak", tone: "cmd", delayMs: 450 },
+  { text: "$ policy gate: task allowed, dispatching to agent-weak", tone: "cmd", delayMs: 450 },
   { text: "$ SSH connection established", tone: "cmd", delayMs: 600 },
-  { text: "$ tmux session attached — Claude Code running…", tone: "cmd", delayMs: 950 },
+  { text: "$ tmux session attached, Claude Code running…", tone: "cmd", delayMs: 950 },
   { text: "> agent reports: SUCCESS", tone: "claim", delayMs: 1000 },
-  { text: "$ independently re-running the real test suite — not trusting the agent's word…", tone: "cmd", delayMs: 950 },
-  { text: "> independent check: FAILED — assertion mismatch", tone: "fail", delayMs: 900 },
-  { text: "✓ verification complete — evidence captured", tone: "done", delayMs: 500 },
+  { text: "$ independently re-running the real test suite, not trusting the agent's word…", tone: "cmd", delayMs: 950 },
+  { text: "> independent check: FAILED (assertion mismatch)", tone: "fail", delayMs: 900 },
+  { text: "✓ verification complete, evidence captured", tone: "done", delayMs: 500 },
 ];
 
 const FEED_TONE_CLASS: Record<FeedTone, string> = {
@@ -193,17 +193,17 @@ export default function DemoDayPage() {
       {/* ── Header + synthetic-data banner ───────────────────────────────── */}
       <div className="mb-6">
         <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
-          WorkerAI — Evidence-Driven AI Engineering
+          WorkerAI: Evidence-Driven AI Engineering
         </h1>
         <p className="text-lg text-zinc-600 dark:text-zinc-400 mt-1">
-          A live walkthrough of real orchestration, real verification, and real evidence-based trust — not a vibe.
+          A live walkthrough of real orchestration, real verification, and real evidence-based trust, not a vibe.
         </p>
       </div>
 
       <div className="mb-8 flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 dark:bg-amber-950 dark:border-amber-700 px-4 py-3">
         <FlaskConical className="w-5 h-5 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
         <p className="text-sm text-amber-800 dark:text-amber-300">
-          <span className="font-bold uppercase tracking-wide">SYNTHETIC DEMO DATA</span> — every value below is read
+          <span className="font-bold uppercase tracking-wide">SYNTHETIC DEMO DATA</span>: every value below is read
           live from the real database and the real application APIs, but the underlying rows are a seeded,
           clearly-labeled fixture (<code className="font-mono">scripts/seed-demo-day.ts</code>), not a production
           customer workload. Full real SSH/tmux/Docker orchestration evidence is captured separately in{" "}
@@ -217,7 +217,7 @@ export default function DemoDayPage() {
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 mb-2">Ready to dispatch</p>
           <p className="text-2xl md:text-3xl font-bold text-zinc-900 dark:text-zinc-100 mb-1">{task.title}</p>
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
-            Assigned to <span className="font-medium">{task.agent?.name ?? "—"}</span> · a real task row, read live from the database
+            Assigned to <span className="font-medium">{task.agent?.name ?? "N/A"}</span> · a real task row, read live from the database
           </p>
 
           <Btn variant="primary" size="md" disabled={running} onClick={runTask} className="!px-6 !py-3 !text-base">
@@ -242,7 +242,7 @@ export default function DemoDayPage() {
 
           <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-6 max-w-lg mx-auto">
             Replays this exact task&rsquo;s real, captured dispatch→verify timeline at a pace a live room can follow
-            (a live SSH/tmux/Claude run takes 70s–6min — see the banner above). Every section it unlocks below is
+            (a live SSH/tmux/Claude run takes 70s–6min; see the banner above). Every section it unlocks below is
             still a live read of this task&rsquo;s real, stored result.
           </p>
         </div>
@@ -279,15 +279,15 @@ export default function DemoDayPage() {
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 mb-1">Task</p>
           <p className="text-xl font-semibold text-zinc-900 dark:text-zinc-100 mb-4">{task.title}</p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            <Stat label="Assigned Agent" value={task.agent?.name ?? "—"} icon={Bot} />
+            <Stat label="Assigned Agent" value={task.agent?.name ?? "N/A"} icon={Bot} />
             <Stat label="Status" value={task.status} capitalize />
             <Stat label="Project" value={task.project.name} />
-            <Stat label="Orchestration Evidence" value="Captured" hint="full real SSH/tmux run — see evidence drawer below" />
+            <Stat label="Orchestration Evidence" value="Captured" hint="full real SSH/tmux run, see evidence drawer below" />
           </div>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
             The dispatch/SSH/tmux path that would normally run this task live is shown as authentic captured
             evidence rather than re-run on stage (a full Docker E2E run has measured up to 6+ minutes on this
-            machine — too unpredictable for a hard 6-minute slot). What <em>is</em> live below is a real read of
+            machine, too unpredictable for a hard 6-minute slot). What <em>is</em> live below is a real read of
             this task&rsquo;s actual stored verification result and audit trail.
           </p>
         </div>
@@ -319,7 +319,7 @@ export default function DemoDayPage() {
             <p className="text-sm text-zinc-800 dark:text-zinc-200">
               <span className="font-semibold">Verified mismatch:</span> the agent&rsquo;s own completion report said
               the test passed. WorkerAI independently re-ran the real test suite against the agent&rsquo;s own
-              workspace — not the agent&rsquo;s word — and it failed. Completion was blocked, not accepted.
+              workspace, not the agent&rsquo;s word, and it failed. Completion was blocked, not accepted.
             </p>
           </div>
 
@@ -342,7 +342,7 @@ export default function DemoDayPage() {
           </ol>
           <p className="text-xs text-zinc-500 mt-2">
             Audit trail reference: real <code className="font-mono">AuditEvent</code> rows for this task, read via
-            the real <code className="font-mono">/api/audit</code> endpoint — not fabricated for display.
+            the real <code className="font-mono">/api/audit</code> endpoint, not fabricated for display.
           </p>
         </div>
       </section>
@@ -367,7 +367,7 @@ export default function DemoDayPage() {
           <div className="flex items-center justify-between mb-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Agent Recommendation</p>
             <span className="text-xs font-bold uppercase tracking-wide px-2.5 py-1 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
-              advisory only — never overrides dispatch
+              advisory only, never overrides dispatch
             </span>
           </div>
           {!comparison || !comparison.baselineAgentId ? (
@@ -423,11 +423,11 @@ export default function DemoDayPage() {
         </div>
         <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-700 p-6 shadow-sm">
           <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-4">
-            Read live via the same <code className="font-mono">/api/audit</code> route as Section 2 — a
+            Read live via the same <code className="font-mono">/api/audit</code> route as Section 2, a
             restatement, as real audit rows, of the assertions captured from an actual run in{" "}
             <code className="font-mono">docs/DEMO_RUN_RECORD.md</code>, enforced by{" "}
             <code className="font-mono">lib/policy-engine.ts</code> and{" "}
-            <code className="font-mono">lib/kill-switch.ts</code> before or during dispatch — not logged after
+            <code className="font-mono">lib/kill-switch.ts</code> before or during dispatch, not logged after
             the fact.
           </p>
           {safetyEvents.length === 0 ? (
@@ -474,7 +474,7 @@ export default function DemoDayPage() {
       {/* ── Expandable technical evidence panel for judges ───────────────── */}
       <details className="mb-10 group">
         <summary className="cursor-pointer text-sm font-semibold text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 select-none">
-          ▸ Technical evidence (raw API responses — for judges who want to see the actual data)
+          ▸ Technical evidence (raw API responses, for judges who want to see the actual data)
         </summary>
         <div className="mt-3 grid grid-cols-1 gap-3">
           <EvidenceBlock title="GET /api/tasks/_demo_day_hero_task" data={task} />
@@ -509,7 +509,7 @@ function ReliabilityCard({ label, name, r }: { label: string; name: string | nul
   return (
     <div className="rounded-xl border border-zinc-200 dark:border-zinc-700 p-5">
       <p className="text-xs text-zinc-500 font-medium mb-1">{label}</p>
-      <p className="text-lg font-bold text-zinc-900 dark:text-zinc-100 mb-2">{name ?? "—"}</p>
+      <p className="text-lg font-bold text-zinc-900 dark:text-zinc-100 mb-2">{name ?? "N/A"}</p>
       {insufficient ? (
         <span className="inline-flex text-xs font-bold uppercase tracking-wide px-2.5 py-1 rounded-full bg-zinc-100 text-zinc-600 border border-zinc-200">
           INSUFFICIENT EVIDENCE
