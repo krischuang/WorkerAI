@@ -83,8 +83,8 @@ test.describe("Core user workflows", () => {
   test("GET /api/tasks?projectId= — task appears under its project", async () => {
     const res = await api.get(`/api/tasks?projectId=${projectId}`);
     expect(res.status()).toBe(200);
-    const tasks = await res.json();
-    expect(tasks.some((t: { id: string }) => t.id === taskId)).toBe(true);
+    const body = await res.json();
+    expect(body.tasks.some((t: { id: string }) => t.id === taskId)).toBe(true);
   });
 
   test("POST /api/tasks — returns 400 when title is missing", async () => {
