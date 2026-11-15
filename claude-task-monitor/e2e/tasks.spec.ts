@@ -176,10 +176,10 @@ test.describe("Tasks", () => {
   test("GET /api/tasks?projectId= — filters tasks by project", async () => {
     const res = await api.get(`/api/tasks?projectId=${projectId}`);
     expect(res.status()).toBe(200);
-    const tasks = await res.json();
-    expect(Array.isArray(tasks)).toBe(true);
-    expect(tasks.every((t: { projectId: string }) => t.projectId === projectId)).toBe(true);
-    expect(tasks.some((t: { id: string }) => t.id === taskId)).toBe(true);
+    const body = await res.json();
+    expect(Array.isArray(body.tasks)).toBe(true);
+    expect(body.tasks.every((t: { projectId: string }) => t.projectId === projectId)).toBe(true);
+    expect(body.tasks.some((t: { id: string }) => t.id === taskId)).toBe(true);
   });
 
   // ── Page render ────────────────────────────────────────────────────────────
