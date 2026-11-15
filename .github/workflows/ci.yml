@@ -140,6 +140,11 @@ jobs:
     env:
       DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/claude_task_monitor?schema=public"
       AUTH_SECRET: "ci-e2e-secret"
+      # Required by middleware.ts and lib/require-admin.ts to gate /admin and
+      # /api/admin routes. Without it, those routes return 503 regardless of
+      # any cookie presented, which is what previously failed e2e/admin.spec.ts.
+      # Test-only value, never used outside this CI job.
+      ADMIN_PASSWORD: "ci-e2e-admin-password"
       # The global API rate limiter (lib/api-rate-limit.ts) is enabled by
       # default and reliably produces cascading 429s partway through this
       # sequential test suite otherwise — confirmed by direct reproduction.
