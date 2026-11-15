@@ -81,7 +81,7 @@ test.describe("Tasks", () => {
 
   test("POST /api/tasks — creates an unassigned task for later tests", async () => {
     const res = await api.post("/api/tasks", {
-      data: { projectId, title: `${PREFIX}-unassigned`, priority: "P4", taskType: "analysis" },
+      data: { projectId, title: `${PREFIX}-unassigned`, priority: "P4", taskType: "research" },
     });
     expect(res.status()).toBe(201);
     unassignedTaskId = (await res.json()).id;
