@@ -155,15 +155,32 @@ async function getConnection(
     if (pool.get(key) === entry) pool.delete(key);
   });
 
-  conn.connect({
-    host: config.host,
-    port: config.port,
-    username: config.username,
-    privateKey,
-    readyTimeout: connectTimeoutMs,
-    keepaliveInterval: KEEPALIVE_MS,
-    keepaliveCountMax: 3,
-  });
+  // ssh2's Client#connect() can throw synchronously (e.g. a malformed or
+  // unparseable private key) instead of emitting "error". Without this
+  // try/catch, that synchronous throw propagates out of getConnection
+  // immediately while connectTimer is still scheduled: the immediate caller
+  // sees a rejected promise and moves on, but nothing ever clears the timer,
+  // so it fires connectTimeoutMs later and calls rejectConn() on a promise
+  // nobody is awaiting anymore, an unhandled rejection that crashes the
+  // whole process. Route a synchronous throw through the same cleanup path
+  // as the "error" event so the timer is always cleared and the one promise
+  // anyone is actually awaiting rejects immediately, not later.
+  try {
+    conn.connect({
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      privateKey,
+      readyTimeout: connectTimeoutMs,
+      keepaliveInterval: KEEPALIVE_MS,
+      keepaliveCountMax: 3,
+    });
+  } catch (err) {
+    clearTimeout(connectTimer);
+    entry.alive = false;
+    if (pool.get(key) === entry) pool.delete(key);
+    rejectConn(err instanceof Error ? err : new Error(String(err)));
+  }
 
   try {
     return await promise;

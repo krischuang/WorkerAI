@@ -136,6 +136,23 @@ test.describe("Core user workflows", () => {
     expect(body.server?.id).toBe(serverId);
   });
 
+  test("Server stays responsive after an SSH dispatch to an unreachable host times out", async () => {
+    // Regression test for a bug in lib/ssh.ts's getConnection(): ssh2's
+    // Client#connect() can throw synchronously (e.g. on the malformed
+    // placeholder key this suite's fixture uses, see E2E_SSH_KEY_PATH above)
+    // instead of emitting "error". The immediate caller handled that thrown
+    // rejection correctly, but the setTimeout scheduled just before the
+    // throw was never cleared, so it fired on its own several seconds later
+    // and rejected a promise nobody was still awaiting, an unhandled
+    // rejection that crashed the whole Node process mid test run. The
+    // previous test already triggered a dispatch attempt to an unreachable
+    // host; wait past the longest internal SSH timeout in that chain and
+    // confirm the server is still answering requests.
+    await new Promise((resolve) => setTimeout(resolve, 16_000));
+    const res = await api.get("/api/health");
+    expect(res.status()).toBe(200);
+  });
+
   test("GET /api/tasks/:id — task detail shows server assignment", async () => {
     const res = await api.get(`/api/tasks/${taskId}`);
     expect(res.status()).toBe(200);
