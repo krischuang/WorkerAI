@@ -44,6 +44,21 @@ const ok = (msg: string) => console.log(`  [OK]   ${msg}`);
 const fail = (msg: string) => { console.log(`  [FAIL] ${msg}`); pass = false; };
 const warn = (msg: string) => console.log(`  [WARN] ${msg}`);
 
+// The dev server closes idle keep-alive sockets after 5s (its default
+// Keep-Alive: timeout=5). The seed step above runs as a blocking execSync
+// subprocess that can easily take longer than that, so Node's fetch
+// (undici) can try to reuse an now-dead pooled connection for the very next
+// call and fail with ECONNRESET — a connection-pool artifact, not a real
+// server problem (curl from a fresh process never hits this). One retry
+// with a fresh connection clears it.
+async function fetchRetry(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    return fetch(url, init);
+  }
+}
+
 function section(title: string) {
   console.log(`\n=== ${title} ===`);
 }
@@ -62,7 +77,7 @@ async function main() {
   section("Dev server reachability");
   let serverUp = false;
   try {
-    const res = await fetch(`${BASE_URL}/login`, { redirect: "manual" });
+    const res = await fetchRetry(`${BASE_URL}/login`, { redirect: "manual" });
     serverUp = res.status < 500;
   } catch {
     serverUp = false;
@@ -81,7 +96,7 @@ async function main() {
   if (!secret) {
     warn("AUTH_SECRET not set in this shell — assuming an open (pre-auth) build; skipping login");
   } else {
-    const res = await fetch(`${BASE_URL}/api/auth`, {
+    const res = await fetchRetry(`${BASE_URL}/api/auth`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: secret }),
@@ -119,7 +134,7 @@ async function main() {
   section("Live API contract (the exact calls /demo-day makes)");
   const headers: Record<string, string> = cookie ? { Cookie: cookie } : {};
 
-  const taskRes = await fetch(`${BASE_URL}/api/tasks/${HERO_TASK_ID}`, { headers });
+  const taskRes = await fetchRetry(`${BASE_URL}/api/tasks/${HERO_TASK_ID}`, { headers });
   if (taskRes.ok) {
     const task = await taskRes.json();
     if (task.status === "failed" && task.validationStatus === "failed") {
@@ -131,7 +146,7 @@ async function main() {
     fail(`GET /api/tasks/${HERO_TASK_ID} returned ${taskRes.status} — fixtures missing or API broken`);
   }
 
-  const auditRes = await fetch(`${BASE_URL}/api/audit?entityType=task&entityId=${HERO_TASK_ID}`, { headers });
+  const auditRes = await fetchRetry(`${BASE_URL}/api/audit?entityType=task&entityId=${HERO_TASK_ID}`, { headers });
   if (auditRes.ok) {
     const audit = await auditRes.json();
     const events = audit?.events ?? [];
@@ -144,7 +159,7 @@ async function main() {
     fail(`GET /api/audit returned ${auditRes.status}`);
   }
 
-  const compareRes = await fetch(`${BASE_URL}/api/agents/${WEAK_AGENT_ID}/compare?taskType=coding`, { headers });
+  const compareRes = await fetchRetry(`${BASE_URL}/api/agents/${WEAK_AGENT_ID}/compare?taskType=coding`, { headers });
   if (compareRes.ok) {
     const cmp = await compareRes.json();
     const baseline = cmp?.baselineReliability?.score;
@@ -162,7 +177,7 @@ async function main() {
   }
 
   section("/demo-day page render");
-  const pageRes = await fetch(`${BASE_URL}/demo-day`, { headers });
+  const pageRes = await fetchRetry(`${BASE_URL}/demo-day`, { headers });
   if (pageRes.ok) {
     const html = await pageRes.text();
     if (html.includes("Demo Day fixtures not found")) {

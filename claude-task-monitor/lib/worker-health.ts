@@ -283,11 +283,28 @@ export async function checkAgentHealth(agentId: string): Promise<HealthCheckResu
   return { ...result, consecutiveFailures: newFailures };
 }
 
+// scripts/seed-demo-day.ts creates a fake server (host 127.0.0.1, sshKeyPath
+// /dev/null) and two fake agents so /demo-day has something to read. SSH
+// health checks against them always fail by construction, which drove their
+// healthScore to 0 and silently broke the live Adaptive Trust comparison
+// (agent-selector.ts rejects any agent with healthScore < 30) — found while
+// taking screenshots for the 2026-11-07 Demo Day rehearsal, not caught by
+// demo:preflight because that script ran right after seeding, before this
+// poller's next cycle. Exclude the synthetic fixture's fixed id prefix so
+// real infrastructure is still monitored but the demo fixture never is.
+const DEMO_DAY_SYNTHETIC_PREFIX = "_demo_day_";
+
 export async function runHealthChecks(): Promise<void> {
   const [[servers, agents], thresholdRow] = await Promise.all([
     Promise.all([
-      prisma.server.findMany({ select: { id: true, name: true } }),
-      prisma.agent.findMany({ select: { id: true, name: true } }),
+      prisma.server.findMany({
+        where: { id: { not: { startsWith: DEMO_DAY_SYNTHETIC_PREFIX } } },
+        select: { id: true, name: true },
+      }),
+      prisma.agent.findMany({
+        where: { id: { not: { startsWith: DEMO_DAY_SYNTHETIC_PREFIX } } },
+        select: { id: true, name: true },
+      }),
     ]),
     prisma.systemConfig.findUnique({
       where: { key: "worker_failure_alert_threshold" },
