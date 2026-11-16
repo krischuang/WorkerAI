@@ -2,14 +2,21 @@
 
 import { useEffect, useRef, useState } from "react";
 import { PageHeader, Btn, Modal, EmptyState } from "@/app/_components/ui";
-import { Play, Square, RotateCcw, FileText, Terminal, ClipboardCheck, AlertTriangle, GitCompare, ClipboardList } from "lucide-react";
+import { Play, Square, RotateCcw, FileText, Terminal, ClipboardCheck, AlertTriangle, GitCompare, ClipboardList, Wrench, Eye, ShieldCheck } from "lucide-react";
 
 type AgentId = "a" | "b";
 type RunStatus = "idle" | "running" | "done" | "cancelled" | "error";
 type VerificationLabel = "NOT_VERIFIED" | "INDEPENDENTLY_VERIFIED" | "VERIFICATION_FAILED";
+// Mirrors lib/interview-live-demo.ts's deriveDisplayStatus exactly. Not
+// imported from there: that module pulls in Node's fs/child_process, which
+// cannot be bundled into a "use client" component. Duplicated deliberately,
+// same reason the other server types below are duplicated rather than
+// imported.
+type DisplayVerificationStatus = "NOT_STARTED" | "RUNNING" | VerificationLabel;
 
 interface AgentEvent {
   seq: number;
+  runId: string;
   agent: AgentId | "system";
   kind: "status" | "text" | "tool_call" | "tool_result" | "final" | "error";
   text?: string;
@@ -72,7 +79,17 @@ function extractStatusLine(text: string | null): string | null {
   return match ? match[0].toUpperCase() : null;
 }
 
-const LABEL_COPY: Record<VerificationLabel, { text: string; className: string }> = {
+/** Pure, same logic as the server's deriveDisplayStatus: never reads either
+ *  agent's text, only RunState.status and RunState.verificationLabel. */
+function deriveDisplayStatus(state: Pick<RunState, "status" | "verificationLabel"> | null): DisplayVerificationStatus {
+  if (!state || state.status === "idle") return "NOT_STARTED";
+  if (state.status === "running") return "RUNNING";
+  return state.verificationLabel ?? "NOT_VERIFIED";
+}
+
+const DISPLAY_COPY: Record<DisplayVerificationStatus, { text: string; className: string }> = {
+  NOT_STARTED: { text: "NOT STARTED", className: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" },
+  RUNNING: { text: "RUNNING", className: "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-400 animate-pulse" },
   INDEPENDENTLY_VERIFIED: { text: "INDEPENDENTLY VERIFIED", className: "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-400" },
   VERIFICATION_FAILED: { text: "VERIFICATION FAILED", className: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-400" },
   NOT_VERIFIED: { text: "NOT VERIFIED", className: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" },
@@ -80,6 +97,41 @@ const LABEL_COPY: Record<VerificationLabel, { text: string; className: string }>
 
 function StatusPill({ label }: { label: string }) {
   return <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-black/20 text-white">{label}</span>;
+}
+
+/** The 3-stage pipeline: Implementation -> AI Review -> Backend Verification.
+ *  A stage is "active" once its agent has started, "done" once it has a
+ *  final outcome, independent of whether that outcome was a pass or fail,
+ *  this is about pipeline progress, not verdicts. */
+function PipelineStage({ icon: Icon, label, state }: { icon: typeof Wrench; label: string; state: "pending" | "active" | "done" }) {
+  const styles = {
+    pending: "border-zinc-300 dark:border-zinc-700 text-zinc-400 dark:text-zinc-600",
+    active: "border-sky-500 text-sky-600 dark:text-sky-400 bg-sky-50 dark:bg-sky-950",
+    done: "border-green-500 text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-950",
+  };
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border-2 text-xs font-semibold ${styles[state]}`}>
+      <Icon className="w-3.5 h-3.5" /> {label}
+    </div>
+  );
+}
+
+function Pipeline({ state }: { state: RunState | null }) {
+  const aDone = !!state?.agentA;
+  const aActive = state?.status === "running" && !aDone;
+  const bDone = !!state?.agentB;
+  const bActive = state?.status === "running" && aDone && !bDone;
+  const vDone = !!state?.backendVerdict;
+  const vActive = state?.status === "running" && bDone && !vDone;
+  return (
+    <div className="flex flex-wrap items-center gap-2 mb-6">
+      <PipelineStage icon={Wrench} label="1. Implementation" state={vDone || bDone || aDone ? "done" : aActive ? "active" : "pending"} />
+      <span className="text-zinc-300 dark:text-zinc-700">→</span>
+      <PipelineStage icon={Eye} label="2. AI Review" state={vDone || bDone ? "done" : bActive ? "active" : "pending"} />
+      <span className="text-zinc-300 dark:text-zinc-700">→</span>
+      <PipelineStage icon={ShieldCheck} label="3. Backend Verification" state={vDone ? "done" : vActive ? "active" : "pending"} />
+    </div>
+  );
 }
 
 function AgentPanel({ title, subtitle, evidenceLabel, events, outcome, accent }: {
@@ -164,6 +216,13 @@ export default function LiveComparisonPage() {
   const [starting, setStarting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  // The run ID this tab is actually watching. Read synchronously inside SSE
+  // handlers (a ref, not state, so it is never stale across renders) to
+  // reject any event or run-complete payload that belongs to a different
+  // run, the guard against a stale/zombie SSE connection (or a fast
+  // Cancel-then-Reset-then-Start sequence) overwriting the current display
+  // with a previous run's result.
+  const watchedRunIdRef = useRef<string>("");
 
   const connectStream = (fromSeq: number) => {
     if (typeof EventSource === "undefined") return;
@@ -173,6 +232,7 @@ export default function LiveComparisonPage() {
 
     es.addEventListener("agent-event", (e: MessageEvent) => {
       const ev = JSON.parse(e.data) as AgentEvent;
+      if (ev.runId !== watchedRunIdRef.current) return; // stale run, ignore
       setState((prev) => {
         if (!prev) return prev;
         // Guards against duplicate delivery if React's Strict Mode double-
@@ -185,12 +245,17 @@ export default function LiveComparisonPage() {
     });
 
     es.addEventListener("run-complete", (e: MessageEvent) => {
-      const data = JSON.parse(e.data) as Pick<
-        RunState,
-        "status" | "agentA" | "agentB" | "implementationDiff" | "backendVerdict" | "verificationLabel" | "errorMessage"
-      >;
-      setState((prev) => (prev ? { ...prev, ...data } : prev));
+      const data = JSON.parse(e.data) as RunState;
       es.close();
+      if (data.runId !== watchedRunIdRef.current) return; // stale run, ignore
+      // The server now sends its full, authoritative state object here, not
+      // a hand-picked field list, so this is a full replace, not a partial
+      // merge. That was the root cause of the original bug: a merge against
+      // a payload that was missing a field (verificationLabel) silently
+      // never overwrote it, so the Final Decision panel stayed stuck at
+      // null forever while the execution log (built from individual event
+      // text, unaffected by that missing field) already showed the truth.
+      setState(data);
     });
 
     es.onerror = () => {
@@ -203,6 +268,7 @@ export default function LiveComparisonPage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((s: RunState | null) => {
         if (!s) return;
+        watchedRunIdRef.current = s.runId;
         setState(s);
         if (s.status === "running") connectStream(s.events.length ? s.events[s.events.length - 1].seq : -1);
       });
@@ -214,12 +280,13 @@ export default function LiveComparisonPage() {
     setStarting(true);
     try {
       const res = await fetch("/api/interview/live-comparison", { method: "POST" });
-      const data = await res.json();
+      const data = (await res.json()) as RunState & { error?: string };
       if (!res.ok) {
         setActionError(data.error ?? "Failed to start.");
         return;
       }
-      setState(data as RunState);
+      watchedRunIdRef.current = data.runId;
+      setState(data);
       connectStream(-1);
     } finally {
       setStarting(false);
@@ -237,6 +304,7 @@ export default function LiveComparisonPage() {
   const reset = async () => {
     setActionError(null);
     esRef.current?.close();
+    watchedRunIdRef.current = "";
     const res = await fetch("/api/interview/live-comparison", { method: "DELETE" });
     const data = await res.json();
     if (!res.ok) setActionError(data.error ?? "Failed to reset.");
@@ -254,7 +322,7 @@ export default function LiveComparisonPage() {
   const aEvents = state?.events.filter((e) => e.agent === "a") ?? [];
   const bEvents = state?.events.filter((e) => e.agent === "b") ?? [];
   const systemEvents = state?.events.filter((e) => e.agent === "system") ?? [];
-  const label = state?.verificationLabel;
+  const displayStatus = deriveDisplayStatus(state);
 
   return (
     <div className="p-8 max-w-6xl">
@@ -287,6 +355,13 @@ export default function LiveComparisonPage() {
         </Btn>
       </div>
 
+      <div className="flex items-center gap-2 mb-4">
+        <span className="text-xs text-zinc-500">Verification status:</span>
+        <span className={`text-xs font-bold px-2 py-0.5 rounded inline-block ${DISPLAY_COPY[displayStatus].className}`}>
+          {DISPLAY_COPY[displayStatus].text}
+        </span>
+      </div>
+
       {actionError && (
         <div className="mb-4 flex items-center gap-2 text-sm text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2">
           <AlertTriangle className="w-4 h-4 shrink-0" /> {actionError}
@@ -301,6 +376,8 @@ export default function LiveComparisonPage() {
             Run: {state.runId || "none"} · Status: <span className="font-semibold">{state.status}</span>
             {state.workspaceDir ? ` · Workspace: ${state.workspaceDir}` : ""}
           </p>
+
+          <Pipeline state={state} />
 
           <div className="bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl p-4 mb-6">
             <h3 className="font-semibold text-xs uppercase tracking-wide text-zinc-500 mb-2 flex items-center gap-1.5">
@@ -342,7 +419,12 @@ export default function LiveComparisonPage() {
 
           {isTerminal && (
             <div className="bg-white dark:bg-zinc-900 border-2 border-zinc-900 dark:border-zinc-100 rounded-xl p-5">
-              <h3 className="font-semibold text-sm mb-3 text-zinc-900 dark:text-zinc-100">Final decision</h3>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-sm text-zinc-900 dark:text-zinc-100">Final decision</h3>
+                <span className={`text-sm font-bold px-3 py-1 rounded-lg ${DISPLAY_COPY[displayStatus].className}`}>
+                  {DISPLAY_COPY[displayStatus].text}
+                </span>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm mb-4">
                 <div>
                   <p className="text-xs text-zinc-500 mb-1">
@@ -360,15 +442,33 @@ export default function LiveComparisonPage() {
                 </div>
                 <div>
                   <p className="text-xs text-zinc-500 mb-1">WorkerAI backend (authoritative, real exit code)</p>
-                  <p className={`font-bold ${label ? LABEL_COPY[label].className : ""} inline-block px-2 py-0.5 rounded`}>
-                    {label ? LABEL_COPY[label].text : "not run"}
+                  <p className={`font-bold px-2 py-0.5 rounded inline-block ${DISPLAY_COPY[displayStatus].className}`}>
+                    {DISPLAY_COPY[displayStatus].text}
                   </p>
                 </div>
               </div>
+
+              {state.backendVerdict && (
+                <div className="mb-4">
+                  <p className="text-xs font-semibold text-zinc-500 mb-2">Real command evidence (exit codes captured directly from the process)</p>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {state.backendVerdict.commands.map((c) => (
+                      <div
+                        key={c.label}
+                        className={`text-[11px] font-mono px-2 py-1.5 rounded border ${c.exitCode === 0 ? "border-green-300 dark:border-green-800 bg-green-50 dark:bg-green-950" : "border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950"}`}
+                      >
+                        <div className="font-semibold">{c.label}</div>
+                        <div>exit {c.exitCode ?? "n/a"} · {c.durationMs}ms</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <p className="text-xs text-zinc-500">
                 The backend verdict comes from an actual <code>npm test</code> re-execution against this run&apos;s final
-                workspace state, independent of anything either Claude process said. A real implementation diff and the
-                real command exit codes are available above.
+                workspace state, independent of anything either Claude process said. Open the Final Verification Report
+                for the full stdout/stderr, or View Implementation Diff for the real code change.
               </p>
               <div className="flex gap-3 mt-3 text-[11px] text-zinc-500">
                 <span>Real production equivalents:</span>
@@ -418,8 +518,8 @@ export default function LiveComparisonPage() {
           <div className="space-y-4 text-sm">
             <div>
               <p className="font-semibold text-zinc-900 dark:text-zinc-100 mb-1">WorkerAI backend verdict</p>
-              <p className={`font-bold px-2 py-0.5 rounded inline-block ${label ? LABEL_COPY[label].className : ""}`}>
-                {label ? LABEL_COPY[label].text : "not run (run was cancelled or errored before verification)"}
+              <p className={`font-bold px-2 py-0.5 rounded inline-block ${DISPLAY_COPY[displayStatus].className}`}>
+                {DISPLAY_COPY[displayStatus].text}
               </p>
             </div>
             {state.backendVerdict?.commands.map((c) => (

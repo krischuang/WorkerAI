@@ -29,10 +29,16 @@ export async function GET(request: NextRequest) {
 
   const encoder = new TextEncoder();
 
+  // Declared outside both ReadableStream callbacks so `cancel()` (a sibling
+  // of `start()`, not nested inside it) can actually see and set it. It
+  // previously declared its own `closed` inside `start()`, which `cancel()`
+  // had no access to at all, so closing the connection client-side never
+  // stopped this tick() loop server-side.
+  let closed = false;
+
   const stream = new ReadableStream({
     start(controller) {
       let lastSeq = Number.isFinite(startCursor) ? startCursor : -1;
-      let closed = false;
 
       const send = (event: string, data: unknown) => {
         if (closed) return;
@@ -54,7 +60,16 @@ export async function GET(request: NextRequest) {
         }
 
         if (state.status !== "running") {
-          send("run-complete", { status: state.status, agentA: state.agentA, agentB: state.agentB, backendVerdict: state.backendVerdict, errorMessage: state.errorMessage });
+          // Send the FULL current state, not a hand-picked field list. The
+          // bug this fixes: RunState grew implementationDiff and
+          // verificationLabel after this payload was first written, and
+          // this list was never updated, so the client's merged state kept
+          // verificationLabel stuck at null forever (the Final Decision
+          // panel showing "not run") even though the execution log, driven
+          // by individual event text, already showed the real verdict.
+          // Sending the whole object makes that whole class of drift
+          // structurally impossible: there is nothing left to forget.
+          send("run-complete", state);
           closed = true;
           try {
             controller.close();
@@ -71,9 +86,17 @@ export async function GET(request: NextRequest) {
     },
 
     cancel() {
-      // Client disconnected. The demo run itself is not tied to this
-      // connection, it keeps running server-side; a fresh GET with the
-      // same cursor picks up where this left off.
+      // Client disconnected (tab closed, EventSource.close() called, page
+      // navigated away). The demo run itself is not tied to this
+      // connection and keeps running server-side, a fresh GET with the
+      // same cursor picks up where this left off, but THIS tick() loop
+      // must stop polling now. Without this, every closed connection left
+      // an orphaned setTimeout(tick, 500) loop running indefinitely in the
+      // background (it would eventually self-terminate once `send` throws
+      // on the closed controller, but only after however many ticks that
+      // takes, wasted work and a real, if minor, resource leak per
+      // abandoned connection).
+      closed = true;
     },
   });
 

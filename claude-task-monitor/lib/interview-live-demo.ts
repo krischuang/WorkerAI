@@ -50,6 +50,10 @@ export type VerificationLabel =
 
 export interface AgentEvent {
   seq: number;
+  /** Which run this event belongs to. Lets a client (or a stale/zombie SSE
+   *  connection left over from a previous run) detect and ignore events
+   *  that no longer belong to the run it thinks it is watching. */
+  runId: string;
   agent: AgentId | "system";
   kind: "status" | "text" | "tool_call" | "tool_result" | "final" | "error";
   text?: string;
@@ -59,6 +63,23 @@ export interface AgentEvent {
   costUsd?: number | null;
   durationMs?: number | null;
   timestamp: string;
+}
+
+/** The 5 explicit states requested for display: a single, always-defined
+ *  value that never requires the UI to invent an ambiguous "not run"
+ *  string, and never derives from either agent's own text, only from
+ *  RunState.status and RunState.verificationLabel (the backend's real
+ *  verdict). Pure function, exported for direct unit testing. */
+export type DisplayVerificationStatus = "NOT_STARTED" | "RUNNING" | VerificationLabel;
+
+export function deriveDisplayStatus(state: Pick<RunState, "status" | "verificationLabel">): DisplayVerificationStatus {
+  if (state.status === "idle") return "NOT_STARTED";
+  if (state.status === "running") return "RUNNING";
+  // status is "done" | "cancelled" | "error" here. A cancelled or errored
+  // run never reached independent verification, so it is NOT_VERIFIED
+  // regardless of anything either agent said, same as the "done but
+  // verdict missing" case.
+  return state.verificationLabel ?? "NOT_VERIFIED";
 }
 
 export interface AgentOutcome {
@@ -292,10 +313,10 @@ function captureImplementationDiff(dir: string): string | null {
   }
 }
 
-function pushEvent(partial: Omit<AgentEvent, "seq" | "timestamp">) {
+function pushEvent(partial: Omit<AgentEvent, "seq" | "timestamp" | "runId">) {
   const s = store();
   const seq = s.state.events.length;
-  s.state.events.push({ ...partial, seq, timestamp: new Date().toISOString() });
+  s.state.events.push({ ...partial, seq, runId: s.state.runId, timestamp: new Date().toISOString() });
 }
 
 export function getSourceFiles(): {
@@ -493,7 +514,21 @@ export interface StartResult {
   error?: string;
 }
 
-export function startLiveComparison(): StartResult {
+/** Injectable dependencies, real implementations by default. Tests pass
+ *  fast, deterministic fakes here instead of spawning the real `claude`
+ *  CLI or running real npm scripts, so the orchestration's event ordering,
+ *  state transitions, and race-condition guards can be exercised directly. */
+export interface LiveComparisonDeps {
+  runAgent: typeof runClaudeAgent;
+  runVerification: typeof runIndependentValidation;
+}
+
+const defaultDeps: LiveComparisonDeps = {
+  runAgent: runClaudeAgent,
+  runVerification: runIndependentValidation,
+};
+
+export function startLiveComparison(deps: LiveComparisonDeps = defaultDeps): StartResult {
   const s = store();
   if (s.state.status === "running") {
     return { ok: false, error: "A run is already in progress. Cancel it first." };
@@ -501,18 +536,27 @@ export function startLiveComparison(): StartResult {
 
   cleanupWorkspace(s.state.workspaceDir);
   const dir = createFixture();
-  const runId = `run_${Date.now()}`;
-  s.state = { ...freshState(), runId, status: "running", startedAt: new Date().toISOString(), workspaceDir: dir };
+  const thisRunId = `run_${Date.now()}`;
+  s.state = { ...freshState(), runId: thisRunId, status: "running", startedAt: new Date().toISOString(), workspaceDir: dir };
   s.children = [];
   const controller = new AbortController();
   s.controller = controller;
+
+  // True for as long as, and only as long as, s.state is still the exact
+  // object this run created. Cancel() does not reassign s.state (it only
+  // flips status on the same object), but Reset() and a later Start() both
+  // do, which would otherwise let this closure's later `await` continuations
+  // keep writing agentB/backendVerdict/status onto a run that has already
+  // moved on, the actual race condition this guard exists to prevent. Every
+  // checkpoint below must re-check this before touching s.state.
+  const stillCurrent = () => s.state.runId === thisRunId;
 
   pushEvent({ agent: "system", kind: "status", text: SEED_DISCLOSURE });
 
   void (async () => {
     try {
       pushEvent({ agent: "system", kind: "status", text: "Agent A (Implementation Agent) starting: fix the tenant-isolation vulnerability." });
-      const a = await runClaudeAgent({
+      const a = await deps.runAgent({
         agentId: "a",
         workspaceDir: dir,
         prompt: AGENT_A_PROMPT,
@@ -520,6 +564,7 @@ export function startLiveComparison(): StartResult {
         timeoutMs: AGENT_A_TIMEOUT_MS,
         signal: controller.signal,
       });
+      if (!stillCurrent()) return;
       s.state.agentA = a;
 
       if ((s.state.status as RunStatus) === "cancelled") {
@@ -531,7 +576,7 @@ export function startLiveComparison(): StartResult {
       pushEvent({ agent: "system", kind: "status", text: "Captured a real git diff of Agent A's changes (or lack thereof)." });
 
       pushEvent({ agent: "system", kind: "status", text: "Agent B (Independent Reviewer) starting: reviewing the resulting code, not Agent A's reasoning." });
-      const b = await runClaudeAgent({
+      const b = await deps.runAgent({
         agentId: "b",
         workspaceDir: dir,
         prompt: AGENT_B_PROMPT,
@@ -539,6 +584,7 @@ export function startLiveComparison(): StartResult {
         timeoutMs: AGENT_B_TIMEOUT_MS,
         signal: controller.signal,
       });
+      if (!stillCurrent()) return;
       s.state.agentB = b;
 
       if ((s.state.status as RunStatus) === "cancelled") {
@@ -548,7 +594,8 @@ export function startLiveComparison(): StartResult {
 
       pushEvent({ agent: "system", kind: "status", text: "Running WorkerAI's own independent verification against the real acceptance tests (not either agent's words)..." });
 
-      const verdict = await runIndependentValidation({ sshConfig: null, workspaceDir: dir });
+      const verdict = await deps.runVerification({ sshConfig: null, workspaceDir: dir });
+      if (!stillCurrent()) return;
       s.state.backendVerdict = verdict;
       const label: VerificationLabel = !verdict.ran ? "NOT_VERIFIED" : verdict.allPassed ? "INDEPENDENTLY_VERIFIED" : "VERIFICATION_FAILED";
       s.state.verificationLabel = label;
@@ -565,6 +612,7 @@ export function startLiveComparison(): StartResult {
       });
       s.state.status = "done";
     } catch (err) {
+      if (!stillCurrent()) return;
       s.state.errorMessage = err instanceof Error ? err.message : String(err);
       s.state.status = "error";
       pushEvent({ agent: "system", kind: "error", text: s.state.errorMessage });
