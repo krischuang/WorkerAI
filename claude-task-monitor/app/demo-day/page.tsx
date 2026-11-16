@@ -21,8 +21,9 @@
 import { useEffect, useState } from "react";
 import {
   CheckCircle2, XCircle, AlertTriangle, Bot, ClipboardList, ScaleIcon,
-  ChevronRight, FlaskConical, ShieldCheck,
+  ChevronRight, FlaskConical, ShieldCheck, Play, Terminal,
 } from "lucide-react";
+import { Btn } from "@/app/_components/ui";
 
 const HERO_TASK_ID = "_demo_day_hero_task";
 const WEAK_AGENT_ID = "_demo_day_a_weak";
@@ -94,6 +95,39 @@ function scrollToStep(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+type FeedTone = "cmd" | "claim" | "fail" | "done";
+
+interface FeedLine {
+  text: string;
+  tone: FeedTone;
+}
+
+// Staged dispatch→verify sequence. This is the one part of the page that
+// isn't a live fetch — a real SSH/tmux/Claude run takes 70s–6min (see the
+// SYNTHETIC DEMO DATA banner), too unpredictable to trigger on stage. This
+// replays the real, captured timeline of exactly this task (same sequence
+// recorded in docs/DEMO_RUN_RECORD.md) at a pace a live audience can follow.
+// Every section it reveals below is still a live read of that task's real,
+// stored row — nothing here is invented after the fact.
+const FEED_SCRIPT: Array<{ text: string; tone: FeedTone; delayMs: number }> = [
+  { text: "$ policy gate: task allowed — dispatching to agent-weak", tone: "cmd", delayMs: 450 },
+  { text: "$ SSH connection established", tone: "cmd", delayMs: 600 },
+  { text: "$ tmux session attached — Claude Code running…", tone: "cmd", delayMs: 950 },
+  { text: "> agent reports: SUCCESS", tone: "claim", delayMs: 1000 },
+  { text: "$ independently re-running the real test suite — not trusting the agent's word…", tone: "cmd", delayMs: 950 },
+  { text: "> independent check: FAILED — assertion mismatch", tone: "fail", delayMs: 900 },
+  { text: "✓ verification complete — evidence captured", tone: "done", delayMs: 500 },
+];
+
+const FEED_TONE_CLASS: Record<FeedTone, string> = {
+  cmd: "text-zinc-400",
+  claim: "text-zinc-200",
+  fail: "text-red-400",
+  done: "text-emerald-400",
+};
+
 export default function DemoDayPage() {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEventRow[]>([]);
@@ -101,6 +135,9 @@ export default function DemoDayPage() {
   const [safetyEvents, setSafetyEvents] = useState<AuditEventRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [notSeeded, setNotSeeded] = useState(false);
+  const [hasRun, setHasRun] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [feedLines, setFeedLines] = useState<FeedLine[]>([]);
 
   useEffect(() => {
     Promise.all([
@@ -119,6 +156,19 @@ export default function DemoDayPage() {
       })
       .catch(() => { setNotSeeded(true); setLoading(false); });
   }, []);
+
+  async function runTask() {
+    setRunning(true);
+    setFeedLines([]);
+    for (const line of FEED_SCRIPT) {
+      await sleep(line.delayMs);
+      setFeedLines((prev) => [...prev, { text: line.text, tone: line.tone }]);
+    }
+    await sleep(500);
+    setRunning(false);
+    setHasRun(true);
+    setTimeout(() => scrollToStep("step-task"), 100);
+  }
 
   if (loading) {
     return <div className="p-10 text-lg text-zinc-500 dark:text-zinc-400">Loading showcase data…</div>;
@@ -161,7 +211,45 @@ export default function DemoDayPage() {
         </p>
       </div>
 
+      {/* ── Ignition — press Run to dispatch, then everything below unlocks ── */}
+      {!hasRun && (
+        <div className="mb-10 rounded-2xl border-2 border-dashed border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 p-8 md:p-10 text-center">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 mb-2">Ready to dispatch</p>
+          <p className="text-2xl md:text-3xl font-bold text-zinc-900 dark:text-zinc-100 mb-1">{task.title}</p>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
+            Assigned to <span className="font-medium">{task.agent?.name ?? "—"}</span> · a real task row, read live from the database
+          </p>
+
+          <Btn variant="primary" size="md" disabled={running} onClick={runTask} className="!px-6 !py-3 !text-base">
+            {running ? (
+              <>Running…</>
+            ) : (
+              <><Play className="w-4 h-4" /> Run This Task</>
+            )}
+          </Btn>
+
+          {feedLines.length > 0 && (
+            <div className="mt-6 text-left bg-zinc-950 rounded-xl p-4 font-mono text-sm space-y-1.5 max-w-xl mx-auto">
+              <div className="flex items-center gap-1.5 text-zinc-500 text-xs mb-2 pb-2 border-b border-zinc-800">
+                <Terminal className="w-3.5 h-3.5" /> live dispatch feed
+              </div>
+              {feedLines.map((l, i) => (
+                <div key={i} className={FEED_TONE_CLASS[l.tone]}>{l.text}</div>
+              ))}
+              {running && <span className="inline-block w-2 h-4 bg-zinc-200 animate-pulse" />}
+            </div>
+          )}
+
+          <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-6 max-w-lg mx-auto">
+            Replays this exact task&rsquo;s real, captured dispatch→verify timeline at a pace a live room can follow
+            (a live SSH/tmux/Claude run takes 70s–6min — see the banner above). Every section it unlocks below is
+            still a live read of this task&rsquo;s real, stored result.
+          </p>
+        </div>
+      )}
+
       {/* ── Guided step nav ───────────────────────────────────────────────── */}
+      {hasRun && (
       <nav className="mb-10 flex flex-wrap gap-2" aria-label="Demo steps">
         {STEPS.map((s) => (
           <button
@@ -177,8 +265,11 @@ export default function DemoDayPage() {
           </button>
         ))}
       </nav>
+      )}
 
       {/* ── SECTION 1 — Task Execution ────────────────────────────────────── */}
+      {hasRun && (
+      <>
       <section id="step-task" className="mb-10 scroll-mt-6">
         <div className="flex items-center gap-2 mb-3">
           <ClipboardList className="w-5 h-5 text-zinc-500" />
@@ -392,6 +483,8 @@ export default function DemoDayPage() {
           <EvidenceBlock title="GET /api/audit?entityType=task&entityId=_demo_day_safety" data={safetyEvents} />
         </div>
       </details>
+      </>
+      )}
     </div>
   );
 }
