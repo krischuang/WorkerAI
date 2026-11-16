@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WorkerAI: AI Task Orchestration with Independent Verification</title>
+<meta name="description" content="A task orchestration platform for autonomous AI agents that never trusts an agent's own success claim. Independent re-execution, a Python/FastAPI verifier microservice, and backend-enforced safety gates." />
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --bg-raised: #131317;
+    --bg-card: #17171c;
+    --border: #2a2a32;
+    --text: #e8e8ec;
+    --text-dim: #9a9aa5;
+    --text-faint: #65656f;
+    --accent: #7dd3fc;
+    --accent-strong: #38bdf8;
+    --red: #f87171;
+    --red-bg: #2a1416;
+    --red-border: #5c2328;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --mono: "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    --radius: 12px;
+    --max: 1140px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f7f9;
+      --bg-raised: #ffffff;
+      --bg-card: #ffffff;
+      --border: #e2e2e8;
+      --text: #1a1a1f;
+      --text-dim: #55555f;
+      --text-faint: #8a8a94;
+      --red-bg: #fdecec;
+      --red-border: #f3c2c2;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0a0c; --bg-raised: #131317; --bg-card: #17171c; --border: #2a2a32;
+    --text: #e8e8ec; --text-dim: #9a9aa5; --text-faint: #65656f;
+    --red-bg: #2a1416; --red-border: #5c2328;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f7f9; --bg-raised: #ffffff; --bg-card: #ffffff; --border: #e2e2e8;
+    --text: #1a1a1f; --text-dim: #55555f; --text-faint: #8a8a94;
+    --red-bg: #fdecec; --red-border: #f3c2c2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+  header.top {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 0;
+    position: sticky; top: 0;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    z-index: 10;
+  }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  nav a { color: var(--text-dim); text-decoration: none; font-size: 13.5px; margin-left: 22px; }
+  nav a:hover { color: var(--text); }
+  .gh-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 12px; font-size: 13px; color: var(--text) !important;
+  }
+  .gh-link:hover { border-color: var(--accent); }
+
+  .hero { padding: 72px 0 48px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--accent-strong);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 20px;
+  }
+  h1 { font-size: clamp(32px, 5vw, 46px); line-height: 1.1; margin: 0 0 18px; letter-spacing: -0.02em; }
+  .lede { font-size: 18px; color: var(--text-dim); max-width: 640px; margin: 0 0 28px; }
+  .cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 40px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 11px 18px; border-radius: 9px; font-size: 14px; font-weight: 600;
+    text-decoration: none; border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--accent-strong); color: #061018; }
+  .btn-primary:hover { background: var(--accent); }
+  .btn-ghost { border-color: var(--border); color: var(--text); }
+  .btn-ghost:hover { border-color: var(--text-dim); }
+
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .stat { background: var(--bg-raised); padding: 16px 18px; }
+  .stat .n { font-size: 22px; font-weight: 700; font-family: var(--mono); }
+  .stat .l { font-size: 12px; color: var(--text-faint); margin-top: 2px; }
+
+  section { padding: 56px 0; border-top: 1px solid var(--border); }
+  .section-head { margin-bottom: 28px; }
+  .kicker { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 8px; }
+  h2 { font-size: 26px; margin: 0 0 10px; letter-spacing: -0.01em; }
+  .section-sub { color: var(--text-dim); font-size: 15px; max-width: 620px; }
+
+  .demo-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; margin-bottom: 20px;
+  }
+  .demo-card h3 { margin: 0 0 8px; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+  .badge { font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; }
+  .badge-jd { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-strong); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+  .demo-card p { color: var(--text-dim); font-size: 14.5px; margin: 0 0 16px; }
+  .term {
+    background: #050507; border: 1px solid #1f1f26; border-radius: 9px;
+    padding: 16px 18px; font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+    overflow-x: auto; color: #c9c9d1;
+  }
+  .term .cmd { color: var(--accent); }
+  .term .pass { color: var(--green); }
+  .term .fail { color: var(--red); }
+  .term .dim { color: #5c5c66; }
+
+  .arch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .arch-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+  .arch-item h4 { margin: 0 0 6px; font-size: 14.5px; }
+  .arch-item p { margin: 0; font-size: 13.5px; color: var(--text-dim); }
+  .arch-item code { font-family: var(--mono); font-size: 12px; background: var(--bg-raised); padding: 1px 5px; border-radius: 4px; }
+
+  .shot { margin-bottom: 36px; }
+  .shot img { width: 100%; border-radius: var(--radius); border: 1px solid var(--border); display: block; }
+  .shot .cap { font-size: 13px; color: var(--text-faint); margin-top: 10px; text-align: center; }
+  .shot .cap b { color: var(--text-dim); }
+
+  footer { padding: 40px 0 64px; text-align: center; }
+  footer p { color: var(--text-faint); font-size: 13px; }
+  footer a { color: var(--text-dim); }
+
+  .status-table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin-top: 8px; }
+  .status-table th, .status-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .status-table th { color: var(--text-faint); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+  .pill-done { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+  .pill-not { background: color-mix(in srgb, var(--text-faint) 18%, transparent); color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><span class="dot"></span> WorkerAI</div>
+    <nav>
+      <a href="#demos">Demos</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#screenshots">Screenshots</a>
+      <a class="gh-link" href="https://github.com/krischuang/WorkerAI" style="margin-left:22px;">View on GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="hero" style="border-top:none; padding-bottom:0;">
+    <span class="eyebrow">● Backend platform · TypeScript + Python</span>
+    <h1>An AI agent's own "success" claim is never the answer.</h1>
+    <p class="lede">
+      WorkerAI dispatches tasks to autonomous Claude CLI agents on remote servers,
+      then independently re-executes the real lint/typecheck/test/build commands
+      against the agent's own workspace before trusting a single "done." It's a
+      task orchestration platform with backend-enforced safety gates, a scoped
+      external API, and a standalone Python/FastAPI verifier microservice.
+    </p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="#demos">See the two demos ↓</a>
+      <a class="btn btn-ghost" href="https://github.com/krischuang/WorkerAI">Source on GitHub</a>
+    </div>
+    <div class="stat-row">
+      <div class="stat"><div class="n">36</div><div class="l">tests passing (16 TS + 20 Py)</div></div>
+      <div class="stat"><div class="n">Next.js 15</div><div class="l">+ Prisma 7 + Postgres</div></div>
+      <div class="stat"><div class="n">FastAPI</div><div class="l">independent verifier service</div></div>
+      <div class="stat"><div class="n">0</div><div class="l">trust in self-reported success</div></div>
+    </div>
+  </section>
+
+  <section id="demos">
+    <div class="section-head">
+      <div class="kicker">Walkthrough</div>
+      <h2>The two things worth watching</h2>
+      <p class="section-sub">Both run against real commands and a real HTTP round trip; nothing on this page is mocked output.</p>
+    </div>
+
+    <div class="demo-card">
+      <h3>1. Independent verification <span class="badge badge-jd">never trust self-reports</span></h3>
+      <p>
+        An autonomous task's own <code>[WORKERAI_VALIDATION] result: passed</code> self-report is
+        labeled <code>AGENT_REPORTED</code> and only resolves to <code>INDEPENDENTLY_VERIFIED</code>
+        after the real lint/typecheck/test/build commands are re-executed against the task's actual
+        workspace and the real exit codes agree. The command allowlist is a literal array, enforced
+        even if a caller tries to override it, so there's no injection surface via a crafted command string.
+      </p>
+      <div class="term"><span class="cmd">$ npm run demo:validation</span><br/>
+<span class="dim">[agent] edited add.js: introduced a regression (add() now concatenates instead of summing)</span><br/>
+<span class="dim">[agent] self-reported completion: result: passed</span><br/>
+<br/>
+STEP 4: Independent validation (REAL commands, REAL exit codes)<br/>
+&nbsp;&nbsp;[lint]      exitCode=0<br/>
+&nbsp;&nbsp;[typecheck] exitCode=0<br/>
+&nbsp;&nbsp;[test]      exitCode=1  <span class="dim">AssertionError: add(2,2) should be 4, got '22' !== 4</span><br/>
+&nbsp;&nbsp;[build]     exitCode=0<br/>
+<br/>
+STEP 5: Verdict<br/>
+&nbsp;&nbsp;agent self-report:        <span class="pass">PASSED</span><br/>
+&nbsp;&nbsp;independent re-execution: <span class="fail">FAILED</span><br/>
+<br/>
+<span class="fail">RESULT: independent check disagrees with the agent's self-report.</span> Task marked FAILED, not completed.</div>
+    </div>
+
+    <div class="demo-card">
+      <h3>2. Python / FastAPI verifier service <span class="badge badge-jd">cross-language, HMAC-signed</span></h3>
+      <p>
+        <code>verifier-service/</code> is a standalone FastAPI microservice that independently
+        classifies autonomous-task completion evidence into the same verdict vocabulary used by
+        the Node backend. It deliberately does not execute commands or hold SSH credentials: that
+        trust boundary stays in Node. Service-to-service calls are HMAC-SHA256 signed with a
+        5-minute replay window.
+      </p>
+      <div class="term"><span class="cmd">$ uvicorn app.main:app --port 8008 &amp;&amp; npx tsx scripts/demo-python-verifier.ts</span><br/>
+<br/>
+[all independent checks pass]<br/>
+&nbsp;&nbsp;verification_state: <span class="pass">INDEPENDENTLY_VERIFIED</span>  allowed: true<br/>
+<br/>
+[agent claims success but build actually failed]<br/>
+&nbsp;&nbsp;verification_state: <span class="fail">VERIFICATION_FAILED</span>  allowed: false<br/>
+&nbsp;&nbsp;reason: "agent reported success but independent re-execution disagreed: build(exit=1)"<br/>
+<br/>
+[agent touched a sensitive file (.env)]<br/>
+&nbsp;&nbsp;verification_state: <span class="fail">VERIFICATION_FAILED</span>  allowed: false<br/>
+&nbsp;&nbsp;risk_flags: ["policy:sensitive_file_touched:.env"]</div>
+    </div>
+  </section>
+
+  <section id="architecture">
+    <div class="section-head">
+      <div class="kicker">Under the hood</div>
+      <h2>Architecture at a glance</h2>
+      <p class="section-sub">Full detail in <code>claude-task-monitor/docs/architecture.md</code>; this is the summary.</p>
+    </div>
+    <div class="arch-grid">
+      <div class="arch-item">
+        <h4>Safety gates, fail-closed</h4>
+        <p>A kill switch, a declarative policy engine, and a high-risk autonomy gate sit in front of every dispatch. If the kill switch's own state can't be read, it halts everything rather than assuming it's safe.</p>
+      </div>
+      <div class="arch-item">
+        <h4>Scoped external API: <code>/api/v1</code></h4>
+        <p>Bearer-token service accounts scoped to an explicit project list, enforced in the Prisma query itself (<code>where: id in client.projectIds</code>), not a UI filter.</p>
+      </div>
+      <div class="arch-item">
+        <h4>Claude usage &amp; dispatch</h4>
+        <p>Fetches live session/week usage from a worker's tmux session via SSH; blocks dispatch at ≥90% usage with an automatic countdown-triggered retry.</p>
+      </div>
+      <div class="arch-item">
+        <h4>Stack</h4>
+        <p>Next.js 15 (App Router, Turbopack) + TypeScript + Prisma 7 / Postgres on the main app; FastAPI + Pydantic on the verifier service.</p>
+      </div>
+    </div>
+
+    <h3 style="font-size:15px; margin:32px 0 10px; color:var(--text-dim);">Implemented vs. planned, stated plainly</h3>
+    <table class="status-table">
+      <tr><th>Capability</th><th>Status</th></tr>
+      <tr><td>Independent verification state machine</td><td><span class="pill pill-done">Implemented</span></td></tr>
+      <tr><td>Kill switch / policy engine / dispatch locking</td><td><span class="pill pill-done">Implemented</span></td></tr>
+      <tr><td>Scoped service-account tenant isolation (<code>/api/v1</code>)</td><td><span class="pill pill-done">Implemented</span>, 16 passing tests</td></tr>
+      <tr><td>Python/FastAPI verifier service</td><td><span class="pill pill-done">Implemented</span>, 20 passing tests</td></tr>
+      <tr><td>Verifier service wired into live task completion</td><td><span class="pill pill-not">Not yet</span>, documented next step</td></tr>
+      <tr><td>Full multi-tenancy (per-user accounts)</td><td><span class="pill pill-not">Not attempted</span>, deliberately (see architecture.md)</td></tr>
+    </table>
+  </section>
+
+  <section id="screenshots">
+    <div class="section-head">
+      <div class="kicker">In the UI</div>
+      <h2>Live dashboard: Demo Day fixtures</h2>
+      <p class="section-sub">Real database reads of real stored task/audit state (synthetic seed data, not fabricated display values).</p>
+    </div>
+
+    <div class="shot">
+      <img src="images/1-task-execution-top.png" alt="Task Execution step showing a synthetic agent task with status Failed" loading="lazy" />
+      <div class="cap"><b>1. Task Execution</b>: a seeded task where the agent's claim and reality already disagree.</div>
+    </div>
+    <div class="shot">
+      <img src="images/3-step-verification.png" alt="Independent Verification step: agent claimed SUCCESS, independent validation shows FAILED" loading="lazy" />
+      <div class="cap"><b>2. Independent Verification</b>: agent claim <i>SUCCESS</i> vs. independently re-run validation <i>FAILED</i>, with a live audit timeline.</div>
+    </div>
+    <div class="shot">
+      <img src="images/4-step-reliability.png" alt="Adaptive Trust step comparing reliability scores of two synthetic agents" loading="lazy" />
+      <div class="cap"><b>3. Adaptive Trust</b>: reliability scores aggregated from independently-verified outcomes across runs, not a single self-report.</div>
+    </div>
+    <div class="shot">
+      <img src="images/6-step-safety-audit.png" alt="Safety and Audit step listing pre-dispatch and post-execution policy gates" loading="lazy" />
+      <div class="cap"><b>5. Safety &amp; Audit</b>: pre-dispatch gates (high-risk block, kill switch) vs. post-execution gates (secret-file edit denies completion), each tied to the exact source file enforcing it.</div>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap">
+    <p>WorkerAI, built by <a href="https://github.com/krischuang">Kris Chuang</a>. <a href="https://github.com/krischuang/WorkerAI">Full source on GitHub ↗</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

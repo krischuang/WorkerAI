@@ -92,6 +92,15 @@ import { runSelfHealingCycle } from "./lib/self-healing/self-healing-cycle";
 
 const TAG = "[usage-poller]";
 
+// scripts/seed-demo-day.ts creates a fake server (host 127.0.0.1) and two
+// fake agents purely so /demo-day has something to read. SSH to them always
+// fails by construction — without this exclusion, this poller flips them to
+// status "offline" within a cycle or two, which silently breaks the live
+// Adaptive Trust comparison on stage (agent-selector.ts's first hard gate is
+// status === "offline"). Found while rehearsing for 2026-11-07 Demo Day; see
+// the matching exclusion in lib/worker-health.ts's runHealthChecks.
+const DEMO_DAY_SYNTHETIC_PREFIX = "_demo_day_";
+
 // Preserve state across Next.js HMR module re-evaluations.
 const g = globalThis as unknown as {
   _usagePollerStarted?: boolean;
@@ -386,6 +395,7 @@ function startPoller() {
 
     try {
       servers = await prisma.server.findMany({
+        where: { id: { not: { startsWith: DEMO_DAY_SYNTHETIC_PREFIX } } },
         select: {
           id: true,
           name: true,
@@ -529,6 +539,7 @@ function startPoller() {
 
     try {
       agents = await prisma.agent.findMany({
+        where: { id: { not: { startsWith: DEMO_DAY_SYNTHETIC_PREFIX } } },
         select: {
           id: true,
           name: true,
