@@ -31,7 +31,8 @@
     "demo:e2e": "tsx scripts/demo-e2e/run.ts --teardown",
     "demo:real-claude": "tsx scripts/demo-e2e/verify-real-claude.ts",
     "export:clean": "bash scripts/export-clean-package.sh",
-    "demo:precheck": "bash scripts/pre-demo-check.sh"
+    "demo:precheck": "bash scripts/pre-demo-check.sh",
+    "demo:preflight": "tsx scripts/demo-day-preflight.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
