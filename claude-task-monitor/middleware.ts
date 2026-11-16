@@ -28,7 +28,7 @@ export const ADMIN_OTP_PENDING_MAX_AGE = 10 * 60; // 10 minutes
 /**
  * HMAC-SHA256 token derived from the admin password and a per-session nonce.
  * Used as the httpOnly admin session cookie value.
- * Edge-compatible — no bcrypt involved.
+ * Edge-compatible, no bcrypt involved.
  *
  * The nonce is incorporated so that rotating it (on logout) immediately
  * invalidates all existing session cookies without changing the password.
@@ -76,7 +76,7 @@ export async function adminOtpPendingToken(password: string): Promise<string> {
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
 function isPublicPath(pathname: string): boolean {
-  // /api/metrics authenticates via its own Bearer token — no session cookie needed.
+  // /api/metrics authenticates via its own Bearer token, no session cookie needed.
   return pathname === "/login" || pathname.startsWith("/api/auth") || pathname === "/api/metrics";
 }
 
@@ -95,6 +95,17 @@ function isAdminPath(pathname: string): boolean {
   return pathname.startsWith("/admin") || pathname.startsWith("/api/admin");
 }
 
+/**
+ * The external, machine-to-machine integration surface (see
+ * lib/service-account.ts). Bearer-token only, never accepts the
+ * AUTH_SECRET/ADMIN_PASSWORD cookie sessions the rest of the app uses, and
+ * never redirects to /login. Kept as its own prefix so the single-operator
+ * UI/API surface is entirely unaffected by this auth path.
+ */
+function isServiceAccountPath(pathname: string): boolean {
+  return pathname.startsWith("/api/v1/");
+}
+
 const MUTATING_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
 
 // ─── Middleware ────────────────────────────────────────────────────────────────
@@ -102,7 +113,7 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Static assets and Next.js internals — always pass through.
+  // Static assets and Next.js internals, always pass through.
   if (
     pathname.startsWith("/_next/") ||
     pathname === "/favicon.ico" ||
@@ -114,7 +125,14 @@ export async function middleware(request: NextRequest) {
   // CSRF: reject mutating requests whose Origin header points to a non-localhost
   // source. Runs before auth so cross-origin probes cannot distinguish
   // authenticated from unauthenticated state.
-  if (MUTATING_METHODS.has(request.method)) {
+  //
+  // /api/v1/** is exempt from this check: it is bearer-token authenticated,
+  // never cookie-authenticated, so there is no ambient credential for a
+  // cross-site request to ride on, the CSRF threat model this guard
+  // defends against does not apply. A request with no bearer token at all
+  // is rejected a few lines below regardless of origin, so this does not
+  // widen the surface.
+  if (MUTATING_METHODS.has(request.method) && !isServiceAccountPath(pathname)) {
     const origin = request.headers.get("origin");
     if (!isLocalOrigin(origin)) {
       return new NextResponse(JSON.stringify({ error: "Forbidden" }), {
@@ -175,9 +193,29 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
+  // ── External /api/v1 surface: bearer-token only, never cookie auth ────────
+  // middleware runs on the Edge Runtime and cannot reach Postgres (the app
+  // uses @prisma/adapter-pg over a real TCP pg.Pool, Node-only), so it
+  // cannot itself verify the key against ApiClient. It only checks that a
+  // bearer token is present at all; every app/api/v1/** route handler calls
+  // lib/service-account.ts's authenticateServiceAccount itself (Node
+  // runtime) to do the real hash lookup and scope check, the same
+  // division of labor already used for the admin bcrypt check (requireAdmin)
+  // and the task-progress Bearer endpoint below.
+  if (isServiceAccountPath(pathname)) {
+    const authHeader = request.headers.get("authorization");
+    if (authHeader?.startsWith("Bearer ") && authHeader.length > "Bearer ".length) {
+      return NextResponse.next();
+    }
+    return new NextResponse(JSON.stringify({ error: "Bearer token required" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   // ── Non-admin paths use the general AUTH_SECRET check ─────────────────────
 
-  // Login page and auth endpoint — no cookie required.
+  // Login page and auth endpoint, no cookie required.
   if (isPublicPath(pathname)) return NextResponse.next();
 
   // Progress endpoint supports Bearer token auth for agent curl calls.

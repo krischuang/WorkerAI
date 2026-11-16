@@ -72,7 +72,7 @@ enum ValidationStatus {
   missing
   // Added for the explicit verification-state model: a task reported success
   // but independent verification was mandatory and no workspace was available
-  // to run it — the agent's word was never independently confirmed. Distinct
+  // to run it, the agent's word was never independently confirmed. Distinct
   // from "missing" (no evidence block at all) and "passed" (confirmed).
   not_verified
 }
@@ -128,7 +128,7 @@ model Project {
   defaultBranch         String    @default("main")
   workspaceStrategy     WorkspaceStrategy @default(local_permanent)
 
-  // Progress tracking — updated after every task status change
+  // Progress tracking: updated after every task status change
   completionPct         Float?
   totalTasks            Int?
   completedTasks        Int?
@@ -138,7 +138,7 @@ model Project {
   progressUpdatedAt     DateTime?
   estimatedCompletionAt DateTime?
 
-  // Project Objective — drafted by Claude, editable by an admin. All content must be English.
+  // Project Objective: drafted by Claude, editable by an admin. All content must be English.
   objective             String?
   successCriteria       String?
   constraints           String?
@@ -184,14 +184,14 @@ model Task {
   // Zombie / stall detection
   lastProgressAt     DateTime?
   stallDetectedAt    DateTime?
-  // Scheduled dispatch — pending task auto-queues when scheduledFor <= now()
+  // Scheduled dispatch: pending task auto-queues when scheduledFor <= now()
   scheduledFor       DateTime?
   // Retry engine
   retryCount         Int            @default(0)
   maxRetries         Int            @default(0)
   retryAfter         DateTime?
   lastFailReason     String?
-  // Dependency tracking — number of incomplete prerequisites; 0 means ready to run
+  // Dependency tracking: number of incomplete prerequisites; 0 means ready to run
   blockedByCount     Int            @default(0)
   // Opt out of tmux pane capture for tasks that process sensitive workloads
   disablePaneCapture Boolean        @default(false)
@@ -200,7 +200,7 @@ model Task {
   progressMessage    String?
   // Temporary workspace directory path (set during execution, cleared on completion/failure)
   workspaceDir       String?
-  // Auto-review fields — populated when project.autoReviewEnabled is true
+  // Auto-review fields: populated when project.autoReviewEnabled is true
   autoReviewEnabled  Boolean        @default(false)
   reviewStatus       ReviewStatus?
   reviewScheduledAt  DateTime?
@@ -220,7 +220,7 @@ model Task {
   // null = not applicable (non-autonomous task or not yet evaluated).
   validationStatus   ValidationStatus?
   validationEvidence String?
-  // Stale-pending alert deduplication — set when the alert fires so it doesn't repeat < 1 h
+  // Stale-pending alert deduplication: set when the alert fires so it doesn't repeat < 1 h
   lastStalePendingAlertAt DateTime?
   // Link back to the ScheduledTask that spawned this task (null for manually created tasks)
   scheduledTaskId    String?
@@ -301,7 +301,7 @@ model ExecutionLog {
   usageSnapshotPct Float?  // claudeSessionPct at dispatch time (before), for delta calculation
   tokenCount    Int?       // total tokens used (input + output) for this execution
   actualCostUsd Float?     // estimated USD cost based on token count and model pricing
-  // Full-text search vector (tsvector — managed by DB trigger)
+  // Full-text search vector (tsvector, managed by DB trigger)
   searchVector  Unsupported("tsvector")?
   createdAt     DateTime   @default(now())
 
@@ -360,7 +360,7 @@ model Agent {
   consecutiveFailures  Int       @default(0)
   lastHealthCheckAt    DateTime?
 
-  // Disk usage — updated each health check via df -k <workDir>
+  // Disk usage: updated each health check via df -k <workDir>
   diskUsedBytes        BigInt?
   diskTotalBytes       BigInt?
 
@@ -388,7 +388,7 @@ model Agent {
   pausedDueToUsage  Boolean   @default(false)
   pausedAt          DateTime?
 
-  // Cooldown after any terminal task status — poller skips dispatch until this passes
+  // Cooldown after any terminal task status, poller skips dispatch until this passes
   cooldownUntil DateTime?
 
   // Cached count of currently-running tasks, used by lib/agent-selector.ts for capacity scoring
@@ -410,14 +410,14 @@ model Agent {
 
 // Point-in-time snapshot from a usage capture (tmux capture-pane, pipe-pane, or manual refresh).
 // Stored on EVERY refresh attempt (success or failure) to preserve full history, regardless of
-// parserConfidence — this is the audit trail for "why does the displayed number look wrong".
-// Never interpret a null percent field as 0% — null means parsing did not find that value.
+// parserConfidence: this is the audit trail for "why does the displayed number look wrong".
+// Never interpret a null percent field as 0%, null means parsing did not find that value.
 model AgentUsageSnapshot {
   id                  String    @id @default(cuid())
   agentId             String
   agent               Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
-  // Parsed fields — null means the field was not present in the captured output.
+  // Parsed fields: null means the field was not present in the captured output.
   sessionPercent      Float?
   sessionResetTime    String?   // display string e.g. "Jun 15, 9am (Sydney)"
   sessionResetAt      DateTime? // parsed UTC DateTime for countdown math
@@ -427,7 +427,7 @@ model AgentUsageSnapshot {
   usageCreditsEnabled Boolean?  // null = unknown; false = "credits are off"
 
   // How much the parser trusts the values above. Agent.claudeSessionPct/claudeWeekPct are only
-  // updated from snapshots with confidence "high" or "medium" — see lib/usage-snapshot-service.ts.
+  // updated from snapshots with confidence "high" or "medium", see lib/usage-snapshot-service.ts.
   parserConfidence ParserConfidence   @default(failed)
   // Human-readable reasons behind the confidence rating, e.g. "session section not found",
   // "captures disagreed: 12% vs 14%", "percentage missing reset time".
@@ -464,7 +464,7 @@ model Server {
   // tmux session name where Claude CLI runs on this server (for server-direct tasks)
   tmuxSession   String        @default("claude")
 
-  // Claude execution mode — controls which flags are passed when launching Claude CLI
+  // Claude execution mode: controls which flags are passed when launching Claude CLI
   claudePermissionMode  ClaudePermissionMode @default(workspace_write)
 
   // Default timeout (minutes) for tasks running on this server. Overridden per-task.
@@ -475,7 +475,7 @@ model Server {
   consecutiveFailures  Int       @default(0)
   lastHealthCheckAt    DateTime?
 
-  // Disk usage — updated each health check via df -k on the server root filesystem
+  // Disk usage: updated each health check via df -k on the server root filesystem
   diskUsedBytes        BigInt?
   diskTotalBytes       BigInt?
 
@@ -485,7 +485,7 @@ model Server {
   maxRecoveryAttempts  Int       @default(3)
   lastRecoveryAt       DateTime?
 
-  // Claude usage — persisted from last successful tmux capture
+  // Claude usage: persisted from last successful tmux capture
   claudeSessionPct      Float?
   claudeSessionResets   String?    // Sydney timezone e.g. "Jun 10, 1:10 am (Sydney)"
   claudeSessionResetsAt DateTime?  // UTC datetime of session reset (for countdown)
@@ -500,7 +500,7 @@ model Server {
   pausedDueToUsage  Boolean   @default(false)
   pausedAt          DateTime?
 
-  // Capacity scoring — updated each poller cycle
+  // Capacity scoring: updated each poller cycle
   capacityScore        Float?
   activeTaskCount      Int       @default(0)
   maxConcurrentTasks   Int       @default(10)
@@ -981,7 +981,7 @@ model RepairAuditLog {
 
 // ─── End Self-Healing ─────────────────────────────────────────────────────────
 
-// Admin-panel action audit log — tracks every mutating action taken via admin UI/API.
+// Admin-panel action audit log: tracks every mutating action taken via admin UI/API.
 model AdminAuditLog {
   id         String   @id @default(cuid())
   actor      String   @default("admin") // IP address or "admin"
@@ -993,4 +993,30 @@ model AdminAuditLog {
 
   @@index([action, createdAt])
   @@index([targetType, targetId])
+}
+
+// Scoped service-account credentials for the external /api/v1 integration
+// surface (see lib/service-account.ts). Deliberately separate from the
+// single-operator AUTH_SECRET/ADMIN_PASSWORD cookie sessions used by the
+// main UI: a client here is always scoped to an explicit set of project
+// IDs (never "all projects" by default), enforced at the Prisma query
+// layer in app/api/v1/**, giving WorkerAI a real, backend-enforced
+// tenant-isolation boundary without retrofitting the whole single-user
+// schema. Raw keys are never stored, only a sha256 hash, plus a short
+// non-secret prefix for identification in admin UI/logs.
+model ApiClient {
+  id         String    @id @default(cuid())
+  name       String
+  keyHash    String    @unique
+  keyPrefix  String
+  // Project IDs this credential may access. An empty array grants no
+  // access at all, scope must be explicitly assigned, there is no
+  // implicit wildcard.
+  projectIds String[]
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  createdBy  String    @default("admin")
+
+  @@index([revokedAt])
 }

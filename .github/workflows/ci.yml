@@ -8,7 +8,9 @@ on:
 
 env:
   NODE_VERSION: "22"
+  PYTHON_VERSION: "3.12"
   APP_DIR: claude-task-monitor
+  VERIFIER_DIR: verifier-service
 
 jobs:
   # ── Job 1: Lint ──────────────────────────────────────────────────────────────
@@ -70,7 +72,7 @@ jobs:
       - name: Run unit tests with coverage
         run: npm run test:coverage
         # vitest.config.ts already enforces thresholds (lines:85, functions:90,
-        # branches:80, statements:85) — all exceed the 70% minimum.
+        # branches:80, statements:85), all exceed the 70% minimum.
         env:
           DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/ci_db"
 
@@ -147,7 +149,7 @@ jobs:
       ADMIN_PASSWORD: "ci-e2e-admin-password"
       # The global API rate limiter (lib/api-rate-limit.ts) is enabled by
       # default and reliably produces cascading 429s partway through this
-      # sequential test suite otherwise — confirmed by direct reproduction.
+      # sequential test suite otherwise, confirmed by direct reproduction.
       # This env var is the only mechanism that actually reaches
       # middleware.ts's Edge Runtime check; a SystemConfig/admin-API toggle
       # cannot (see isRateLimitEnabled's doc comment for why).
@@ -188,3 +190,29 @@ jobs:
           name: playwright-report
           path: claude-task-monitor/test-results/
           retention-days: 7
+
+  # ── Job 5: Python verifier service ───────────────────────────────────────────
+  # Standalone FastAPI microservice (see verifier-service/README.md), fully
+  # independent of the Next.js app's dependency tree and test run, so it gets
+  # its own job rather than being folded into an existing one.
+  verifier-service:
+    name: Verifier Service (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: verifier-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: verifier-service/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: python -m pytest -v
