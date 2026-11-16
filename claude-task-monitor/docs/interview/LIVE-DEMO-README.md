@@ -54,6 +54,42 @@ tests. The evidence hierarchy shown in the UI:
 - `INDEPENDENTLY_VERIFIED` / `VERIFICATION_FAILED` / `NOT_VERIFIED`, WorkerAI's
   own real `npm test` re-execution, the authoritative layer
 
+## 2-minute walkthrough (spoken, English)
+
+Say this while the run is progressing on screen, it takes about 2 minutes at
+a normal pace:
+
+> "This page runs two separate, real Claude Code CLI processes against a
+> deliberately seeded bug: a multi-tenant task API that trusts a
+> caller-supplied `tenantId` instead of deriving scope from the
+> authenticated user, the same class of bug our own `resource-access.ts`
+> exists to prevent in production.
+>
+> Agent A, the Implementation Agent, has Read, Edit, Write, and Bash. It
+> reads the requirements, fixes the handler, and runs the tests itself.
+> That's stage one.
+>
+> Agent B, the Independent Reviewer, is a second, separate process. It never
+> sees Agent A's reasoning, only the resulting code and the same
+> requirements file. It has Read and Bash only, no Edit or Write, so it
+> cannot alter the submission even if it wanted to. That's stage two.
+>
+> Stage three is the one that actually matters: WorkerAI's own backend
+> independently re-runs the real `npm test`, and the real exit code, not
+> either agent's language, is what sets the verdict you see at the top,
+> `INDEPENDENTLY_VERIFIED` or `VERIFICATION_FAILED`. You can open 'Final
+> Verification Report' to see the exact commands and exit codes, and 'View
+> Implementation Diff' to see the real `git diff`, not a description of one.
+>
+> The honest point here isn't that the agents always get it right, it's that
+> the verdict doesn't depend on them being right. If you refresh the page
+> right now, you'll see the same verdict, it's read from the same backend
+> state, not recomputed from anything in the browser."
+
+If asked "what if both agents say it passed but it's actually broken":
+point at the Final Decision panel's real exit codes, that's the layer that
+would catch it, independent of either agent's claim.
+
 ## Safety
 
 - Every non-public path (including this one) requires the existing
@@ -92,9 +128,9 @@ tests. The evidence hierarchy shown in the UI:
 - **Timeout path is implemented, not exercised live in this session**, real
   timeouts were not forced during validation; the path reuses the exact
   same `kill()` logic already proven live via Cancel.
-- **Cost:** each full run costs real API usage. In this session's
-  validation run: Agent A $0.262 (40.7s), Agent B $0.166 (12.8s), about
-  $0.43 total, visible in the UI per panel.
+- **Cost:** each full run costs real API usage. In the most recent captured
+  run (`docs/interview/LIVE-DEMO-RECORDED-RUN.md`): Agent A $0.247 (34.0s),
+  Agent B $0.173 (18.6s), about $0.42 total, visible in the UI per panel.
 - **No E2E Docker/Postgres isolation beyond what already exists**: this
   feature doesn't touch the database at all except a best-effort,
   non-blocking `emitAudit` call on start/cancel (same pattern used
