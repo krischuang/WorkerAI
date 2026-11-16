@@ -8,7 +8,7 @@ room for questions, not to race through slides.
 ## Before you start
 
 - [ ] `npx tsc --noEmit` clean (run it live if asked "does this even compile")
-- [ ] `npx vitest run` passing (36 tests: 16 service-account + 4 verifier-client + others)
+- [ ] `npx vitest run` passing (full suite: 1215 tests; this pass added 16 in service-account.test.ts + 4 in verifier-client.test.ts)
 - [ ] `cd verifier-service && . .venv/bin/activate && python -m pytest -v` → 20 passed
 - [ ] Showcase site open in a tab: https://krischuang.github.io/WorkerAI/#walkthrough
 - [ ] Repo open in a tab, specifically `lib/validation-gate.ts`

@@ -220,11 +220,12 @@
       external API, and a standalone Python/FastAPI verifier microservice.
     </p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="#demos">See the two demos ↓</a>
+      <a class="btn btn-primary" href="#walkthrough">Start the 4-min interview walkthrough ↓</a>
+      <a class="btn btn-ghost" href="#demos">See the two live demos</a>
       <a class="btn btn-ghost" href="https://github.com/krischuang/WorkerAI">Source on GitHub</a>
     </div>
     <div class="stat-row">
-      <div class="stat"><div class="n">36</div><div class="l">tests passing (16 TS + 20 Py)</div></div>
+      <div class="stat"><div class="n">1215</div><div class="l">tests passing, full suite (+40 new: 20 TS, 20 Py)</div></div>
       <div class="stat"><div class="n">Next.js 15</div><div class="l">+ Prisma 7 + Postgres</div></div>
       <div class="stat"><div class="n">FastAPI</div><div class="l">independent verifier service</div></div>
       <div class="stat"><div class="n">0</div><div class="l">trust in self-reported success</div></div>
@@ -428,7 +429,8 @@ STEP 5: Verdict<br/>
       <p>
         <code>verifier-service/</code> is a standalone FastAPI microservice that independently
         classifies autonomous-task completion evidence into the same verdict vocabulary used by
-        the Node backend. It deliberately does not execute commands or hold SSH credentials: that
+        the Node backend. Its TypeScript client (<code>lib/verifier-client.ts</code>) is unit-tested
+        (4 Vitest tests) but has no production callers yet, see Case C. It deliberately does not execute commands or hold SSH credentials: that
         trust boundary stays in Node. Service-to-service calls are HMAC-SHA256 signed over
         <code>{timestamp}.{body}</code> with a ±5-minute clock-skew window, which bounds how long a
         captured request stays valid. That is not full replay prevention (no nonce/used-signature
