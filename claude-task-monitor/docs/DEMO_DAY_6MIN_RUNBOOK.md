@@ -1,23 +1,20 @@
-# Demo Day 6-Minute Runbook — WorkerAI (optimized)
+# Demo Day 6-Minute Runbook — WorkerAI (browser-first)
 
 Companion to `docs/DEMO_DAY_6MIN_SCRIPT.md`. Run this exactly, in order,
 every rehearsal and on the day.
 
-**Design note**: this runbook no longer runs `npm run demo:e2e` live.
-Measured today: 71s best case, and a re-verification run during this
-final hardening pass took 6:08 — i.e. it can exceed the entire 6-minute
-slot on its own, not just come close to it — too unpredictable for a
-hard 6-minute slot. The live centerpiece is now
-two fast, consistently-timed scripts: `npm run demo:validation` (~2s,
-reliable via `npm run`) and `scripts/demo-evidence-preference.ts` (~31s,
-but **must be run via the direct bash command below, not `npm run
-demo:evidence-preference`** — tested successful via direct invocation
-today; the npm-script form fails reliably with a ~5s connection-timeout
-from `npm run`'s own process-spawning overhead on this machine, not a
-code defect — same known issue as `demo-adaptive-trust.ts`). The full
-orchestration pipeline is shown as authentic captured evidence
-(`docs/DEMO_RUN_RECORD.md`). `demo:e2e` is still run once during
-pre-flight (§1) to confirm the environment, just not live on stage.
+**Design note (2026-11-05)**: the live centerpiece is now a single browser
+page, `/demo-day`, not a terminal. Every value on it is read live through
+real, already-tested application APIs, backed by a persistent, clearly
+labeled SYNTHETIC fixture (`scripts/seed-demo-day.ts`) — seeded (and
+re-verified) by `npm run demo:preflight` before the talk; it is not
+re-seeded live and does not auto-clean up (it must persist for the page to
+show anything). The full Docker E2E run and the two terminal demo scripts
+(`demo:validation`, `demo-evidence-preference.ts`) are **not part of the
+live flow anymore** — they remain available as judge-follow-up material
+only (§6). The Safety segment also moved into `/demo-day` itself (step 5,
+"Safety & Audit") — no second browser tab is required during the live
+flow anymore.
 
 ## 1. Startup commands (morning of, on the real presentation laptop)
 
@@ -25,152 +22,127 @@ pre-flight (§1) to confirm the environment, just not live on stage.
 cd claude-task-monitor
 npm install
 npm run lint && npx tsc --noEmit && npx vitest run && npm run build
-npm run demo:precheck
-npm run demo:e2e          # pre-flight only — confirms 13/13 on THIS machine, not run live
-npm run demo:validation   # the actual live segment-3 command — confirm it works here first
-bash -c 'set -a; source .env.local; set +a; npx tsx scripts/demo-evidence-preference.ts'   # live segment-5 command
+npm run dev   # separate terminal/pane, leave running
+set -a; source .env.local; set +a; npm run demo:preflight
 ```
 
-If any step fails, stop and fix it before rehearsing further — do not
-discover a broken environment for the first time on stage.
+`demo:preflight` runs the full environment check (`demo:precheck`), seeds
+the `/demo-day` fixture (idempotent — safe to re-run), and then calls the
+exact four APIs the page uses, checking both HTTP status and the specific
+values the script assumes (0/100 vs 100/100 reliability, recommendation
+flip, all 4 Safety & Audit assertions present) — it must print `READY`
+before you open the page. If it prints `NOT READY`, fix every `[FAIL]`
+line it lists and re-run it; do not open `/demo-day` or go live until it's
+green. If any startup step fails, stop and fix it — do not discover a
+broken environment for the first time on stage.
 
-**Close every other heavy process before going live** (other builds,
-other dev servers, video calls, etc.) — general good practice, though the
-two live commands above are fast enough that this matters far less than
-it did when `demo:e2e` was the live centerpiece.
+Then open `http://localhost:3000/demo-day`, log in, and confirm all five
+sections render with real numbers (not "fixtures not found") as a final
+visual check.
+
+**Close every other heavy process before going live** (other builds, other
+dev servers, video calls, etc.).
 
 ## 2. Required local services
 
 | Service | Check |
 |---|---|
-| Docker daemon | `docker info` — only needed for pre-flight `demo:e2e`, not for the live segments |
-| `workerai-baseline-db` Postgres container | `docker ps \| grep workerai-baseline-db` — required for `demo:evidence-preference` (it reads/writes real rows) |
+| `workerai-baseline-db` Postgres container | `docker ps \| grep workerai-baseline-db` — `/demo-day` reads real rows from it |
 | `.env.local` → `DATABASE_URL` on port 5432 | `npm run demo:precheck` |
 | Prisma migrations current | `npm run demo:precheck` (checks this) |
-| Wi-Fi / network | **Not required** for any live segment — everything runs locally |
+| Next.js dev server | `npm run dev`, confirm `http://localhost:3000/demo-day` loads |
+| Docker daemon | Only needed if a judge asks for the full E2E evidence re-run (§6c) — not needed for the live flow |
+| Wi-Fi / network | **Not required** — everything runs locally |
 
 ## 3. Browser tabs / windows, in opening order
 
-1. **Terminal** — full-screen or large font, ready at `claude-task-monitor/`, nothing else visible (clear scrollback / `clear` first — no leftover command history that might show a path or token).
-2. `docs/DEMO_DAY_ARCHITECTURE.md` open, scrolled to the diagram — for segment 2.
-3. `docs/DEMO_RUN_RECORD.md` open, with the `demo:e2e` 13/13 assertion list and the safety-assertion lines both easy to scroll to — for segments 3 and 6.
-4. *(Optional, stretch — see §6)* A browser tab logged in, parked on `/tasks`, not yet opened to a specific task.
+1. **`/demo-day`**, already logged in, scrolled to the top, all five
+   sections confirmed rendering with real data (including step 5, Safety
+   & Audit). This is the only tab needed — it stays open for the entire
+   talk.
 
-Do not have any tab open to the GitHub repository page or `git log` — see
-the git-history exposure note in the final risk report; nothing about
-that should be visible during the demo.
+`docs/DEMO_RUN_RECORD.md` is no longer opened during the live flow; keep
+it available only as the fallback if `/demo-day` itself fails (§5).
+
+Do not have any tab open to the GitHub repository page, `git log`, or any
+terminal with prior command history visible — nothing about the git
+history exposure item should be on screen.
 
 ## 4. Exact demo actions and expected output
 
 | Time | Screen | Action | Expected output |
 |---|---|---|---|
-| 00:00 | Presenter | Speak, no screen | — |
-| 00:25 | `DEMO_DAY_ARCHITECTURE.md` | Point at diagram | — |
-| 00:50 | `DEMO_RUN_RECORD.md` | Scroll to the 13-assertion list — task orchestration evidence | All 13 lines read `[PASS]`, timestamp visible |
-| 01:50 | Terminal | Run `npm run demo:validation` | Completes in ~2s: agent self-report PASSED, independent re-execution FAILED, `add(2,2) should be 4` / `'22' !== 4` |
-| 02:50 | Terminal | Run the **direct bash command** (`set -a; source .env.local; set +a; npx tsx scripts/demo-evidence-preference.ts`) — **not** `npm run demo:evidence-preference`, which fails reliably on this machine | Completes in ~31s: baseline picks `a_weak`, evidence-preferred flips to `b_strong`, real 80-point gap cited |
-| 03:40 | `DEMO_RUN_RECORD.md` | Scroll to the safety assertions (high-risk block, approval, secret-file deny, kill switch) | All read `[PASS]` |
-| 04:25 | Presenter | Speak, no screen | — |
-| 05:00 | Presenter | Speak, no screen | — |
+| 00:00 | Presenter / `/demo-day` top | Speak, point at the header and synthetic-data banner | — |
+| 00:50 | `/demo-day` | Click step **1 Task** | Section 1 scrolls into view: real task title, agent, status, "Orchestration Evidence: Captured" |
+| 01:50 | `/demo-day` | Click step **2 Verification** | Section 2: large AGENT CLAIM "SUCCESS" vs INDEPENDENT VALIDATION "FAILED" (red), verified-mismatch text, verification timeline with real `AuditEvent` rows |
+| 02:55 | `/demo-day` | Click step **3 Reliability Evidence**, then step **4 Agent Recommendation** | Reliability cards: baseline agent 0/100 (n=3, 3 caught lies), alternative agent 100/100 (n=5); Recommendation: BASELINE vs EVIDENCE-PREFERRED flips (amber highlight), WHY explanation citing the real 100-point gap |
+| 03:35 | `/demo-day` | Click step **5 Safety & Audit** | 4 assertions render: high-risk autonomous BLOCKED, high-risk human APPROVAL REQUIRED, secret-file edit DENIED, kill switch DISPATCH REFUSED |
+| 04:25 | Presenter | Speak, no screen (or back to `/demo-day` top) | — |
 | 05:30 | — | **Buffer — stop talking, let it be silence** | — |
 
 ## 5. Recovery actions if a live segment fails
 
-- **`demo:validation` fails or errors:** this is a ~2s script with no
-  Docker/network dependency — a failure here would be unusual. Say "let
-  me show you a captured run of this instead," switch to
-  `DEMO_RUN_RECORD.md`'s "independent validation run record" section.
-- **Evidence-preference script fails or hangs:** this should not happen if
-  using the direct bash command (§4) — it succeeded in testing today,
-  including a repeat run minutes before this document was last updated. If
-  you accidentally ran it via `npm run demo:evidence-preference` instead
-  and see a "connection attempt failed, retrying" message: don't wait for
-  it — that command fails reliably on this machine even after its own
-  internal retries. Switch immediately to the direct command, or if
-  there's no time left in the segment, narrate the numbers directly
-  (baseline picks `a_weak`; evidence-preferred flips to `b_strong`, an
-  80-point score gap, 100/100 n=5 vs 20/100 n=3) without a live run — the
-  claim is still accurate, just not demonstrated live in that moment.
-- **Any script shows an actual error, not just a retry message:** do not
-  debug live. Say "that's not the result I expected — let me show you a
-  verified run from earlier today," switch to `DEMO_RUN_RECORD.md`. Do
-  not claim a live run passed if it didn't.
+- **`/demo-day` shows "Demo Day fixtures not found":** this should already
+  have been caught by `npm run demo:preflight` (§1) before you went live —
+  it was not run, or the database was reset after it ran. Do not attempt
+  to seed live on stage. Say "let me show you a captured version of this,"
+  switch to `docs/DEMO_RUN_RECORD.md` for the remainder of the talk, and
+  narrate from there.
+- **A section shows a loading spinner that never resolves:** the dev
+  server or Postgres container may have stopped. Refresh once. If it still
+  fails, switch to `DEMO_RUN_RECORD.md` — do not debug live.
+- **Numbers on screen don't match what you expect to say** (e.g. the
+  reliability gap isn't what you rehearsed): re-check against this
+  runbook's §4 expected-output column before the talk, not during it — if
+  they still don't match on stage, narrate what's actually on screen
+  rather than describing a number that isn't there.
 - **General rule:** one fallback switch, stated plainly, is a normal part
   of a live technical demo. Don't apologize more than once; keep going.
 
-## 6. Optional stretch: showing the Task Detail UI live
+## 6. Judge follow-up material (not part of the timed flow)
 
-The Task Detail page renders the real verification state
-(`INDEPENDENTLY VERIFIED` / `NOT VERIFIED` / `VERIFICATION FAILED` /
-`MISSING EVIDENCE`, each visually distinct, plus evidence expandable
-inline) and the Agent page renders the Adaptive Trust reliability badge.
-Both are genuine strengthenings of visual clarity — **but both require
-pre-staging and are not part of the core, rehearsed, reliable path.**
+### 6a. Deeper look at the live page's own data
+The `/demo-day` page has its own collapsible **"Technical evidence"**
+drawer at the bottom — click it to show the raw JSON from all four real
+API calls (`GET /api/tasks/...`, `GET /api/audit` for the task, the
+reliability `GET /api/agents/.../compare`, and `GET /api/audit` for the
+Safety & Audit assertions) for a judge who wants to see the actual data,
+not just the formatted view. This is the primary "terminal output in
+an optional drawer" surface — prefer it over opening an actual terminal.
 
-If you want to use either:
+### 6b. "Does the recommendation ever actually change — can I see another example?"
+Run the direct-bash evidence-preference script (separate fixture from
+`/demo-day`'s, same underlying function):
+```bash
+set -a; source .env.local; set +a; npx tsx scripts/demo-evidence-preference.ts
+```
+~31s, not `npm run demo:evidence-preference` (fails reliably on this
+machine — a `npm run` process-spawning/connection-timeout issue, not a
+code defect, documented in the script's own header).
 
-1. For the validation-state UI: run `npx tsx scripts/demo-e2e/run.ts` (no
-   `--teardown`) once before the talk — leaves its disposable Postgres on
-   port 5434. In a separate terminal, point a second `next dev` instance
-   at that port and open the Task 2 (`[LYING_AGENT]`) detail page.
-2. For the reliability badge UI (the existing "Reliability (evidence-based)"
-   section): `scripts/demo-adaptive-trust.ts` seeds its synthetic agent and
-   then cleans up after itself in the same run — to leave the data in place
-   for a live UI view, comment out its final `cleanup()` call for this one
-   offline rehearsal run, run it, then open
-   `/agents/_demo_trust_agent_unreliable`. Remember to restore the cleanup
-   call and re-run it once (or run the cleanup block directly) afterward so
-   no synthetic data is left in the database.
-2b. For the new "Baseline vs. Evidence-Preferred" card on the same Agent
-   Detail page: `scripts/demo-evidence-preference.ts` seeds two *different*
-   synthetic agents (`_demo_evidence_pref_a_weak`,
-   `_demo_evidence_pref_b_strong`) — same comment-out-`cleanup()` trick,
-   then open either agent's detail page (the card appears on both; open
-   `/agents/_demo_evidence_pref_a_weak` to see the flip from that agent's
-   own baseline perspective). Restore and re-run `cleanup()` afterward the
-   same way.
-3. Leave the relevant tab parked, already loaded, for the entire talk.
-4. Flip to it briefly (~5–8s) during segment 4 or 5, then flip back.
-5. **If pre-staging wasn't done successfully ahead of time, skip this
-   entirely** — the script in §4 works completely without any UI flip.
-   Do not attempt to set this up live.
+### 6c. "What about more scenarios — ties, infra failures, policy blocks?"
+```bash
+set -a; source .env.local; set +a; npx tsx scripts/adaptive-trust-evidence.ts
+```
+Runs the same real functions across 7 labeled scenarios. Note:
+`getAdvisoryRecommendation` (what this script exercises) only *annotates*
+the baseline pick — it never changes it. For "does it ever actually
+change," use §6b instead.
 
-Label it honestly if asked: "this was created by a run earlier today,
-same scenario, same code path — not a different, staged database."
-
-## 6b. If a judge asks for deeper Adaptive Trust evidence
-
-Two different follow-up scripts, for two different follow-up questions —
-don't conflate them:
-
-- **"What about more scenarios — ties, infra failures, policy blocks?"**
-  → `scripts/adaptive-trust-evidence.ts` runs the same real functions
-  (`selectBestAgent`, `getAdvisoryRecommendation`, `evaluateDispatchPolicy`)
-  across 7 labeled scenarios — verified success, honest failure, caught
-  lie, infrastructure failure, insufficient evidence, hard eligibility
-  exclusion, and a high-risk policy check — and prints a compact table.
-  Note: `getAdvisoryRecommendation` only *annotates* the existing pick, it
-  never changes it — this script will not show a flipped recommendation.
-- **"Does the recommendation ever actually change — show me another
-  example"** → re-run the live segment-5 command
-  (`scripts/demo-evidence-preference.ts`, direct bash, §1) again, or point
-  to the "Baseline vs. Evidence-Preferred" card on the Agent Detail page
-  (§6 item 2b) if it's already staged. This is the only script/UI path
-  that demonstrates `compareBaselineWithEvidencePreference` actually
-  recommending a different, still-eligible agent.
-
-Both take ~31s via the same direct-bash pattern as the live segment. Not
-rehearsed for timed narration; use either only if a judge specifically
-asks a follow-up question matching it.
+### 6d. "Can I see the full orchestration pipeline run live?"
+`npm run demo:e2e` — measured 71s–6:08 on this machine, too unpredictable
+for the timed segment. Offer the captured record
+(`docs/DEMO_RUN_RECORD.md`) first; only run it live if the judge
+specifically wants to watch it and there's time after the formal
+presentation.
 
 ## 7. Final closing statement
 
-Use the script's 05:00–05:30 text verbatim or close to it:
+Use the script's 04:25–05:30 text verbatim or close to it:
 
-"What you watched: a real lie, caught live, by actually re-running the
-test. A real reliability signal, built from real history. And a full
-pipeline, proven, not just claimed. That's WorkerAI — not just an agent
-that writes code, but a system that tells you whether to believe it."
+"Plenty of tools make an agent write code. WorkerAI is different... That's
+WorkerAI: not just an agent that writes code, but a system that tells you
+whether to believe it — and shows its work."
 
 Then stop talking. Let 05:30–06:00 be silence, not filler.
 
@@ -178,8 +150,19 @@ Then stop talking. Let 05:30–06:00 be silence, not filler.
 
 - Never run `env | grep`, open `~/.claude.json`, or show terminal history
   from before the demo started.
-- `demo:validation`'s and `demo:evidence-preference`'s data is entirely local
-  and synthetic/disposable — no real credentials or infrastructure
-  involved in either.
+- `/demo-day`'s fixture (`scripts/seed-demo-day.ts`) and both terminal
+  follow-up scripts are entirely local and synthetic/disposable — no real
+  credentials or infrastructure involved in any of them. The
+  "Technical evidence" drawer's raw JSON was inspected for secrets before
+  this runbook was written — none present (host shown is a placeholder
+  `127.0.0.1`, no keys, no cookies).
 - Do not open the GitHub repository page — see the git-history exposure
   item in the final risk report.
+
+## 9. Teardown (after the talk, not before)
+
+```bash
+set -a; source .env.local; set +a; npx tsx scripts/seed-demo-day.ts --cleanup
+```
+Removes the persistent `/demo-day` fixture. Not required before Demo Day
+itself — the fixture is meant to persist for the live presentation.
