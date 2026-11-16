@@ -151,6 +151,46 @@
   .pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
   .pill-done { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
   .pill-not { background: color-mix(in srgb, var(--text-faint) 18%, transparent); color: var(--text-dim); }
+
+  .walk-sub { margin-bottom: 40px; }
+  .walk-sub:last-child { margin-bottom: 0; }
+  .walk-sub h3 { font-size: 17px; margin: 0 0 10px; display: flex; align-items: center; gap: 10px; }
+  .walk-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border-radius: 50%; font-size: 12px; font-weight: 700;
+    background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-strong); flex-shrink: 0;
+  }
+  .walk-sub p { color: var(--text-dim); font-size: 14.5px; margin: 0 0 12px; }
+  .walk-sub p:last-child { margin-bottom: 0; }
+
+  .diagram-wrap {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; margin: 14px 0 18px; overflow-x: auto;
+  }
+  .diagram-wrap svg { display: block; min-width: 640px; width: 100%; height: auto; }
+  .dg-box rect { fill: var(--bg-raised); stroke: var(--border); stroke-width: 1.5; }
+  .dg-box-boundary rect { fill: var(--bg-raised); stroke: var(--accent-strong); stroke-width: 1.5; }
+  .dg-box-standalone rect { fill: var(--bg-raised); stroke: var(--text-faint); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .dg-title { fill: var(--text); font-size: 12px; font-weight: 700; font-family: var(--sans); }
+  .dg-sub { fill: var(--text-dim); font-size: 9.5px; font-family: var(--sans); }
+  .dg-arrow { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+  .dg-arrow-dashed { stroke: var(--text-faint); stroke-width: 1.5; fill: none; stroke-dasharray: 4 4; }
+  .dg-label { fill: var(--text-faint); font-size: 9px; font-family: var(--mono); }
+  .dg-zone { fill: var(--accent-strong); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; font-family: var(--sans); }
+
+  .legend-row { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0 18px; font-size: 12px; color: var(--text-faint); }
+  .legend-row span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 18px; height: 0; border-top: 2px solid var(--text-faint); display: inline-block; }
+  .legend-swatch.dashed { border-top-style: dashed; }
+  .legend-swatch.boundary { border-top-color: var(--accent-strong); }
+
+  .case-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px 22px; margin-bottom: 16px;
+  }
+  .case-card h4 { margin: 0 0 8px; font-size: 15px; }
+  .case-card p { margin: 0 0 8px; font-size: 13.5px; color: var(--text-dim); }
+  .case-card .case-status { font-size: 11.5px; color: var(--text-faint); margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -159,6 +199,7 @@
   <div class="wrap">
     <div class="brand"><span class="dot"></span> WorkerAI</div>
     <nav>
+      <a href="#walkthrough">Walkthrough</a>
       <a href="#demos">Demos</a>
       <a href="#architecture">Architecture</a>
       <a href="#screenshots">Screenshots</a>
@@ -179,20 +220,180 @@
       external API, and a standalone Python/FastAPI verifier microservice.
     </p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="#demos">See the two demos ↓</a>
+      <a class="btn btn-primary" href="#walkthrough">Start the 4-min interview walkthrough ↓</a>
+      <a class="btn btn-ghost" href="#demos">See the two live demos</a>
       <a class="btn btn-ghost" href="https://github.com/krischuang/WorkerAI">Source on GitHub</a>
     </div>
     <div class="stat-row">
-      <div class="stat"><div class="n">36</div><div class="l">tests passing (16 TS + 20 Py)</div></div>
+      <div class="stat"><div class="n">1215</div><div class="l">tests passing, full suite (+40 new: 20 TS, 20 Py)</div></div>
       <div class="stat"><div class="n">Next.js 15</div><div class="l">+ Prisma 7 + Postgres</div></div>
       <div class="stat"><div class="n">FastAPI</div><div class="l">independent verifier service</div></div>
       <div class="stat"><div class="n">0</div><div class="l">trust in self-reported success</div></div>
     </div>
   </section>
 
+  <section id="walkthrough" style="border-top:none; padding-top:0;">
+    <div class="section-head">
+      <div class="kicker">Interview Walkthrough</div>
+      <h2>Why this, and how it actually works</h2>
+      <p class="section-sub">Four questions a backend interviewer actually asks, answered in order. ~4 minutes read.</p>
+    </div>
+
+    <div class="walk-sub">
+      <h3><span class="walk-num">1</span> The engineering problem</h3>
+      <p>
+        An autonomous coding agent that edits a file and prints "tests pass" is not lying when it's
+        wrong, it's confidently wrong, which is worse: nothing downstream flags it. If a platform
+        marks a task complete on that claim alone, every later decision (merge, deploy, a reliability
+        score) inherits an unverified belief. The bet this codebase makes is narrow and explicit:
+        <code>allowed = true</code> may only ever come from independently re-executing the agent's own
+        claim against real exit codes, never from parsing the agent's words. That rule lives in one
+        file (<code>lib/validation-gate.ts</code>) and has no exceptions, including when
+        verification itself is unavailable, see Case A below.
+      </p>
+    </div>
+
+    <div class="walk-sub">
+      <h3><span class="walk-num">2</span> Backend architecture</h3>
+      <p>
+        Three independent auth boundaries, one Postgres database, and a dispatch path that always
+        passes through a kill switch and a policy engine before touching a remote worker. The Python
+        verifier is drawn deliberately outside the live request path, it exists, is tested, and is not
+        called by anything in production yet.
+      </p>
+      <div class="legend-row">
+        <span><span class="legend-swatch"></span> active path</span>
+        <span><span class="legend-swatch dashed"></span> exists, not wired in</span>
+        <span><span class="legend-swatch boundary"></span> trust-boundary crossing</span>
+      </div>
+      <div class="diagram-wrap">
+        <svg viewBox="0 0 760 670" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="WorkerAI backend architecture diagram">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor" style="color:var(--text-faint)"/>
+            </marker>
+          </defs>
+
+          <text x="40" y="14" class="dg-zone">Operator (cookie session)</text>
+          <text x="520" y="14" class="dg-zone">Scoped machine client</text>
+
+          <g class="dg-box"><rect x="40" y="20" width="190" height="48" rx="8"/>
+            <text x="56" y="42" class="dg-title">Operator Browser</text>
+            <text x="56" y="58" class="dg-sub">cookie session (__auth)</text></g>
+
+          <g class="dg-box-boundary"><rect x="520" y="20" width="200" height="48" rx="8"/>
+            <text x="536" y="42" class="dg-title">Machine Client</text>
+            <text x="536" y="58" class="dg-sub">Bearer wai_sk_... (scoped)</text></g>
+
+          <g class="dg-box"><rect x="40" y="100" width="680" height="50" rx="8"/>
+            <text x="56" y="122" class="dg-title">Edge Middleware: middleware.ts</text>
+            <text x="56" y="138" class="dg-sub">presence / shape checks only. No Postgres access at Edge runtime.</text></g>
+
+          <g class="dg-box"><rect x="40" y="190" width="320" height="56" rx="8"/>
+            <text x="56" y="212" class="dg-title">Internal API routes</text>
+            <text x="56" y="228" class="dg-sub">requireAdmin: bcrypt check, Node runtime only</text></g>
+
+          <g class="dg-box-boundary"><rect x="400" y="190" width="320" height="56" rx="8"/>
+            <text x="416" y="212" class="dg-title">/api/v1 routes</text>
+            <text x="416" y="228" class="dg-sub">service-account.ts: hash lookup +</text>
+            <text x="416" y="240" class="dg-sub">project-scope filter</text></g>
+
+          <g class="dg-box"><rect x="40" y="282" width="680" height="48" rx="8"/>
+            <text x="56" y="304" class="dg-title">PostgreSQL via Prisma</text>
+            <text x="56" y="320" class="dg-sub">Task · Project · ApiClient · AuditEvent · SystemConfig (30 models)</text></g>
+
+          <text x="400" y="362" class="dg-zone">Dispatch-time gates (in order)</text>
+          <g class="dg-box"><rect x="40" y="368" width="200" height="52" rx="8"/>
+            <text x="56" y="390" class="dg-title">Kill Switch</text>
+            <text x="56" y="406" class="dg-sub">fails CLOSED on DB error</text></g>
+
+          <g class="dg-box"><rect x="265" y="368" width="200" height="52" rx="8"/>
+            <text x="281" y="390" class="dg-title">Policy Engine</text>
+            <text x="281" y="406" class="dg-sub">allow / require-approval / deny</text></g>
+
+          <g class="dg-box"><rect x="490" y="368" width="210" height="52" rx="8"/>
+            <text x="506" y="390" class="dg-title">Task Dispatch</text>
+            <text x="506" y="406" class="dg-sub">per-resource lock, one at a time</text></g>
+
+          <g class="dg-box-boundary"><rect x="40" y="460" width="330" height="56" rx="8"/>
+            <text x="56" y="482" class="dg-title">Remote Worker: SSH + tmux</text>
+            <text x="56" y="498" class="dg-sub">Claude CLI session. Outside WorkerAI's own process.</text></g>
+
+          <g class="dg-box"><rect x="400" y="460" width="320" height="56" rx="8"/>
+            <text x="416" y="482" class="dg-title">Validation Gate</text>
+            <text x="416" y="498" class="dg-sub">re-executes lint/typecheck/test/build for real</text></g>
+
+          <text x="400" y="594" class="dg-zone">Standalone, not on live path</text>
+          <g class="dg-box-standalone"><rect x="400" y="600" width="320" height="56" rx="8"/>
+            <text x="416" y="622" class="dg-title">Python / FastAPI Verifier</text>
+            <text x="416" y="638" class="dg-sub">verdict.py: HMAC-signed, zero production callers</text></g>
+
+          <line x1="135" y1="68" x2="135" y2="98" class="dg-arrow" marker-end="url(#arrow)"/>
+          <line x1="620" y1="68" x2="620" y2="98" class="dg-arrow" marker-end="url(#arrow)"/>
+          <line x1="200" y1="150" x2="200" y2="188" class="dg-arrow" marker-end="url(#arrow)"/>
+          <line x1="560" y1="150" x2="560" y2="188" class="dg-arrow" marker-end="url(#arrow)"/>
+          <line x1="200" y1="246" x2="200" y2="280" class="dg-arrow" marker-end="url(#arrow)"/>
+          <line x1="560" y1="246" x2="560" y2="280" class="dg-arrow" marker-end="url(#arrow)"/>
+          <line x1="145" y1="330" x2="145" y2="366" class="dg-arrow" marker-end="url(#arrow)"/>
+          <text x="150" y="350" class="dg-label">1.</text>
+          <line x1="240" y1="394" x2="263" y2="394" class="dg-arrow" marker-end="url(#arrow)"/>
+          <text x="245" y="388" class="dg-label">2.</text>
+          <line x1="465" y1="394" x2="488" y2="394" class="dg-arrow" marker-end="url(#arrow)"/>
+          <text x="470" y="388" class="dg-label">3.</text>
+          <line x1="560" y1="420" x2="260" y2="458" class="dg-arrow" marker-end="url(#arrow)"/>
+          <text x="420" y="445" class="dg-label">dispatch</text>
+          <line x1="370" y1="488" x2="398" y2="488" class="dg-arrow" marker-end="url(#arrow)"/>
+          <text x="374" y="482" class="dg-label">re-execute</text>
+          <line x1="680" y1="516" x2="680" y2="583" class="dg-arrow-dashed" marker-end="url(#arrow)"/>
+          <text x="590" y="548" class="dg-label">verifier-client.ts:</text>
+          <text x="590" y="559" class="dg-label">built, tested,</text>
+          <text x="590" y="570" class="dg-label">not called</text>
+        </svg>
+      </div>
+      <p style="font-size:12.5px; color:var(--text-faint);">
+        Validation Gate also writes <code>Task.validationStatus</code> and an <code>AuditEvent</code> row
+        back to Postgres on every decision (arrow omitted above to avoid crossing lines).
+        Full detail: <code>claude-task-monitor/docs/architecture.md</code>.
+      </p>
+    </div>
+
+    <div class="walk-sub">
+      <h3><span class="walk-num">3</span> Evidence and testing</h3>
+      <div class="arch-grid">
+        <div class="arch-item">
+          <h4>Failure detection</h4>
+          <p><code>npm run demo:validation</code> below: a real disposable repo, a real regression, a real failing test. See Case A.</p>
+        </div>
+        <div class="arch-item">
+          <h4>Scoped API isolation</h4>
+          <p>16 Vitest tests, including an explicit cross-tenant-leakage case: a key scoped to project A gets <code>false</code> for project B. See Case B.</p>
+        </div>
+        <div class="arch-item">
+          <h4>Python verification</h4>
+          <p>20 pytest tests plus a real HTTP round trip against a running <code>uvicorn</code> process, not a mock. See Case C.</p>
+        </div>
+        <div class="arch-item">
+          <h4>CI quality gates</h4>
+          <p>Lint, typecheck, production build, Vitest with a coverage floor, Playwright e2e against a real Postgres service container, and (as of this pass) the Python pytest suite, on every push/PR to <code>main</code>.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="walk-sub">
+      <h3><span class="walk-num">4</span> Engineering decisions and trade-offs</h3>
+      <p>Short version, see <code>docs/interview/EAI-TRADEOFFS.md</code> in the repo for the full reasoning behind each:</p>
+      <div class="arch-grid">
+        <div class="arch-item"><h4>Why TypeScript orchestrates</h4><p>It already owns the SSH/tmux credential path. A second credentialed path in Python would be attack surface with no benefit.</p></div>
+        <div class="arch-item"><h4>Why the Python verifier is separate</h4><p>It classifies evidence that's already been captured, it never executes commands or holds credentials, so it's safe to keep outside the TS trust boundary.</p></div>
+        <div class="arch-item"><h4>Why Postgres over Mongo</h4><p>The domain is relational: tasks belong to projects, approvals reference policies, audit events reference entities. Prisma's typed queries are how the scope check in Case B is enforced at all.</p></div>
+        <div class="arch-item"><h4>What full multi-tenancy needs</h4><p>Per-user accounts and a <code>tenantId</code> on 30 models, not attempted here deliberately: a rushed version of that would be worse than the honest, narrower scope boundary that exists today.</p></div>
+      </div>
+    </div>
+  </section>
+
   <section id="demos">
     <div class="section-head">
-      <div class="kicker">Walkthrough</div>
+      <div class="kicker">Live Demos</div>
       <h2>The two things worth watching</h2>
       <p class="section-sub">Both run against real commands and a real HTTP round trip; nothing on this page is mocked output.</p>
     </div>
@@ -228,9 +429,12 @@ STEP 5: Verdict<br/>
       <p>
         <code>verifier-service/</code> is a standalone FastAPI microservice that independently
         classifies autonomous-task completion evidence into the same verdict vocabulary used by
-        the Node backend. It deliberately does not execute commands or hold SSH credentials: that
-        trust boundary stays in Node. Service-to-service calls are HMAC-SHA256 signed with a
-        5-minute replay window.
+        the Node backend. Its TypeScript client (<code>lib/verifier-client.ts</code>) is unit-tested
+        (4 Vitest tests) but has no production callers yet, see Case C. It deliberately does not execute commands or hold SSH credentials: that
+        trust boundary stays in Node. Service-to-service calls are HMAC-SHA256 signed over
+        <code>{timestamp}.{body}</code> with a ±5-minute clock-skew window, which bounds how long a
+        captured request stays valid. That is not full replay prevention (no nonce/used-signature
+        store exists yet); see the Trade-offs doc for the honest version of this claim.
       </p>
       <div class="term"><span class="cmd">$ uvicorn app.main:app --port 8008 &amp;&amp; npx tsx scripts/demo-python-verifier.ts</span><br/>
 <br/>
@@ -273,6 +477,7 @@ STEP 5: Verdict<br/>
     </div>
 
     <h3 style="font-size:15px; margin:32px 0 10px; color:var(--text-dim);">Implemented vs. planned, stated plainly</h3>
+    <div style="overflow-x:auto;">
     <table class="status-table">
       <tr><th>Capability</th><th>Status</th></tr>
       <tr><td>Independent verification state machine</td><td><span class="pill pill-done">Implemented</span></td></tr>
@@ -282,13 +487,25 @@ STEP 5: Verdict<br/>
       <tr><td>Verifier service wired into live task completion</td><td><span class="pill pill-not">Not yet</span>, documented next step</td></tr>
       <tr><td>Full multi-tenancy (per-user accounts)</td><td><span class="pill pill-not">Not attempted</span>, deliberately (see architecture.md)</td></tr>
     </table>
+    </div>
   </section>
 
   <section id="screenshots">
     <div class="section-head">
       <div class="kicker">In the UI</div>
       <h2>Live dashboard: Demo Day fixtures</h2>
-      <p class="section-sub">Real database reads of real stored task/audit state (synthetic seed data, not fabricated display values).</p>
+      <p class="section-sub">Real database reads of real stored task/audit state, through a synthetic seeded scenario, not fabricated display values. See the provenance legend below.</p>
+    </div>
+
+    <div class="arch-grid" style="margin-bottom:28px;">
+      <div class="arch-item">
+        <h4><span class="badge" style="background:color-mix(in srgb, var(--accent) 16%, transparent); color:var(--accent-strong);">LIVE</span> Real execution / real query</h4>
+        <p>The <code>npm run demo:validation</code> output above and every number on these screenshots are read at click/page-load time through the real, already-tested application APIs. No numbers are hand-typed into the UI.</p>
+      </div>
+      <div class="arch-item">
+        <h4><span class="badge" style="background:color-mix(in srgb, var(--amber) 20%, transparent); color:var(--amber);">SEEDED</span> Synthetic scenario</h4>
+        <p>The underlying rows (one task, two synthetic agents) are a persistent fixture created by <code>scripts/seed-demo-day.ts</code> for repeatable demos. This is seeded test data read through real code, not a customer, not production traffic, and not an independent measurement.</p>
+      </div>
     </div>
 
     <div class="shot">
@@ -305,7 +522,7 @@ STEP 5: Verdict<br/>
     </div>
     <div class="shot">
       <img src="images/6-step-safety-audit.png" alt="Safety and Audit step listing pre-dispatch and post-execution policy gates" loading="lazy" />
-      <div class="cap"><b>5. Safety &amp; Audit</b>: pre-dispatch gates (high-risk block, kill switch) vs. post-execution gates (secret-file edit denies completion), each tied to the exact source file enforcing it.</div>
+      <div class="cap"><b>4. Safety &amp; Audit</b>: pre-dispatch gates (high-risk block, kill switch) vs. post-execution gates (secret-file edit denies completion), each tied to the exact source file enforcing it.</div>
     </div>
   </section>
 </div>
