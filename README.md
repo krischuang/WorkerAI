@@ -1,22 +1,26 @@
 # WorkerAI
 
-A local-first task management platform for orchestrating AI-assisted work across remote servers. Manage projects and tasks, dispatch them to Claude CLI sessions running on worker servers, and monitor execution — all from a single web UI.
+A local-first task management platform for orchestrating AI-assisted work across remote servers. Manage projects and tasks, dispatch them to Claude CLI sessions running on worker servers, and monitor execution, all from a single web UI.
 
-Password-protected (single user). Set `AUTH_SECRET` before exposing this beyond localhost — see [Authentication](claude-task-monitor/CLAUDE.md#authentication).
+Password-protected (single user). Set `AUTH_SECRET` before exposing this beyond localhost; see [Authentication](claude-task-monitor/CLAUDE.md#authentication).
+
+**[Live showcase: krischuang.github.io/WorkerAI](https://krischuang.github.io/WorkerAI/)**, demo walkthrough, architecture summary, and dashboard screenshots.
 
 ---
 
 ## Features
 
-- **Project & Task Management** — create projects with P1–P4 priority, track tasks through their full lifecycle (pending → queued → running → paused → completed / failed)
-- **Server Management** — register remote SSH servers, verify connectivity, and inspect environment details
-- **Claude Usage Monitoring** — fetch real-time session and weekly usage percentages from a remote Claude CLI tmux session; automatically blocks task dispatch when usage ≥ 90%
-- **Task Dispatch via tmux** — send task descriptions directly into a running `claude` tmux session on a worker server; task status advances automatically
-- **Agents** — named Claude CLI instances, each with its own tmux session and working directory on a server, for running multiple isolated tasks per server
-- **Autonomous pipeline safeguards** — kill switch, policy engine, and an independent (not self-reported) validation gate sit in front of every autonomous dispatch — see [Safety & Validation](#safety--validation)
-- **Interactive SSH Terminal** — full PTY terminal in the browser via WebSocket + xterm.js
-- **Priority Queue** — view all pending tasks sorted by priority
-- **Daily Reports** — generate and browse per-day execution summaries
+- **Project & Task Management**: create projects with P1–P4 priority, track tasks through their full lifecycle (pending → queued → running → paused → completed / failed)
+- **Server Management**: register remote SSH servers, verify connectivity, and inspect environment details
+- **Claude Usage Monitoring**: fetch real-time session and weekly usage percentages from a remote Claude CLI tmux session; automatically blocks task dispatch when usage ≥ 90%
+- **Task Dispatch via tmux**: send task descriptions directly into a running `claude` tmux session on a worker server; task status advances automatically
+- **Agents**: named Claude CLI instances, each with its own tmux session and working directory on a server, for running multiple isolated tasks per server
+- **Autonomous pipeline safeguards**: kill switch, policy engine, and an independent (not self-reported) validation gate sit in front of every autonomous dispatch; see [Safety & Validation](#safety--validation)
+- **Scoped external API** (`/api/v1`): bearer-token service accounts scoped to an explicit project list, enforced at the database query layer; see [External Integration API](#external-integration-api-apiv1)
+- **Independent Python verifier microservice**: a standalone FastAPI service that cross-checks autonomous-task completion evidence; see [Python Verifier Service](#python-verifier-service)
+- **Interactive SSH Terminal**: full PTY terminal in the browser via WebSocket + xterm.js
+- **Priority Queue**: view all pending tasks sorted by priority
+- **Daily Reports**: generate and browse per-day execution summaries
 
 ---
 
@@ -67,7 +71,7 @@ WorkerAI/
     │   │   ├── new/page.tsx
     │   │   ├── [id]/page.tsx           # server detail with Claude usage meters
     │   │   └── [id]/terminal/page.tsx  # full-screen interactive SSH terminal
-    │   ├── generated/prisma/           # auto-generated Prisma client — never edit
+    │   ├── generated/prisma/           # auto-generated Prisma client, never edit
     │   ├── globals.css                 # Tailwind v4 theme tokens via @theme inline {}
     │   └── layout.tsx
     ├── lib/
@@ -77,7 +81,7 @@ WorkerAI/
     │   └── ssh-claude.ts               # legacy PTY approach (not used by active routes)
     ├── prisma/
     │   ├── schema.prisma               # single source of truth for all models
-    │   ├── migrations/                 # managed by Prisma — never edit by hand
+    │   ├── migrations/                 # managed by Prisma, never edit by hand
     │   └── seed.ts                     # sample projects, tasks, servers
     ├── ws-server.ts                    # standalone WebSocket SSH terminal server (port 3099)
     ├── next.config.ts
@@ -96,14 +100,14 @@ Project  (P1–P4 priority, active/paused/archived)
         └── ExecutionLog  (status, logText, outputSummary, errorMessage)
 
 Server  (host, username, port, sshKeyPath, status: unknown/connected/failed)
-  ├── Task[]            — tasks assigned to this server
-  ├── ServerCommandLog  — SSH command history
+  ├── Task[]            (tasks assigned to this server)
+  ├── ServerCommandLog  (SSH command history)
   └── Claude usage fields (sessionPct, weekPct, resetsAt, …)
 
 DailyReport  (completedCount, failedCount, runningCount, pendingCount, reportText)
 ```
 
-All IDs are cuid strings. Cascade deletes are set on all child relations. `Task.serverId` uses `onDelete: SetNull` — deleting a server unassigns tasks rather than deleting them.
+All IDs are cuid strings. Cascade deletes are set on all child relations. `Task.serverId` uses `onDelete: SetNull`, deleting a server unassigns tasks rather than deleting them.
 
 ---
 
@@ -202,8 +206,8 @@ The app communicates with this session via `tmux send-keys` and `tmux capture-pa
 ## Task Execution Flow
 
 1. **Create** a task under a project (priority P1–P4, type: coding/research/writing/review/maintenance)
-2. **Assign** a server — status auto-advances `pending` → `queued`
-3. **Check usage** on the server detail page — fetches live data from the tmux session
+2. **Assign** a server: status auto-advances `pending` → `queued`
+3. **Check usage** on the server detail page: fetches live data from the tmux session
 4. **Run** from the task detail page:
    - If `sessionPct ≥ 90%` or `weekPct ≥ 90%`, dispatch is blocked; a countdown to the next reset is shown and the run fires automatically when it hits zero
    - Otherwise, the task text is base64-encoded and pasted into the Claude tmux session; task status advances to `running` and an `ExecutionLog` is created
@@ -251,25 +255,68 @@ Sessions auto-close after 30 minutes of idle. SSH private keys are read server-s
 
 ## CI/CD
 
-GitHub Actions workflows live at the repository root (`.github/workflows/`, not inside `claude-task-monitor/` — this is a monorepo with a single app in a subdirectory, and GitHub Actions only discovers workflows at the actual repo root). Every job sets `working-directory: claude-task-monitor` so `npm ci`/`npm run <script>` run against the app, not the repo root.
+GitHub Actions workflows live at the repository root (`.github/workflows/`, not inside `claude-task-monitor/`). This is a monorepo with a single app in a subdirectory, and GitHub Actions only discovers workflows at the actual repo root. Every job sets `working-directory: claude-task-monitor` so `npm ci`/`npm run <script>` run against the app, not the repo root.
 
-- **`ci.yml`** — lint, typecheck, unit tests (coverage-gated), production build, and E2E tests (Playwright against a real Postgres service container) on every push/PR to `main`.
-- **`deploy.yml`** — deploys to the configured EC2 host over SSH automatically once `ci.yml` succeeds on `main` (or manually via `workflow_dispatch`, with an optional rollback input). Runs disk-space and Docker-health pre-checks, tags the previous image for rollback, and automatically rolls back if the post-deploy health check fails.
+- **`ci.yml`**: lint, typecheck, unit tests (coverage-gated), production build, E2E tests (Playwright against a real Postgres service container), and the Python verifier service's pytest suite, on every push/PR to `main`.
+- **`deploy.yml`**: deploys to the configured EC2 host over SSH automatically once `ci.yml` succeeds on `main` (or manually via `workflow_dispatch`, with an optional rollback input). Runs disk-space and Docker-health pre-checks, tags the previous image for rollback, and automatically rolls back if the post-deploy health check fails.
 
-Deploys run as a Docker Compose stack (see `docker-compose.yml`) on a single host; the workflow above drives it — manual deploys (`git pull && docker compose up -d app`) still work if needed.
+Deploys run as a Docker Compose stack (see `docker-compose.yml`) on a single host; the workflow above drives it, manual deploys (`git pull && docker compose up -d app`) still work if needed.
 
 ---
 
 ## Safety & Validation
 
-- **Kill switch** (`lib/kill-switch.ts`) — a single flag halts task dispatch, agent execution, self-healing, and auto-commit/push. Checked before every dispatch. Fails **closed**: if its own state can't be read from the database, it halts everything rather than guessing it's safe to proceed.
-- **Policy engine** (`lib/policy-engine.ts`) — declarative allow/require-approval/deny rules (e.g. production deploys, secret files, Terraform) evaluated on every dispatch, with every decision audited.
-- **High-risk autonomous gate** — a task flagged `riskLevel: high` from the autonomous pipeline is blocked at dispatch time unless the project has explicitly opted in (`Project.allowHighRiskAutonomy` + `autonomousMode >= 4`), re-checked at the dispatch call itself regardless of which code path queued the task.
-- **Independent validation** (`lib/validation-gate.ts`) — an autonomous task's own `[WORKERAI_VALIDATION] result: passed` self-report is not trusted by itself. When the task has an isolated workspace, the same lint/typecheck/test/build commands are independently re-executed against it, and the task is only marked completed if the real exit codes agree. See `npm run demo:validation` and `docs/DEMO_RUN_RECORD.md` in `claude-task-monitor/` for a real, captured run of this.
+- **Kill switch** (`lib/kill-switch.ts`): a single flag halts task dispatch, agent execution, self-healing, and auto-commit/push. Checked before every dispatch. Fails **closed**: if its own state can't be read from the database, it halts everything rather than guessing it's safe to proceed.
+- **Policy engine** (`lib/policy-engine.ts`): declarative allow/require-approval/deny rules (e.g. production deploys, secret files, Terraform) evaluated on every dispatch, with every decision audited.
+- **High-risk autonomous gate**: a task flagged `riskLevel: high` from the autonomous pipeline is blocked at dispatch time unless the project has explicitly opted in (`Project.allowHighRiskAutonomy` + `autonomousMode >= 4`), re-checked at the dispatch call itself regardless of which code path queued the task.
+- **Independent validation** (`lib/validation-gate.ts`): an autonomous task's own `[WORKERAI_VALIDATION] result: passed` self-report is not trusted by itself. When the task has an isolated workspace, the same lint/typecheck/test/build commands are independently re-executed against it, and the task is only marked completed if the real exit codes agree. See `npm run demo:validation` and `docs/DEMO_RUN_RECORD.md` in `claude-task-monitor/` for a real, captured run of this.
+
+---
+
+## External Integration API (`/api/v1`)
+
+WorkerAI's main UI/API is intentionally single-operator (one shared password; see Known Limitations). `/api/v1` is a separate, additive surface for machine clients (partner integrations, CI callbacks, the Python verifier service), authenticated with a bearer API key that is scoped to an explicit list of project IDs, never a wildcard. Scoping is enforced in the Prisma query itself (`where: { id: { in: client.projectIds } }`), not a UI filter, so a key physically cannot read or mutate a project outside its scope, proven in `lib/__tests__/service-account.test.ts`.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/projects` | List projects within the caller's scope |
+| GET | `/api/v1/projects/[id]` | Project detail, 404 if out of scope (never 403, to avoid leaking existence) |
+| GET/POST | `/api/v1/projects/[id]/tasks` | List / create tasks within a scoped project |
+
+Admin-only key management (requires the `__admin` session):
+
+| Method | Path | Description |
+|---|---|---|
+| GET/POST | `/api/admin/service-accounts` | List accounts / mint a new scoped key (raw key returned once) |
+| DELETE | `/api/admin/service-accounts/[id]` | Revoke a key |
+
+This is a backend-enforced tenant-isolation *primitive*, not full multi-tenancy (no per-user accounts or UI tenant-switching); see `claude-task-monitor/docs/architecture.md` §4 for why that distinction is deliberate.
+
+---
+
+## Python Verifier Service
+
+`verifier-service/` is a standalone FastAPI microservice that independently classifies autonomous-task completion evidence (agent's self-report + already-captured command exit codes + changed files) into the same `NOT_VERIFIED` / `INDEPENDENTLY_VERIFIED` / `VERIFICATION_FAILED` vocabulary used by `lib/validation-gate.ts`. It does not execute commands or hold SSH credentials; that stays in the Node backend, which already owns that trust boundary. This service only judges evidence already collected. Service-to-service calls are HMAC-SHA256 signed with a 5-minute replay window.
+
+```bash
+cd verifier-service
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest                                        # 20 tests
+VERIFIER_SHARED_SECRET=demo-secret uvicorn app.main:app --port 8008 &
+
+cd ../claude-task-monitor
+VERIFIER_SERVICE_URL=http://localhost:8008 VERIFIER_SHARED_SECRET=demo-secret \
+  npx tsx scripts/demo-python-verifier.ts                # real cross-language round trip
+```
+
+An optional TypeScript client (`lib/verifier-client.ts`) exists and is tested, but is **not** called from the live task-completion pipeline; see `claude-task-monitor/docs/architecture.md` §5 for why wiring it in was left as a documented next step rather than forced in untested.
 
 ---
 
 ## Known Limitations
 
-- **Single-user password auth** — one shared `AUTH_SECRET`, no per-user accounts; do not expose to the network without it set
-- **Usage data is cached** — the task execution gate reads from the DB, not a live SSH check; refresh from the server detail page if the cached data is stale (a >10 min warning is shown)
+- **Single-user password auth**: one shared `AUTH_SECRET`, no per-user accounts; do not expose to the network without it set. The `/api/v1` scoped service-account surface is additive to this, not a replacement; see [External Integration API](#external-integration-api-apiv1).
+- **Usage data is cached**: the task execution gate reads from the DB, not a live SSH check; refresh from the server detail page if the cached data is stale (a >10 min warning is shown)
+- **Secret Broker is implemented but not wired in** (`lib/secret-broker.ts`): task secrets are still injected as env vars at dispatch time rather than fetched on-demand through the TTL-scoped broker. See `claude-task-monitor/docs/engineering-improvements.md`.
+- **Python verifier service is not load-bearing**: it exists, is tested end-to-end against a real process, but is not called from the live autonomous-task completion path. See `claude-task-monitor/docs/architecture.md` §5.
