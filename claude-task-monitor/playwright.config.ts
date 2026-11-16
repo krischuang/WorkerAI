@@ -32,6 +32,14 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 5_000 },
   fullyParallel: false,
+  // All spec files share one dev server and one Postgres database, and each
+  // file leans on IDs created by its own earlier tests (see per-file header
+  // comments). fullyParallel:false only serialises tests *within* a file —
+  // without workers:1, Playwright still runs separate files concurrently in
+  // different workers, which was silently corrupting shared queue/report
+  // assertions across files. Pin to one worker so the whole suite behaves
+  // like the single sequential run its tests were written to assume.
+  workers: 1,
   retries: 0,
   reporter: "list",
   globalSetup: "./e2e/global-setup.ts",
